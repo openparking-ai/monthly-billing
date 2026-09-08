@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openparking-monthly-billing"
+version = "0.1.0"
+description = "Open Parking AI monthly billing — what an account owes and when, and whether a vehicle is covered right now"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "AGPL-3.0-or-later"
+# Standard library only, and the engine will stay that way. Everything that
+# decides money here is arithmetic on values: an agreement, a period, a set of
+# exceptions. None of it needs a database, and an integrator embedding the
+# entitlement answer in a parking lane should not have to install one.
+#
+# The Postgres store is behind a port and its driver is the `store` extra. See
+# src/monthly_billing/store/__init__.py -- it is imported lazily, inside the
+# function that needs it, so importing this package on a machine with no driver
+# is not an error.
+#
+# NOTE for anyone tempted to add a decimal or money library: money in this
+# module is a Python `int` of minor units and nothing else. See money.py.
+dependencies = []
+
+[project.optional-dependencies]
+store = ["psycopg[binary]>=3.1"]
+dev = ["pytest>=8", "ruff>=0.8", "psycopg[binary]>=3.1"]
+
+[project.scripts]
+monthly-billing = "monthly_billing.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+markers = [
+  # A test that proves one of the guarantees docs/CONTRACT.md states. CI fails
+  # when one of these skips without its reason being declared, because a
+  # guarantee whose test can quietly not run is not a guarantee.
+  #
+  # The identifier is not decoration: tests/_guarantees.py holds the canonical
+  # registry, conftest requires every registered id to have RUN, and
+  # docs/CONTRACT.md is generated from the same registry. One source, three
+  # consumers -- so a guarantee cannot be dropped from any of them silently.
+  "guarantee(id): proves a registered guarantee; may not skip silently",
+  # Needs a Postgres to talk to. This is the ONE allowance in the suite, and it
+  # is named here rather than left as a bare skipif: the guarantee it carries
+  # (G12) is about the database catalogue, and there is no way to read a
+  # catalogue without a database. CI always provides one, so CI never skips it.
+  "needs_postgres: requires MONTHLY_BILLING_TEST_DSN to point at a database",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -1,23 +1,123 @@
 # Open Parking AI — monthly billing
 
-**Nothing is built here yet.** This branch carries the licence, the contributor
-agreement and the guards that every repository in this project starts with. The
-module arrives as a pull request.
+**What does this account owe, and when? Is this vehicle covered right now, and
+for how many cars?** Those two questions, and nothing else.
 
-When it does, it will answer two questions and nothing else:
+Standalone. It runs with no parking system around it, no platform, and — for
+everything that decides money — no database and no dependencies at all.
 
-1. **What does this account owe, and when?** — the agreement, the cycle, the
-   proration, the additional fees, the invoice.
-2. **Is this vehicle covered right now, and for how many cars?** — the single
-   fact a parking lane reads.
+```
+$ monthly-billing first-charge --garage garage.json --agreement agreement.json
+$ monthly-billing covered --garage garage.json --agreement agreement.json \
+      --vehicle ABC-123 --at 2026-04-01T09:00:00-06:00
+```
 
-The lane never learns anything about money. It asks whether a vehicle is
-covered and gets covered or not-covered with a plain reason. Counting how many
-of an account's cars are inside is not this module's job: the module states the
-entitlement, and the platform counts.
+## The lane never learns anything about money
 
-## Licence and contributions
+It asks whether a vehicle is covered and gets **covered** or **not covered** with
+a plain reason. No fee, no amount, no balance ever crosses that call.
 
-AGPL-3.0-or-later. See `LICENSE`, `CONTRIBUTING.md` and `CLA.md`.
+Counting how many of an account's cars are inside is **not this module's job**.
+The module states the ENTITLEMENT — *this account may have ten of its twenty
+registered vehicles inside at once* — and whatever runs the garage counts and
+decides the eleventh car is a transient. Counting would need live session state,
+and a module that needed live session state would have stopped being standalone.
+
+**Not covered never means refuse, and it never means refuse exit.** A stay that
+is not covered is an ordinary transient stay, priced like any other. No
+configuration of this module can trap a car in a garage: there is no exit call,
+no field on the answer that could deny one, and every not-covered reason carries
+the sentence saying so.
+
+## It refuses rather than assuming
+
+Money is an integer of minor units with an explicit currency — no float, no bool,
+no `Decimal`, refused at load at **every leaf** of an agreement, including the
+leaves this version does not read. A billing day, a timezone, a currency, a grace
+period and an identity rule are all REQUIRED of a garage, and none has a default:
+a guessed billing day charges somebody on the wrong date, and a guessed identity
+rule decides whether a monthly parker is recognised at all.
+
+Where an agreement does not determine an answer, the module says which field is
+missing. It never invents a figure. A figure somebody pays looks the same whether
+it was determined or guessed.
+
+## A calendar day is the garage's local day
+
+Proration is by the actual days of the period being prorated, computed in the
+garage's own timezone. A period carries both its days and its boundary
+**instants**, and the two answer different questions — which is why the daylight
+saving guarantee is written against the instants. Counting calendar days is
+DST-invariant, so a guarantee phrased as "31 days in a spring-forward month"
+passes under the very implementation it exists to catch.
+
+## Payment instruments
+
+⛔ **No card number, no bank account number, and no token that could substitute
+for one, in this module's database or its logs. Ever.**
+
+There is no processor here at all: M1 defines the interface and ships a stub that
+moves no money and says so. The mandate record carries the TERMS somebody agreed
+to, in the words they were shown, and nothing that could be used to charge them.
+
+Every row written to the store is scanned, column by column, derived from the
+record's own keys — so a column added next round is scanned the day it exists.
+The detector holds no example of what it looks for, and it does not exempt its
+own source. It found one in this repository's own documentation on its first run,
+and that is recorded in `sensitive.py` rather than quietly deleted.
+
+## Every guarantee has a control that has been proven to fire
+
+```
+python scripts/fail_controls.py --anchors   # every anchor is live, in a second
+python scripts/fail_controls.py             # break each guarantee, require RED
+```
+
+A test that has never failed is a decoration. The script breaks the thing each
+guarantee guards and requires its tests to go red; a guarantee with no control
+fails the run, and a target already failing before anything was planted is
+reported UNMEASURED rather than counted.
+
+The guarantees, the refusal codes, the options and the worked example are all
+generated into `docs/CONTRACT.md` from the registries and from running the module.
+No number in it is typed.
+
+## Install
+
+```
+pip install -e .              # the engine: no dependencies at all
+pip install -e '.[store]'     # plus the Postgres store
+pip install -e '.[dev]'       # plus pytest and ruff
+```
+
+Python 3.11 or newer.
+
+## The store
+
+Row-level security from migration 0001: every table carries a tenant column,
+`ENABLE`, `FORCE` and an isolation policy. The application connects as a role
+created `NOSUPERUSER NOBYPASSRLS`, and the isolation tests assert they are
+connected as a role that COULD be stopped before they assert that it was — a
+superuser bypasses row-level security unconditionally, and `FORCE` does not stop
+one.
+
+```
+psql "$DSN" -f migrations/0001_tenants_agreements_and_rls.sql
+MONTHLY_BILLING_APP_PASSWORD=... python scripts/ensure-app-role.py "$DSN"
+```
+
+## What is not here
+
+No payment processor. No enrolment or registry. No customer portal. No tax. No
+multi-garage account. No refund decisions — the garage owner makes those, and
+records each one as an exception with an amount, a name and a date on it.
+
+## Contributing
+
+Contributions are welcome under the CLA. See `CONTRIBUTING.md` and `CLA.md`.
+
+## Licence
+
+AGPL-3.0-or-later. See `LICENSE`.
 
 Built by 72 Knots Method by 72Knots.ai

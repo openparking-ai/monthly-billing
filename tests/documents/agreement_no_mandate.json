@@ -1,0 +1,10 @@
+{
+  "id": "ag-cheque-0002",
+  "version": 1,
+  "garage_id": "garage-downtown",
+  "payer_id": "payer-cheque",
+  "spots": 2,
+  "vehicles": ["JKL-012"],
+  "monthly_price_minor": 9000,
+  "start_day": "2026-03-10"
+}

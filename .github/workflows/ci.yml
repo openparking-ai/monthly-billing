@@ -1,0 +1,256 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[dev]'
+      - run: ruff check .
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+
+      - name: No real personal data in the repository
+        # The self-test first: before trusting the result, prove the check can
+        # fail. It plants a real-looking address and requires a rejection.
+        run: |
+          node .github/scripts/check-no-real-data.js --self-test
+          node .github/scripts/check-no-real-data.js
+
+      - name: No name from the maintainer's other software
+        # Same shape, and the same reason. This guard holds its forbidden words
+        # as digests rather than spelling them, so its self-test proves the
+        # MECHANISM -- see the script's header for what that does and does not
+        # establish. It also asserts the attribution line is PRESENT.
+        run: |
+          node .github/scripts/check-no-sibling-names.js --self-test
+          node .github/scripts/check-no-sibling-names.js
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The lowest version supported and a current one. Nothing here may
+        # quietly depend on a newer interpreter than an integrator's.
+        python-version: ['3.11', '3.12']
+
+    services:
+      postgres:
+        # The row-level security guarantee is about the database CATALOGUE, and
+        # there is no way to read a catalogue without a database. This service is
+        # what stops that guarantee's tests skipping -- see the allowance note on
+        # the suite step below.
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: monthly_billing_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: pip install -e '.[dev]'
+
+      - name: The ENGINE has no dependencies, and that is a published claim
+        # `pip install -e .` with no extras must leave nothing but the package
+        # itself. A dependency arriving here is a dependency in every
+        # integrator's build, and the README says the engine has none.
+        #
+        # The `store` extra is exempt BY NAME rather than by the check being
+        # loose: a driver belongs there, and nowhere else.
+        run: |
+          python - <<'PY'
+          import importlib.metadata as md
+          requires = md.distribution("openparking-monthly-billing").requires or []
+          runtime = [r for r in requires if "extra ==" not in r]
+          assert runtime == [], f"the runtime dependency list is no longer empty: {runtime}"
+          extras = sorted({
+              r.split("extra ==")[1].strip().strip('"\'')
+              for r in requires if "extra ==" in r
+          })
+          assert extras == ["dev", "store"], f"unexpected extras: {extras}"
+          print("no runtime dependencies, as published")
+          PY
+
+      - name: The suite
+        # NO ALLOWANCE IS NAMED, deliberately. MONTHLY_BILLING_ALLOW_UNRUN is the
+        # only way a registered guarantee may finish a run unproven, and it is
+        # empty here -- so a guarantee whose test did not run and pass fails this
+        # step. The database above is what makes that possible for the row-level
+        # security guarantee, which would otherwise skip.
+        env:
+          MONTHLY_BILLING_TEST_DSN: >-
+            host=localhost port=5432 dbname=monthly_billing_test
+            user=postgres password=postgres
+        run: pytest -q
+
+      - name: The database tests really ran, rather than skipping
+        # The step above fails on an unrun GUARANTEE. This is the narrower check
+        # on the same thing, and it exists because the two failure modes look
+        # identical from a green tick: a skipped Postgres test and a passing one
+        # both leave the suite green if the guarantee guard is ever loosened.
+        env:
+          MONTHLY_BILLING_TEST_DSN: >-
+            host=localhost port=5432 dbname=monthly_billing_test
+            user=postgres password=postgres
+        run: |
+          set -o pipefail
+          pytest -q -m needs_postgres | tee "$RUNNER_TEMP/db.txt"
+          grep -qE '[0-9]+ passed' "$RUNNER_TEMP/db.txt"
+          if grep -q 'skipped' "$RUNNER_TEMP/db.txt"; then
+            echo "a database test skipped, so the isolation guarantee is unproven:"
+            cat "$RUNNER_TEMP/db.txt"; exit 1
+          fi
+
+      - name: The command line works with nothing but this package
+        # The definition of done for a standalone module, as a check: someone
+        # with no parking system points this at two documents and gets an answer.
+        #
+        # BOTH exit codes are asserted, and the second is the one that matters. A
+        # check that only ever runs the happy path cannot tell a working refusal
+        # from one that reports nothing.
+        run: |
+          set -o pipefail
+
+          monthly-billing first-charge \
+            --garage tests/documents/garage_downtown.json \
+            --agreement tests/documents/agreement_acme.json
+
+          # A vehicle on the agreement: covered, exit 0.
+          monthly-billing covered \
+            --garage tests/documents/garage_downtown.json \
+            --agreement tests/documents/agreement_acme.json \
+            --vehicle "abc 123" --at 2026-04-01T09:00:00-06:00
+
+          # A vehicle on no agreement: NOT covered, exit 1, and it must say what
+          # not-covered means. This is the positive control for the line above --
+          # without it, an implementation that answered "covered" to everything
+          # would pass.
+          if monthly-billing covered \
+               --garage tests/documents/garage_downtown.json \
+               --agreement tests/documents/agreement_acme.json \
+               --vehicle "NOT-ENROLLED" --at 2026-04-01T09:00:00-06:00 \
+               | tee "$RUNNER_TEMP/not-covered.txt"; then
+            echo "a vehicle on no agreement came back covered"; exit 1
+          fi
+          grep -q "never means refuse exit" "$RUNNER_TEMP/not-covered.txt" || {
+            echo "it answered not-covered, but without the sentence that says what"
+            echo "that means at a barrier:"; cat "$RUNNER_TEMP/not-covered.txt"; exit 1; }
+
+          # An agreement with no mandate still LOADS and still invoices -- a payer
+          # who pays by cheque has no mandate. Only the CHARGE is refused.
+          monthly-billing check-agreement \
+            --agreement tests/documents/agreement_no_mandate.json \
+            | tee "$RUNNER_TEMP/no-mandate.txt"
+          grep -q "ABSENT" "$RUNNER_TEMP/no-mandate.txt"
+          monthly-billing first-charge \
+            --garage tests/documents/garage_downtown.json \
+            --agreement tests/documents/agreement_no_mandate.json
+
+          echo "the module answered, and refused, for the right reasons"
+
+  controls:
+    name: controls
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # The row-level security control plants into the migration, so it needs
+        # the same database the suite does. Without it that control would report
+        # UNMEASURED -- correctly, and the run would fail rather than pass quietly.
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: monthly_billing_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[dev]'
+
+      - name: Anchor pre-flight
+        # Each fail-control plants a string into a source file. Editing the line
+        # an anchor sits on silently retires the control that depends on it, and
+        # the suite then passes while the control measures nothing. This answers
+        # that whole failure mode in a second, before the controls themselves
+        # run -- and it is a separate step so a failure here is visible as one.
+        run: python scripts/fail_controls.py --anchors
+
+      - name: Every guarantee, proven able to FAIL
+        # Breaks the thing each guarantee guards and requires red. No count is
+        # written here on purpose: the script derives the set from
+        # tests/_guarantees.py and refuses to run if a guarantee has no control,
+        # so a number in this comment could only ever go stale.
+        env:
+          MONTHLY_BILLING_TEST_DSN: >-
+            host=localhost port=5432 dbname=monthly_billing_test
+            user=postgres password=postgres
+        run: python scripts/fail_controls.py
+
+      - name: The working tree is unchanged after every defect was planted
+        # Every plant restores in a `finally` and verifies the bytes. This is the
+        # independent check on that: a control that left a defect behind would
+        # otherwise be discovered by whatever ran next.
+        run: git diff --exit-code
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[dev]'
+
+      - name: Every published figure AND SENTENCE is still the generated one
+        # docs/CONTRACT.md's marked blocks are DERIVED -- the guarantees from the
+        # test registry, the refusal codes from findings.py, the options from the
+        # enums that implement them, and the worked example by running the module
+        # and printing what it returned. A number or a sentence edited by hand
+        # turns this red.
+        run: |
+          python scripts/generate_contract.py --check
+          git diff --exit-code docs/CONTRACT.md
+
+      - name: Generation is not verification
+        # The step above proves the document matches the generator. It cannot
+        # prove the generator DERIVES anything -- a template whose prose is fixed
+        # everywhere except the holes agrees with itself perfectly. These tests
+        # plant values that contradict the prose and require the prose to change.
+        run: pytest tests/test_contract_is_generated.py -q
