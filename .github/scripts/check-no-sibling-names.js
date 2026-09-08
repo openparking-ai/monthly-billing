@@ -1,0 +1,238 @@
+#!/usr/bin/env node
+/**
+ * No name from the maintainer's other, private software may appear in this
+ * repository. Not in code, a comment, a document, a test, a fixture, a commit
+ * message or a pull request body.
+ *
+ * Usage:
+ *   check-no-sibling-names.js              scan every tracked file
+ *   check-no-sibling-names.js --self-test  prove the scan can fail
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE FORBIDDEN WORDS ARE NOT WRITTEN DOWN HERE
+ * ---------------------------------------------------------------------------
+ * A guard that spells out the words it forbids breaks the rule it enforces: the
+ * words would then appear in this public repository, in this file. So they are
+ * held as sha256 of the lowercased word, exactly as check-no-real-data.js holds
+ * the addresses it protects. The report prints the digest and never the word.
+ *
+ * WHAT THE SELF-TEST PROVES, AND WHAT IT DOES NOT. It proves the MECHANISM:
+ * that a token whose digest is on the list is found, in a real file, and
+ * rejected. It cannot prove that any particular digest is the digest of the
+ * right word -- nothing inside this repository can, because that would require
+ * the word. Those digests were derived from the private source and their count
+ * is recorded there. Stated rather than glossed, because a control that proves
+ * less than it appears to is the failure this project catalogues.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY TOKENS, NOT A REGULAR EXPRESSION
+ * ---------------------------------------------------------------------------
+ * A substring search is wrong in both directions and both were measured on the
+ * sibling repositories before this was written:
+ *
+ *   - FALSE POSITIVES. One forbidden word is a substring of an ordinary English
+ *     word this project uses constantly. A plain search fires on four files
+ *     across two sibling repositories, every hit innocent.
+ *   - AND A WORD-BOUNDARY REGEX IS NOT THE FIX. BSD `grep -E` -- which is what
+ *     `grep` is on the maintainer's machine -- silently matches NOTHING when
+ *     three or more `\b`-anchored alternatives are combined. An absence check
+ *     built on it reports clean because it cannot match, which is this
+ *     project's one disease: evidence that cannot produce a negative result.
+ *
+ * So the text is TOKENISED instead, and each token is digested whole. Runs of
+ * letters are the tokens; digits, punctuation and case transitions all end one,
+ * so `oneWordTwo`, `one_word_two` and `one-word-2` all yield the same three.
+ * There is no regular expression engine in the decision and nothing to get
+ * wrong per-platform.
+ */
+
+import { execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+
+/**
+ * sha256 of each forbidden word, lowercased, with no surrounding whitespace.
+ * Derived from the private source that states the rule; see the header for what
+ * the self-test does and does not establish about them.
+ */
+const FORBIDDEN_DIGESTS = new Map([
+  ['d3e394e67f9131b18092127e96f33a3382d564e6a1659be338fd5f17dfd13594', 'a sibling product name'],
+  ['a1b55013d3ee4966ad46cf62d662dad1aacc2d10d49323b74ec635d578dec158', 'a sibling product name'],
+  ['8bca6dada231e0fd80bf5ff9ff16aa79de1fb8e7b11cd282c0ea251d78376e9d', 'a sibling product name'],
+  ['9261ceef0b969e70ac20f1510f07a1e0d8db05f20c75161a2ef43b4eba27a7aa', 'a sibling product name'],
+  ['5ecd2797e0882c8cfdc5fb97c02d66e15a465de46bf5b01fb5e4c3691571108e', 'a sibling hostname'],
+  ['b1a0d3ef78d71ce5530307f5784a737ef3a8dcf6f36d233f30196ebf955efeae', 'a sibling hostname'],
+]);
+
+/** The one sanctioned mention of the maintainer, which is an instruction. */
+const ATTRIBUTION = 'Built by 72 Knots Method by 72Knots.ai';
+
+//: This file holds digests, never words, so it scans itself like any other.
+//: LICENSE and a lockfile stay out: neither is ours to edit.
+const SKIP = /^(LICENSE|package-lock\.json)$/;
+
+const digestOf = (value) => createHash('sha256').update(value.trim().toLowerCase()).digest('hex');
+
+/**
+ * Every run of letters in `text`, lowercased, with a case transition ending a
+ * token as surely as a space does.
+ */
+export function tokens(text) {
+  const out = [];
+  let current = '';
+  let previousWasLower = false;
+
+  for (const ch of text) {
+    const isLetter = /\p{L}/u.test(ch);
+    if (!isLetter) {
+      if (current) out.push(current.toLowerCase());
+      current = '';
+      previousWasLower = false;
+      continue;
+    }
+    const isUpper = ch === ch.toUpperCase() && ch !== ch.toLowerCase();
+    if (isUpper && previousWasLower && current) {
+      out.push(current.toLowerCase());
+      current = '';
+    }
+    current += ch;
+    previousWasLower = !isUpper;
+  }
+  if (current) out.push(current.toLowerCase());
+  return out;
+}
+
+function trackedFiles() {
+  return execFileSync('git', ['ls-files'], { encoding: 'utf8' })
+    .split('\n')
+    .filter(Boolean)
+    .filter((f) => !SKIP.test(f));
+}
+
+/** Every commit message in `range`, so a name cannot arrive through git metadata. */
+function commitMessages(range) {
+  const args = ['log', '--format=%H%x1f%B%x1e'];
+  if (range) args.push(range);
+
+  let out;
+  try {
+    out = execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (error) {
+    //: An unborn branch has no messages to scan, and that is the only failure
+    //: swallowed here. Everything else is rethrown, LOUDLY: a `git log` that
+    //: fails for any other reason and is treated as "no commits" is a check
+    //: that cannot produce a negative result, which is the thing this whole
+    //: project exists to keep out.
+    const stderr = String(error.stderr ?? '');
+    if (stderr.includes('does not have any commits yet')) return [];
+    throw error;
+  }
+
+  return out
+    .split('\x1e')
+    .map((chunk) => chunk.trim())
+    .filter(Boolean)
+    .map((chunk) => {
+      const [sha, body] = chunk.split('\x1f');
+      return { where: `commit ${sha.slice(0, 12)}`, text: body ?? '' };
+    });
+}
+
+/** Report every forbidden token in `text`, by digest. Never prints the token. */
+function scan(where, text, digests) {
+  const failures = [];
+  const seen = new Set();
+  for (const token of tokens(text)) {
+    const digest = digestOf(token);
+    if (!digests.has(digest) || seen.has(digest)) continue;
+    seen.add(digest);
+    failures.push(`${where}: ${digests.get(digest)} (sha256 ${digest.slice(0, 16)}...)`);
+  }
+  return failures;
+}
+
+function selfTest() {
+  //: A word this repository will never contain, so the control cannot pass by
+  //: accident, and no forbidden word is needed to prove the mechanism fires.
+  const control = 'zzqxcontrolword';
+  const digests = new Map([[digestOf(control), 'the self-test control word']]);
+  const path = `.self-test-${process.pid}.tmp`;
+
+  let planted;
+  let clean;
+  let camel;
+  let innocent;
+  try {
+    writeFileSync(path, `a line that mentions ${control} once\n`);
+    planted = scan(path, readFileSync(path, 'utf8'), digests);
+
+    //: The case-transition split is load-bearing: a name hidden inside an
+    //: identifier must be found, or the guard is one rename away from blind.
+    writeFileSync(path, `const someName = { prefix${control[0].toUpperCase()}${control.slice(1)}Suffix: 1 };\n`);
+    camel = scan(path, readFileSync(path, 'utf8'), digests);
+
+    writeFileSync(path, 'a line that mentions nothing of the sort\n');
+    clean = scan(path, readFileSync(path, 'utf8'), digests);
+
+    //: And the negative control for the whole tokenising design: a longer word
+    //: that CONTAINS the forbidden one must pass. A substring search fails here.
+    writeFileSync(path, `a line containing xx${control}yy as one word\n`);
+    innocent = scan(path, readFileSync(path, 'utf8'), digests);
+  } finally {
+    try { unlinkSync(path); } catch { /* already gone */ }
+  }
+
+  const ok =
+    planted.length === 1 && camel.length === 1 && clean.length === 0 && innocent.length === 0;
+  if (!ok) {
+    console.error('self-test FAILED — this guard cannot be trusted.');
+    console.error(`  planted:  ${planted.length} (want 1)`);
+    console.error(`  camel:    ${camel.length} (want 1)`);
+    console.error(`  clean:    ${clean.length} (want 0)`);
+    console.error(`  innocent: ${innocent.length} (want 0)`);
+    return false;
+  }
+  console.log('self-test OK — a planted name fails, inside an identifier too;');
+  console.log('               a clean line passes, and so does a longer word containing it.');
+  return true;
+}
+
+function main() {
+  if (process.argv[2] === '--self-test') process.exit(selfTest() ? 0 : 1);
+
+  const range = process.argv[2];
+  const failures = [];
+
+  for (const file of trackedFiles()) {
+    let text;
+    try {
+      text = readFileSync(file, 'utf8');
+    } catch {
+      continue; // not text; nothing to read a name out of
+    }
+    failures.push(...scan(file, text, FORBIDDEN_DIGESTS));
+  }
+
+  for (const { where, text } of commitMessages(range)) {
+    failures.push(...scan(where, text, FORBIDDEN_DIGESTS));
+  }
+
+  //: The attribution is an instruction and is checked for PRESENCE, not
+  //: absence -- the one sanctioned mention, spelled exactly, no period between
+  //: the two halves. It is asserted here rather than in a document so that
+  //: deleting it from README.md turns a check red instead of going unnoticed.
+  const readme = readFileSync('README.md', 'utf8');
+  if (!readme.includes(ATTRIBUTION)) {
+    failures.push(`README.md: the attribution line is missing or reworded: "${ATTRIBUTION}"`);
+  }
+
+  if (failures.length) {
+    console.error('A name from the private estate appears in this repository:\n');
+    for (const line of failures) console.error(`  ${line}`);
+    console.error('\nNothing outside this project may be named here. See CONTRIBUTING.md.');
+    process.exit(1);
+  }
+  console.log(`clean — ${trackedFiles().length} tracked files and the commit range carry no such name.`);
+}
+
+main();
