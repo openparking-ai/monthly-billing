@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import generate_contract as gen  # noqa: E402
 
 
+@pytest.mark.guarantee("G15")
 def test_the_document_on_disk_is_the_generated_one():
     """What `--check` runs in CI, asserted here too so a local run catches it."""
     current = gen.DOC.read_text()
@@ -38,6 +39,7 @@ def test_the_document_on_disk_is_the_generated_one():
     )
 
 
+@pytest.mark.guarantee("G15")
 def test_every_block_the_document_declares_is_actually_built():
     """A marker with no builder would render as a permanently empty block, and an
     empty block reads as 'nothing to say' rather than as a broken generator."""
@@ -47,6 +49,7 @@ def test_every_block_the_document_declares_is_actually_built():
         assert gen.END.format(name=name) in text
 
 
+@pytest.mark.guarantee("G15")
 def test_a_new_guarantee_appears_in_the_document():
     """PLANT: add a guarantee to the registry; the table must grow.
 
@@ -64,6 +67,7 @@ def test_a_new_guarantee_appears_in_the_document():
     assert "A planted guarantee" in after
 
 
+@pytest.mark.guarantee("G15")
 def test_the_guarantee_count_is_derived_and_not_typed():
     """PLANT: the sentence naming how many guarantees there are must move with
     the registry. A typed count in the file a reader opens first outlives every
@@ -78,6 +82,7 @@ def test_the_guarantee_count_is_derived_and_not_typed():
     assert f"That is {len(gen.GUARANTEES) + 1} guarantees" in after
 
 
+@pytest.mark.guarantee("G15")
 def test_a_new_refusal_code_appears_with_its_sentence():
     """PLANT: a refusal added to the registry must be published."""
     gen.REFUSALS["REFUSAL_PLANTED"] = "A planted refusal sentence."
@@ -89,6 +94,7 @@ def test_a_new_refusal_code_appears_with_its_sentence():
     assert "A planted refusal sentence." in rendered
 
 
+@pytest.mark.guarantee("G15")
 def test_a_new_not_covered_reason_appears():
     gen.NOT_COVERED_REASONS["PLANTED_REASON"] = "A planted reason a lane would read."
     try:
@@ -98,6 +104,7 @@ def test_a_new_not_covered_reason_appears():
     assert "PLANTED_REASON" in rendered
 
 
+@pytest.mark.guarantee("G15")
 def test_the_answer_field_table_follows_the_class():
     """PLANT: a field added to the answer must appear, and the count must move.
 
@@ -121,6 +128,7 @@ def test_the_answer_field_table_follows_the_class():
     assert f"{len(original) + 1} fields" in after
 
 
+@pytest.mark.guarantee("G15")
 def test_the_worked_example_is_produced_by_running_the_module():
     """The figures in the example are the module's own output, not a transcript.
 
@@ -143,6 +151,7 @@ def test_the_worked_example_is_produced_by_running_the_module():
         assert format_minor(line.amount_minor, garage.currency) in block
 
 
+@pytest.mark.guarantee("G15")
 def test_the_options_block_follows_the_enums():
     """PLANT-free derivation check: every member of every enum is listed.
 
@@ -160,6 +169,7 @@ def test_the_options_block_follows_the_enums():
 
 
 @pytest.mark.parametrize("phrase", ["never means refuse exit", "no default"])
+@pytest.mark.guarantee("G15")
 def test_the_sentences_the_module_lives_by_are_in_the_document(phrase):
     """Not a derivation check -- a presence check on two sentences that must not
     quietly leave the published contract. Named as such rather than dressed up as

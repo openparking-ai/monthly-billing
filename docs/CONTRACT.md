@@ -52,13 +52,16 @@ Stated first, so nothing here is later read as a promise:
 | **G6** | The entitlement answer carries NO MONETARY FIELD. Not a fee, not an amount, not a balance -- the field set is derived from the answer class itself, so a monetary field added tomorrow is caught the day it exists. |
 | **G7** | An unpaid invoice past the garage's grace period returns not-covered, and NO CONFIGURATION OF THIS MODULE CAN REFUSE AN EXIT. There is no exit call, no field on the answer that could deny one, and every not-covered reason carries the sentence saying the stay is priced as an ordinary transient. |
 | **G8** | An agreement with no mandate record refuses to be CHARGED, by name, before any processor is called. Its invoice may still be issued -- a payer who pays by cheque has no mandate and is still billed. |
-| **G9** | No value shaped like a payment card or a bank account survives into the store or into a log line. The guard scans every column of every row from the record's own keys, and it holds no example of what it looks for. |
+| **G9** | No value shaped like a payment card or a bank account survives into the store or into a log line, and NO TRACKED FILE IN THE REPOSITORY CONTAINS ONE. The guard scans every column of every row from the record's own keys; the repository sweep derives its file set from git and exempts nothing, tests and fixtures included. |
 | **G10** | An owner's exception records who made it and when, and a NOTE CAN NEVER CHANGE AN AMOUNT. The note reaches no arithmetic anywhere in the module; the amount is a separate, typed field, and a monetary exception without one is refused by name. |
 | **G11** | The vehicle list is INDEPENDENT of the spots bought. Twenty vehicles against ten spots is a legal agreement, and the module states the entitlement rather than counting what is inside. |
 | **G12** | Every table this module's migrations create carries a tenant column, ENABLE and FORCE row-level security and an isolation policy -- read from the database catalogue, never from a list of table names. |
 | **G13** | A pause covering days in a period that has already been paid is REFUSED by name rather than credited or ignored. This module does not decide refunds; the owner records an exception with an amount. |
+| **G14** | Every fixture carries its own control asserting it holds the property it claims to represent, and those controls run as tests. A DST fixture whose zone does not shift, or two identity rules that agree, read as coverage while sampling one point on the axis that decides. |
+| **G15** | docs/CONTRACT.md is GENERATED from this registry and from the enums and refusal codes that implement it, and its prose is derived rather than fixed: a value that contradicts a published sentence changes the sentence, because generation is not verification. |
+| **G16** | Every test module contributes at least one registered guarantee, derived from the filesystem and read from the AST -- so a module cannot be added, skipped or deleted without a guard noticing. A module that PLANTS a defect may not be excused at all. |
 
-That is 13 guarantees. Every one of them has a fail control that has been proven to fire, and the count above is derived from the registry rather than typed here.
+That is 16 guarantees. Every one of them has a fail control that has been proven to fire, and the count above is derived from the registry rather than typed here.
 <!-- END:guarantees -->
 
 ## The entitlement answer

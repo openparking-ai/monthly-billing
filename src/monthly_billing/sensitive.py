@@ -56,6 +56,25 @@ for the check to look here at all, and the specimen had to be built rather than
 written for the tests to be clean while the source was not. Either concession --
 skipping our own file, or keeping "just one example" -- and this would have
 shipped.
+
+AND THEN A SECOND ONE GOT IN, IN THE PLACE THE CHECK COULD NOT LOOK
+---------------------------------------------------------------------------
+The check above ran over ONE path: this file. A review planted a card-shaped
+value into a different tracked file and watched the whole suite, both repository
+scanners and the anchor pre-flight report green -- and then found that a
+sixteen-digit Luhn-valid specimen had been sitting in the G9 test module's own
+docstring the entire time, illustrating the grouping rule, in the one directory
+the check was structurally unable to see.
+
+So the guarantee is no longer measured over a path. It is measured over EVERY
+FILE GIT TRACKS, with the file set derived from `git ls-files` and no exemption
+for `tests/` -- because "the tests are different" is the self-exemption argument
+again, one directory along, and a fixture is in the repository just as
+permanently as a source file is.
+
+The lesson is not "we missed one". It is that an absence claim is only ever as
+wide as the set it was measured over, and this one published a repository-wide
+sentence while reading a single file.
 """
 
 from __future__ import annotations

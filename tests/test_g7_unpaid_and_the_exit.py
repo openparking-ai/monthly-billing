@@ -21,15 +21,22 @@ exit; the third says nothing READING the module can conclude it should.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 
 import pytest
 
 from fixtures import month_end_garage, simple_agreement, sometime_on
 from monthly_billing import entitlement as entitlement_module
+from monthly_billing.agreement import AccessHours, Pause, Status
 from monthly_billing.entitlement import Answer, is_covered
 from monthly_billing.findings import (
+    NOT_COVERED_BLOCKED_BY_OWNER,
+    NOT_COVERED_CANCELLED,
     NOT_COVERED_MEANS,
+    NOT_COVERED_NO_AGREEMENT,
+    NOT_COVERED_NOT_STARTED,
+    NOT_COVERED_OUTSIDE_ACCESS_HOURS,
+    NOT_COVERED_PAUSED,
     NOT_COVERED_REASONS,
     NOT_COVERED_UNPAID_PAST_GRACE,
 )
@@ -128,27 +135,114 @@ def test_the_module_exports_nothing_that_decides_an_exit():
     assert offending == [], f"these callables name an exit decision: {offending}"
 
 
+def _answer_for(code: str):
+    """A REAL `is_covered` call that comes back with `code`. One per reason.
+
+    **THIS TABLE IS WHY THE TEST BELOW MEANS ANYTHING.** The version this
+    replaced was parametrised over all seven codes and rendered exactly ONE of
+    them -- `NO_AGREEMENT`, from `agreements=()` -- so the parameter never
+    reached the module. A review dropped the sentence from the `PAUSED` path and
+    ruff, 129 tests, every fail-control and the contract check all stayed green.
+    A control that plants the fault in one code and renders another is not a
+    control.
+
+    Each entry drives the module down a DIFFERENT branch. Missing a code here is
+    caught by `test_every_registered_reason_has_a_scenario`, which compares this
+    table against the registry rather than against a list.
+    """
+    garage = month_end_garage(grace_days=5)
+    today = date(2026, 4, 20)
+    at = sometime_on(today, garage.timezone)
+    live = dict(garage=garage, vehicle_identity="CAR000", at=at)
+
+    if code == NOT_COVERED_NO_AGREEMENT:
+        return is_covered(garage=garage, agreements=(), vehicle_identity="ANY", at=at)
+    if code == NOT_COVERED_NOT_STARTED:
+        return is_covered(agreements=(simple_agreement(start_day=date(2026, 6, 1)),), **live)
+    if code == NOT_COVERED_CANCELLED:
+        return is_covered(
+            agreements=(
+                simple_agreement(
+                    start_day=date(2026, 3, 1),
+                    status=Status.CANCELLED,
+                    cancelled_effective_day=date(2026, 4, 1),
+                ),
+            ),
+            **live,
+        )
+    if code == NOT_COVERED_PAUSED:
+        return is_covered(
+            agreements=(
+                simple_agreement(
+                    start_day=date(2026, 3, 1),
+                    pauses=(Pause(from_day=date(2026, 4, 1), until_day=date(2026, 5, 1)),),
+                ),
+            ),
+            **live,
+        )
+    if code == NOT_COVERED_BLOCKED_BY_OWNER:
+        return is_covered(
+            agreements=(simple_agreement(start_day=date(2026, 3, 1)),),
+            blocked_by_owner=True,
+            **live,
+        )
+    if code == NOT_COVERED_UNPAID_PAST_GRACE:
+        return is_covered(
+            agreements=(simple_agreement(start_day=date(2026, 3, 1)),),
+            has_unpaid_invoice_since=unpaid_since(garage, 6, today),
+            **live,
+        )
+    if code == NOT_COVERED_OUTSIDE_ACCESS_HOURS:
+        early = sometime_on(today, garage.timezone).replace(hour=4, minute=0)
+        return is_covered(
+            garage=garage,
+            agreements=(
+                simple_agreement(
+                    start_day=date(2026, 3, 1),
+                    access_hours=AccessHours(entry_from=time(6, 0), exit_by=time(20, 0)),
+                ),
+            ),
+            vehicle_identity="CAR000",
+            at=early,
+        )
+    raise AssertionError(
+        f"{code!r} is in the registry and has no scenario here, so nothing renders it"
+    )
+
+
+@pytest.mark.guarantee("G7")
+def test_every_registered_reason_has_a_scenario():
+    """The control on the table: it is compared against the REGISTRY, not a list.
+
+    A reason added to `findings.py` with no scenario here fails on the day it is
+    added, rather than quietly not being rendered by the test below.
+    """
+    for code in sorted(NOT_COVERED_REASONS):
+        answer = _answer_for(code)
+        assert answer.covered is False, f"the scenario for {code} came back covered"
+        assert answer.reason_code == code, (
+            f"the scenario for {code} actually produced {answer.reason_code} -- so "
+            f"{code} is not being rendered by anything"
+        )
+
+
 @pytest.mark.guarantee("G7")
 @pytest.mark.parametrize("code", sorted(NOT_COVERED_REASONS))
 def test_every_not_covered_reason_says_exit_is_never_refused(code):
-    """THE ONE THAT MATTERS, and it is derived from the registry.
+    """THE ONE THAT MATTERS. Every reason RENDERED SEPARATELY and asserted.
 
-    A reason added without the sentence fails here on the day it is added. The
-    parametrisation walks `NOT_COVERED_REASONS` itself, so it covers whatever the
-    registry holds rather than whatever this file remembered.
+    `code` reaches the module: `_answer_for` drives a different branch for each
+    one, and `test_every_registered_reason_has_a_scenario` proves the branch
+    taken is the branch named. So dropping the sentence from any single path
+    fails here, which is what the previous version could not do.
     """
-    garage = month_end_garage()
-    answer = is_covered(
-        garage=garage,
-        agreements=(),
-        vehicle_identity="ANY",
-        at=sometime_on(date(2026, 4, 1), garage.timezone),
+    answer = _answer_for(code)
+    assert answer.reason_code == code
+    assert NOT_COVERED_MEANS in answer.reason, (
+        f"the {code} answer reaches a barrier without the sentence saying the stay "
+        f"is priced as an ordinary transient: {answer.reason!r}"
     )
-    # Every reason is rendered through the same helper, so proving it for one
-    # rendered answer plus the registry covers all of them.
-    assert NOT_COVERED_MEANS in answer.reason
-    assert NOT_COVERED_REASONS[code]  # the registry entry exists and is non-empty
-    assert "never means refuse exit" in NOT_COVERED_MEANS
+    assert "never means refuse exit" in answer.reason
 
 
 @pytest.mark.guarantee("G7")

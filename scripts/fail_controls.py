@@ -30,6 +30,16 @@ UNMEASURED rather than counting a pass -- because a suite that cannot run cannot
 tell you whether a control fired. Check the runner (is the package installed? is
 a database reachable for the ones that need one?) before reading anything into
 the subject.
+
+**A TARGET WHOSE TESTS ALL SKIP IS REPORTED "NOT A CONTROL", NOT UNMEASURED, AND
+THAT IS THIS SCRIPT'S OWN LIMIT RATHER THAN A JUDGEMENT.** `_NOTHING_RAN` matches
+"0 passed", "no tests ran" and "collected 0 items"; an all-skipped target prints
+none of those -- it prints "8 skipped" -- so the run proceeds, the target stays
+green with its subject broken, and the verdict is DEAD. That is what happens to
+G12 on a machine with no database. The exit status is 1 either way, so nothing
+goes falsely green; the word is simply the wrong one, and it is recorded here
+rather than in a comment that promises otherwise. Read a DEAD verdict on a
+database-backed control as "check whether you gave it a database" first.
 """
 
 from __future__ import annotations
@@ -44,7 +54,24 @@ sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT / "src"))
 
 from _guarantees import GUARANTEES  # noqa: E402
+from monthly_billing.sensitive import luhn_ok  # noqa: E402
 from plant import planted, resolve  # noqa: E402
+
+
+def card_shaped() -> str:
+    """A card-SHAPED string, BUILT from the checksum. Never written down.
+
+    The repository-wide sweep this builds a plant for asserts that no
+    card-shaped value is in ANY tracked file -- and this script is a tracked
+    file. A literal here would be a specimen planted permanently in the very
+    place the guarantee forbids, by the control that proves the guarantee. So it
+    is constructed, exactly as tests/test_g9_no_instrument_survives.py does it.
+    """
+    body = "4" + "1" * 14
+    for check in "0123456789":
+        if luhn_ok(body + check):
+            return body + check
+    raise AssertionError("no check digit satisfies Luhn, which is arithmetically impossible")
 
 
 def source(*lines: str) -> str:
@@ -93,6 +120,34 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "at the leaves no other check types, under four published sentences "
         "saying otherwise. The first attempt at this control planted a no-op and "
         "reported GREEN, which is why it plants where the claim can actually break",
+    ),
+    "G14": (
+        "tests/test_fixture_axes.py",
+        "tests/fixtures.py",
+        'SHIFTING_ZONE = "America/Denver"',
+        'SHIFTING_ZONE = "America/Phoenix"  # PLANTED: the DST fixture stops shifting',
+        "the zone the DST guarantee is measured against no longer observes "
+        "daylight saving, so every hour figure G2 takes against it is 24 and the "
+        "spring-forward assertions are measuring a fixture with nothing in it -- "
+        "a fixture is part of the measurement",
+    ),
+    "G15": (
+        "tests/test_contract_is_generated.py",
+        "scripts/generate_contract.py",
+        '        f"That is {len(GUARANTEES)} guarantees. Every one of them has a fail control "',
+        '        f"That is 13 guarantees. Every one of them has a fail control "  # PLANTED',
+        "the published guarantee COUNT stops being derived and becomes a typed "
+        "number, which is the shape that goes stale silently: the document keeps "
+        "agreeing with itself while the registry moves underneath it",
+    ),
+    "G16": (
+        "tests/test_guarantee_guard.py",
+        "tests/test_guarantee_guard.py",
+        "        elif name not in UNGUARANTEED_MODULES:",
+        "        elif False:  # PLANTED: a module with no mark is accepted",
+        "a test module carrying no guarantee mark stops being reported, which is "
+        "the hole that hid 16 tests here and 21 in a sibling repository -- skip "
+        "or delete such a module and every gate stays green",
     ),
     "G2/proration": (
         "tests/test_g2_proration_and_dst.py",
@@ -198,6 +253,25 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "derives its field set from the class, so this is caught on the day it is "
         "added rather than on the day somebody reads the class",
     ),
+    "G7/per-reason": (
+        "tests/test_g7_unpaid_and_the_exit.py",
+        "entitlement.py",
+        "        return _not_covered(NOT_COVERED_PAUSED, **cited)",
+        source(
+            "        return Answer(  # PLANTED: this ONE path loses the sentence",
+            "            covered=False,",
+            "            reason=NOT_COVERED_REASONS[NOT_COVERED_PAUSED],",
+            "            reason_code=NOT_COVERED_PAUSED,",
+            "            **cited,",
+            "        )",
+        ),
+        "ONE not-covered path -- PAUSED, not all seven -- stops carrying the "
+        "transient sentence. This is the control the previous G7 test could not "
+        "produce: it was parametrised over all seven codes and rendered only "
+        "NO_AGREEMENT, so a fault planted in a single path left ruff, 129 tests, "
+        "every control and the contract check green. A control that breaks every "
+        "code at once passes under exactly that defect",
+    ),
     "G7": (
         "tests/test_g7_unpaid_and_the_exit.py",
         "findings.py",
@@ -244,6 +318,19 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "separators stop being stripped, so the same number written in groups of "
         "four sails through -- one space away from blind, in the form these values "
         "are most often pasted",
+    ),
+    "G9/repository": (
+        "tests/test_g9_no_instrument_survives.py",
+        "money.py",
+        "def format_minor(minor: int, currency: str) -> str:",
+        source(
+            f"# a support note somebody pasted: {card_shaped()}",
+            "def format_minor(minor: int, currency: str) -> str:",
+        ),
+        "THE ONE THE LAST SPECIMEN GOT PAST: a card-shaped value is planted in a "
+        "tracked file that is NOT the detector's own source. The old check read "
+        "one path and could not see it -- the suite, both node scanners and the "
+        "anchor pre-flight all stayed green with a real specimen in the tree",
     ),
     "G9/store": (
         "tests/test_g9_no_instrument_survives.py",

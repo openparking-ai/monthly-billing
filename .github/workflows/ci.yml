@@ -181,8 +181,12 @@ jobs:
     services:
       postgres:
         # The row-level security control plants into the migration, so it needs
-        # the same database the suite does. Without it that control would report
-        # UNMEASURED -- correctly, and the run would fail rather than pass quietly.
+        # the same database the suite does. Without it G12's tests all SKIP, the
+        # control cannot fire, and fail_controls.py reports it DEAD and exits 1 --
+        # so the run fails rather than passing quietly. "DEAD" is the script's
+        # word for a target that stayed green with its subject broken; an
+        # all-skipped target is indistinguishable from that at the point it is
+        # judged. See the note in scripts/fail_controls.py.
         image: postgres:16
         env:
           POSTGRES_PASSWORD: postgres

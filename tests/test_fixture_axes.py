@@ -18,6 +18,7 @@ from fixtures import (
 )
 
 
+@pytest.mark.guarantee("G14")
 @pytest.mark.parametrize(
     "control",
     [

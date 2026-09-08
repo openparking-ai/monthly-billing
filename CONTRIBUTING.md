@@ -32,6 +32,14 @@ to know before you spend time on a change.
 
 ## What gets rejected on sight
 
+**Real personal data, anywhere in the repository.** Fixtures, tests, documents
+and examples use invented values — `example.com` addresses, made-up names, plates
+that belong to nobody. This applies to git metadata too: commit with a masked
+address, not a personal one. The running system stores real vehicle identity;
+that is the product, it is governed by retention, and it is a different thing
+from what is committed here. Two CI guards enforce it and both ship with a
+self-test that proves they can fail.
+
 **Anything that handles a raw card number.** Payments are processor-tokenized,
 end to end. If a primary account number can reach a variable in this codebase,
 the design is wrong, not the code.

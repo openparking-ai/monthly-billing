@@ -15,7 +15,9 @@ works and nothing about whether it is connected.
 
 from __future__ import annotations
 
+import subprocess
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -69,9 +71,15 @@ def test_the_plant_builder_really_builds_something_the_detector_would_catch():
 @pytest.mark.guarantee("G9")
 @pytest.mark.parametrize("separator", ["", " ", "-"])
 def test_separators_do_not_hide_it(separator):
-    """"4111 1111 1111 1111" is the same number. A detector that only reads
-    unbroken runs is one space away from blind, and a space is the form these
-    values are most often pasted in."""
+    """The same sixteen digits written in groups of four are the same number.
+
+    **THE GROUPED RENDERING IS BUILT BELOW, NOT SHOWN HERE.** This docstring
+    used to carry one to illustrate the point -- sixteen digits, Luhn-valid --
+    which put in the tests exactly the class of value this module exists to keep
+    out of the store, in the one file the repository-wide sweep could not see.
+    A detector that only reads unbroken runs is one space away from blind, and
+    grouped is the form these values are most often pasted in.
+    """
     card = build_card_shaped()
     spaced = separator.join(card[i : i + 4] for i in range(0, 16, 4))
     assert find_instrument_like(spaced) == "a payment card number"
@@ -170,13 +178,82 @@ def test_the_store_scans_every_column_from_the_record_itself():
     assert len(cursor.statements) == 1, "the row was written before it was scanned"
 
 
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def tracked_files() -> tuple[Path, ...]:
+    """Every file git tracks, DERIVED -- never a list written down here.
+
+    A hand-listed set is the defect this sweep exists to close: it cannot notice
+    a file that arrives tomorrow, which is exactly where the last specimen sat.
+
+    A failure to read the file list is raised, never swallowed. A sweep that
+    quietly scanned nothing would report the repository clean for the one reason
+    that proves nothing at all.
+    """
+    listing = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return tuple(ROOT / name for name in listing.split("\0") if name)
+
+
+@pytest.mark.guarantee("G9")
+def test_the_sweep_is_pointed_at_a_real_file_set():
+    """The control on the denominator. If this went empty, the sweep below passes
+    over nothing and reports the repository clean."""
+    files = tracked_files()
+    assert len(files) > 40, f"the sweep found only {len(files)} tracked files"
+    names = {path.name for path in files}
+    assert "sensitive.py" in names, "the detector's own source is outside the sweep"
+    assert Path(__file__).name in names, "this test file is outside the sweep"
+    assert any(path.parent.name == "tests" for path in files), (
+        "no file under tests/ is in the sweep, which is where the last specimen was"
+    )
+
+
+@pytest.mark.guarantee("G9")
+def test_no_instrument_shaped_value_survives_anywhere_in_the_repository():
+    """EVERY TRACKED FILE, AND THE FILE SET IS DERIVED FROM GIT.
+
+    The guarantee is that the repository contains no card- or account-shaped
+    value. It used to be measured over ONE path -- `sensitive.py` -- so a
+    specimen anywhere else was invisible to the check that exists to find it,
+    and one was: sixteen Luhn-valid digits in this module's own docstring, in
+    the blind spot, found by planting rather than by the guard.
+
+    **THERE IS NO EXEMPTION FOR `tests/`.** A detector that skips where the
+    specimen lives is the self-exemption defect this project removed once
+    already, wearing a new name. Fixtures are as permanent as source.
+    """
+    offenders = []
+    for path in tracked_files():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue  # not text; nothing to read a number out of
+        found = find_instrument_like(text)
+        if found is not None:
+            offenders.append(f"{path.relative_to(ROOT)}: {found}")
+
+    assert offenders == [], (
+        "a value shaped like a payment instrument is in the repository:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nBuild it from the checksum instead of writing it down -- see "
+        "build_card_shaped in this module. A guard that carries a specimen has "
+        "put the specimen in the repository, which is where it was not supposed "
+        "to be."
+    )
+
+
 @pytest.mark.guarantee("G9")
 def test_the_guard_does_not_exempt_itself():
     """A detector that skips its own file is how two real values sat unread inside
     a scanner while every run reported clean. Asserted against the source."""
-    from pathlib import Path
-
-    source = Path(__file__).resolve().parent.parent / "src" / "monthly_billing" / "sensitive.py"
+    source = ROOT / "src" / "monthly_billing" / "sensitive.py"
     text = source.read_text()
     assert "sensitive.py" not in text.replace('"""', ""), (
         "sensitive.py names itself, which is what a self-exemption looks like"

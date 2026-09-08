@@ -63,8 +63,10 @@ GUARANTEES: dict[str, str] = {
     ),
     "G9": (
         "No value shaped like a payment card or a bank account survives into the "
-        "store or into a log line. The guard scans every column of every row from "
-        "the record's own keys, and it holds no example of what it looks for."
+        "store or into a log line, and NO TRACKED FILE IN THE REPOSITORY CONTAINS "
+        "ONE. The guard scans every column of every row from the record's own "
+        "keys; the repository sweep derives its file set from git and exempts "
+        "nothing, tests and fixtures included."
     ),
     "G10": (
         "An owner's exception records who made it and when, and a NOTE CAN NEVER "
@@ -81,6 +83,24 @@ GUARANTEES: dict[str, str] = {
         "Every table this module's migrations create carries a tenant column, "
         "ENABLE and FORCE row-level security and an isolation policy -- read from "
         "the database catalogue, never from a list of table names."
+    ),
+    "G14": (
+        "Every fixture carries its own control asserting it holds the property it "
+        "claims to represent, and those controls run as tests. A DST fixture whose "
+        "zone does not shift, or two identity rules that agree, read as coverage "
+        "while sampling one point on the axis that decides."
+    ),
+    "G15": (
+        "docs/CONTRACT.md is GENERATED from this registry and from the enums and "
+        "refusal codes that implement it, and its prose is derived rather than "
+        "fixed: a value that contradicts a published sentence changes the sentence, "
+        "because generation is not verification."
+    ),
+    "G16": (
+        "Every test module contributes at least one registered guarantee, derived "
+        "from the filesystem and read from the AST -- so a module cannot be added, "
+        "skipped or deleted without a guard noticing. A module that PLANTS a defect "
+        "may not be excused at all."
     ),
     "G13": (
         "A pause covering days in a period that has already been paid is REFUSED by "
