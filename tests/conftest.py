@@ -66,10 +66,20 @@ def _is_a_full_run(session) -> bool:
 
     A developer running one file has not skipped a guarantee; they have selected
     something. Failing that would make this guard noise, and a guard people learn
-    to ignore is how the last one died. CI always runs the whole suite, so CI is
-    always judged.
+    to ignore is how the last one died. CI runs the whole suite in one step, so
+    that step is always judged.
+
+    **`-m` COUNTS AS A SELECTION, AND THE INHERITED VERSION OF THIS FUNCTION DID
+    NOT KNOW THAT.** It excluded `-k` and file arguments and nothing else, so a
+    marker-filtered run was judged as a whole-suite one and failed on the twelve
+    guarantees it had deliberately not selected. CI found it on the first run, in
+    the step that exists to prove the database tests did not skip.
+
+    Selecting by mark and selecting by name are the same act, and neither is a
+    guarantee going unproven. What the guard is for is the run where NOTHING was
+    selected and a guarantee still did not execute.
     """
-    if session.config.option.keyword:
+    if session.config.option.keyword or session.config.option.markexpr:
         return False
     selected = [arg for arg in session.config.args if not arg.startswith("-")]
     testpaths = session.config.getini("testpaths")
