@@ -1,0 +1,8 @@
+{
+  "id": "garage-downtown",
+  "timezone": "America/Denver",
+  "currency": "USD",
+  "billing_day": "last_day_of_month",
+  "payment_grace_days": 5,
+  "identity_rule": "folded_alphanumeric"
+}

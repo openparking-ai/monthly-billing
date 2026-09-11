@@ -1,0 +1,33 @@
+{
+  "id": "ag-acme-0001",
+  "version": 1,
+  "garage_id": "garage-downtown",
+  "payer_id": "payer-acme",
+  "spots": 10,
+  "vehicles": ["ABC-123", "DEF-456", "GHI-789"],
+  "monthly_price_minor": 12000,
+  "start_day": "2026-03-10",
+  "access_hours": {"entry_from": "06:00", "exit_by": "20:00"},
+  "additional_fees": [
+    {
+      "label": "Reserved space 12",
+      "amount_minor": 2500,
+      "cadence": "recurring",
+      "effective_from": "2026-03-10"
+    },
+    {
+      "label": "Access card",
+      "amount_minor": 1500,
+      "cadence": "one_time",
+      "effective_from": "2026-03-12"
+    }
+  ],
+  "mandate": {
+    "agreed_by": "the account holder",
+    "agreed_at_iso": "2026-03-09T16:20:00-07:00",
+    "terms_shown": "A recurring monthly charge for monthly parking at this garage.",
+    "frequency_shown": "Monthly, on the last day of each month.",
+    "amount_basis_shown": "The stated monthly price plus any stated additional fees.",
+    "cancellation_shown": "Cancel in writing; the paid period runs to its end."
+  }
+}
