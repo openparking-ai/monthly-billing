@@ -111,6 +111,30 @@ def test_the_refusal_is_the_grant_and_not_the_policy(app, tenant_id):
     assert not _refused(app, tenant_id, "UPDATE invoices SET paid_at = paid_at")
 
 
+HISTORY_TOO = ("invoice_lines", "owner_exceptions")
+
+
+@pytest.mark.guarantee("G20")
+@pytest.mark.parametrize("table", HISTORY_TOO)
+def test_a_priced_line_and_a_recorded_decision_cannot_be_edited_or_removed(app, tenant_id, table):
+    """0001 granted the application DML on everything; 0002 takes UPDATE and
+    DELETE back off the invoice's lines and the owner's decisions. A control
+    plants the revoke away and requires red."""
+    _one_of_each(app, tenant_id)
+    assert query(app, tenant_id, f"SELECT count(*) FROM {table}")[0][0] >= 0
+    assert _refused(app, tenant_id, f"UPDATE {table} SET tenant_id = tenant_id"), (
+        f"UPDATE on {table} was allowed"
+    )
+    assert _refused(app, tenant_id, f"DELETE FROM {table}"), f"DELETE on {table} was allowed"
+
+
+@pytest.mark.guarantee("G20")
+def test_an_invoice_cannot_be_deleted_but_its_derived_column_can_be_written(app, tenant_id):
+    _one_of_each(app, tenant_id)
+    assert _refused(app, tenant_id, "DELETE FROM invoices")
+    assert not _refused(app, tenant_id, "UPDATE invoices SET paid_at = paid_at")
+
+
 @pytest.mark.guarantee("G20")
 def test_the_grants_read_from_the_catalogue_are_select_and_insert_only(app, tenant_id):
     rows = query(
@@ -122,6 +146,19 @@ def test_the_grants_read_from_the_catalogue_are_select_and_insert_only(app, tena
         (list(APPEND_ONLY),),
     )
     assert rows == [(table, "INSERT,SELECT") for table in sorted(APPEND_ONLY)]
+    rows = query(
+        app, tenant_id,
+        "SELECT table_name, string_agg(privilege_type, ',' ORDER BY privilege_type) "
+        "FROM information_schema.role_table_grants "
+        "WHERE grantee = 'monthly_billing_app' AND table_name = ANY(%s) "
+        "GROUP BY table_name ORDER BY table_name",
+        (list(HISTORY_TOO) + ["invoices"],),
+    )
+    assert rows == [
+        ("invoice_lines", "INSERT,SELECT"),
+        ("invoices", "INSERT,SELECT,UPDATE"),
+        ("owner_exceptions", "INSERT,SELECT"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -153,12 +190,18 @@ def test_a_card_shaped_processor_detail_never_reaches_charge_attempts(app, tenan
             # ChargeResult refuses at construction; the store would refuse after.
             return ChargeResult(outcome=Outcome.DECLINE, detail=f"declined {card_shaped()}")
 
-    from monthly_billing.sensitive import InstrumentLike
+    from monthly_billing.payment import RESULT_UNKNOWN_DETAIL
 
-    with pytest.raises(InstrumentLike):
-        attempt_charge(app, tenant_id, _Leaks(), line.reference, recorded_by="cron", now=MAY_8)
-    app.rollback()
-    assert query(app, tenant_id, "SELECT count(*) FROM charge_attempts") == [(0,)]
+    # The guard fires inside the processor's own return, so the module never
+    # receives that result: the attempt is recorded as an ERROR whose detail says
+    # the outcome is unknown, and the card-shaped text is in no row.
+    outcome = attempt_charge(
+        app, tenant_id, _Leaks(), line.reference, recorded_by="cron", now=MAY_8
+    )
+    assert outcome.result.outcome is Outcome.ERROR and outcome.payment_id is None
+    rows = query(app, tenant_id, "SELECT outcome, detail FROM charge_attempts")
+    assert rows == [("error", RESULT_UNKNOWN_DETAIL)]
+    assert card_shaped() not in rows[0][1]
 
 
 def _uuid_that_reads_as_a_card():

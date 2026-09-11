@@ -166,17 +166,19 @@ def test_a_new_run_outcome_appears_with_its_sentence():
     published -- and one added WITHOUT a meaning must refuse to render."""
     from enum import Enum
 
-    class Planted(Enum):
-        ISSUED = "issued"
-        ALREADY_ISSUED = "already_issued"
-        NOTHING_BILLABLE = "nothing_billable"
-        REFUSED = "refused"
-        PLANTED = "planted_outcome"
+    # Derived from the real enum plus one, never a typed copy of it: a copy
+    # would go stale the day an outcome is added and this plant would then be
+    # testing an enum that no longer exists.
+    Planted = Enum(
+        "Planted", {**{o.name: o.value for o in gen.RunOutcome}, "PLANTED": "planted_outcome"}
+    )
 
     original_enum, original_means = gen.RunOutcome, gen.RUN_OUTCOME_MEANS
+    original_failed = gen.FAILED_OUTCOMES
     means = {Planted(o.value): text for o, text in original_means.items()}
     gen.RunOutcome = Planted
     gen.RUN_OUTCOME_MEANS = means
+    gen.FAILED_OUTCOMES = frozenset(Planted(o.value) for o in original_failed)
     try:
         with pytest.raises(SystemExit):
             gen.block_billing_run()  # an outcome with no sentence refuses
@@ -184,6 +186,7 @@ def test_a_new_run_outcome_appears_with_its_sentence():
         rendered = gen.block_billing_run()
     finally:
         gen.RunOutcome, gen.RUN_OUTCOME_MEANS = original_enum, original_means
+        gen.FAILED_OUTCOMES = original_failed
     assert "`planted_outcome`" in rendered and "A planted outcome sentence." in rendered
     assert f"exactly one of these {len(Planted)} outcomes" in rendered
 
@@ -239,9 +242,36 @@ def test_the_second_month_is_produced_by_running_the_store(grace):
 
     due = date(2026, 4, 30)
     assert f"grace of {grace} days" in block
-    assert f"still covered on {due + timedelta(days=grace)}" in block
-    assert f"`UNPAID_PAST_GRACE` on {due + timedelta(days=grace + 1)}" in block
+    assert f"is still covered on {due + timedelta(days=grace)}" in block
+    assert f"is NOT covered (`UNPAID_PAST_GRACE`) on {due + timedelta(days=grace + 1)}" in block
+    assert "pays it from that instant, and the vehicle is still covered on 2026-05-09" in block
     assert "14500" in block, "the run's total, recomputed by the store, not typed"
+
+
+@pytest.mark.guarantee("G15")
+def test_the_second_month_prose_changes_when_the_store_answers_the_other_way():
+    """THE §6 CONTROL: a moving number is not a changed assertion. Plant a lane
+    that never covers and require the SENTENCES -- not just the code block above
+    them -- to say so. Under the old prose 'still covered' and 'covered again'
+    were fixed text whatever the store answered."""
+    import monthly_billing.entitlement_store as es
+    from monthly_billing.entitlement import _not_covered
+    from monthly_billing.findings import NOT_COVERED_BLOCKED_BY_OWNER
+
+    pytest.importorskip("psycopg")
+    if not os.environ.get("MONTHLY_BILLING_TEST_DSN"):
+        pytest.skip("MONTHLY_BILLING_TEST_DSN is not set")
+
+    real = es.covered_from_store
+    es.covered_from_store = lambda *a, **k: _not_covered(NOT_COVERED_BLOCKED_BY_OWNER)
+    try:
+        planted = gen.block_second_month()
+    finally:
+        es.covered_from_store = real
+    prose = planted.rsplit("```", 1)[1]
+    assert "is still covered" not in prose
+    assert "is NOT covered (`BLOCKED_BY_OWNER`) on 2026-05-05" in prose
+    assert "is NOT covered (`BLOCKED_BY_OWNER`) on 2026-05-09" in prose
 
 
 @pytest.mark.guarantee("G15")

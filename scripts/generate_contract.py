@@ -41,14 +41,31 @@ from monthly_billing.agreement import (  # noqa: E402
     FeeCadence,
     load_agreement_file,
 )
-from monthly_billing.billing_run import RUN_OUTCOME_MEANS, RunOutcome  # noqa: E402
+from monthly_billing.billing_run import FAILED_OUTCOMES, RUN_OUTCOME_MEANS, RunOutcome  # noqa: E402
 from monthly_billing.entitlement import Answer  # noqa: E402
-from monthly_billing.exceptions_by_owner import MONETARY_KINDS, ExceptionKind  # noqa: E402
-from monthly_billing.findings import NOT_COVERED_MEANS, NOT_COVERED_REASONS, REFUSALS  # noqa: E402
+from monthly_billing.exceptions_by_owner import (  # noqa: E402
+    LANDS_A_LINE,
+    NEEDS_AN_AMOUNT,
+    ExceptionKind,
+)
+from monthly_billing.findings import (  # noqa: E402
+    NOT_COVERED_MEANS,
+    NOT_COVERED_REASONS,
+    REFUSAL_ALREADY_REVERSED,
+    REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE,
+    REFUSAL_NOTHING_OWED,
+    REFUSAL_REVERSAL_REASON_MISMATCH,
+    REFUSALS,
+)
 from monthly_billing.garage import BillingDay, IdentityRule  # noqa: E402
 from monthly_billing.invoice import first_charge  # noqa: E402
 from monthly_billing.payment import MAX_ATTEMPTS  # noqa: E402
-from monthly_billing.payments import OPERATOR_RECORDED, PaymentMethod, ReversalReason  # noqa: E402
+from monthly_billing.payments import (  # noqa: E402
+    OPERATOR_RECORDED,
+    REASONS_FOR_METHOD,
+    PaymentMethod,
+    ReversalReason,
+)
 
 DOC = ROOT / "docs" / "CONTRACT.md"
 BEGIN = "<!-- GENERATED:{name} -->"
@@ -107,10 +124,26 @@ def block_options() -> str:
     lines += ["", "**Additional fee cadence:**", ""]
     for cadence in FeeCadence:
         lines.append(f"- `{cadence.value}`")
-    lines += ["", "**Owner exception kinds** — those marked ⊙ require an amount:", ""]
+    lines += [
+        "",
+        "**Owner exception kinds** — ⊙ requires a positive amount in minor units; "
+        "▾ lands an `exception_adjustment` line that lowers the invoice total:",
+        "",
+    ]
     for kind in ExceptionKind:
-        mark = " ⊙" if kind in MONETARY_KINDS else ""
+        mark = (" ⊙" if kind in NEEDS_AN_AMOUNT else "") + (" ▾" if kind in LANDS_A_LINE else "")
         lines.append(f"- `{kind.value}`{mark}")
+    recorded_only = sorted(k.value for k in NEEDS_AN_AMOUNT - LANDS_A_LINE)
+    if recorded_only:
+        lines += [
+            "",
+            "A kind marked ⊙ but not ▾ -- " + ", ".join(f"`{k}`" for k in recorded_only) + " -- "
+            "records the owner's decision and its amount and changes NO total: the invoice "
+            "stays what it was and stays paid if it was paid. The money going back is a "
+            "movement, which is a collection record when collection exists, never a billing "
+            "line. The direction of every amount is the kind's, never the sign's: a negative "
+            f"amount is refused by name (`{REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE}`).",
+        ]
     lines += [
         "",
         "An agreement document carries exactly these keys: "
@@ -159,10 +192,12 @@ def block_billing_run() -> str:
     for outcome in RunOutcome:
         rows.append(f"| `{outcome.value}` | {RUN_OUTCOME_MEANS[outcome]} |")
     rows.append("")
+    failed = ", ".join(f"`{o.value}`" for o in RunOutcome if o in FAILED_OUTCOMES)
     rows.append(
         f"Every payer at the garage gets exactly one of these {len(RunOutcome)} outcomes, "
-        "per run. The run exits non-zero if any payer was refused, and zero otherwise -- "
-        f"`{RunOutcome.ALREADY_ISSUED.value}` is an answer, not an error."
+        f"per run. The run exits non-zero if any payer's outcome is one of {failed}, and "
+        f"zero otherwise -- `{RunOutcome.ALREADY_ISSUED.value}` is an answer, not an error, "
+        f"and it means exactly that a row for this garage, payer and period exists."
     )
     return "\n".join(rows)
 
@@ -184,12 +219,82 @@ def block_payment_methods() -> str:
         "**Reversal reasons** — a payment that did not stand, as a second row:",
         "",
     ]
+    fits = {
+        reason: sorted(m.value for m, reasons in REASONS_FOR_METHOD.items() if reason in reasons)
+        for reason in ReversalReason
+    }
     for reason in ReversalReason:
-        lines.append(f"- `{reason.value}`")
+        lines.append(f"- `{reason.value}` — on a {', '.join(fits[reason])} payment")
     lines += [
         "",
-        f"A payment has at most one reversal, and there are {len(ReversalReason)} reasons "
-        "it can carry. What happens next is the owner's decision, recorded as an exception.",
+        f"A payment has at most one reversal (a second is `{REFUSAL_ALREADY_REVERSED}`), and "
+        f"there are {len(ReversalReason)} reasons it can carry, each fitting the payment's method "
+        f"and refused by name otherwise (`{REFUSAL_REVERSAL_REASON_MISMATCH}`). What happens next "
+        "is the owner's decision, recorded as an exception.",
+        "",
+        "**A charge is for the balance.** The charge path asks the processor for the invoice's "
+        "total minus its unreversed payments, never the total; a balance of nothing is "
+        f"`{REFUSAL_NOTHING_OWED}` before the processor is called, so a paid invoice is never "
+        "charged again and a part-paid one is charged its remainder. Every call to the "
+        "processor leaves an attempt row: a raise is an `error` naming the exception, and a "
+        "result the instrument guard refused inside the processor's own return is an `error` "
+        "whose detail says the outcome is unknown -- a reported result is never discarded "
+        "silently.",
+    ]
+    return "\n".join(lines)
+
+
+def block_grants() -> str:
+    """The application role's privileges, READ FROM THE CATALOGUE of a database
+    migrated from ``migrations/``: what the grants say, not what a paragraph
+    says they say. Needs ``MONTHLY_BILLING_TEST_DSN`` like the second month."""
+    import os
+    import sys as _sys
+
+    _sys.path.insert(0, str(ROOT / "tests"))
+    from store_harness import migrate  # noqa: E402
+
+    dsn = os.environ.get("MONTHLY_BILLING_TEST_DSN")
+    if not dsn:
+        raise SystemExit(
+            "the grant table is read from a migrated database's catalogue, and needs "
+            "MONTHLY_BILLING_TEST_DSN. It is not rendered from memory."
+        )
+    owner = migrate(dsn)
+    with owner.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT c.relname,
+                   coalesce(string_agg(g.privilege_type, ', ' ORDER BY g.privilege_type), '')
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            LEFT JOIN information_schema.role_table_grants g
+                   ON g.table_name = c.relname AND g.table_schema = 'public'
+                  AND g.grantee = 'monthly_billing_app'
+            WHERE n.nspname = 'public' AND c.relkind = 'r'
+            GROUP BY c.relname ORDER BY c.relname
+            """
+        )
+        rows = cursor.fetchall()
+    owner.close()
+    lines = ["| table | the application role may |", "|---|---|"]
+    for name, privileges in rows:
+        lines.append(f"| `{name}` | {privileges} |")
+    append_only = [name for name, p in rows if p == "INSERT, SELECT"]
+    no_delete = [name for name, p in rows if p == "INSERT, SELECT, UPDATE"]
+    lines += [
+        "",
+        f"{len(rows)} tables. {len(append_only)} are append-only -- "
+        + ", ".join(f"`{n}`" for n in append_only)
+        + " -- and "
+        + ", ".join(f"`{n}`" for n in no_delete)
+        + (" keeps" if len(no_delete) == 1 else " keep")
+        + " UPDATE and "
+        + ("loses" if len(no_delete) == 1 else "lose")
+        + " DELETE"
+        + ": `paid_at` is derived by the application after every payment, reversal and "
+        "adjustment, and that is the one column it writes. The rest carry the DML the "
+        "application needs to store documents.",
     ]
     return "\n".join(lines)
 
@@ -267,15 +372,36 @@ def block_second_month() -> str:
         "COVERED" if again.covered else "NOT COVERED",
         "```",
         "",
-        f"The run issued {line.reference} for the period "
+        f"The run {_run_word(line)} {line.reference} for the period "
         f"{report.period.start_day} to {report.period.end_day}, due on its first day, "
         f"{line.total_minor} minor units. The garage states a grace of "
-        f"{garage.payment_grace_days} days, so the vehicle is still covered on "
-        f"{grace_end} and reads `{past.reason_code}` on {past_day}. A cheque recorded on "
-        f"2026-05-08 for the full amount pays it from that instant, and the vehicle is "
-        f"covered again. The lane was told nothing about money at any point.",
+        f"{garage.payment_grace_days} days, so the vehicle {_coverage_word(inside)} on "
+        f"{grace_end} and {_coverage_word(past)} on {past_day}. A cheque recorded on "
+        f"2026-05-08 for the full amount {_paid_word(paid)}, and the vehicle "
+        f"{_coverage_word(again)} on 2026-05-09. The lane was told nothing about money at "
+        f"any point.",
     ]
     return "\n".join(lines)
+
+
+# Every sentence in the second-month prose is rendered from the answer it
+# describes, in words that differ between the two outcomes -- a value that
+# contradicts the sentence CHANGES the sentence (§6: a moving number is not a
+# changed assertion). The tests plant each of these the other way.
+
+
+def _run_word(line) -> str:
+    return "issued" if line.outcome.value == "issued" else f"did NOT issue ({line.outcome.value})"
+
+
+def _coverage_word(answer) -> str:
+    if answer.covered:
+        return "is still covered"
+    return f"is NOT covered (`{answer.reason_code}`)"
+
+
+def _paid_word(paid) -> str:
+    return "pays it from that instant" if paid.paid else "leaves it UNPAID"
 
 
 BLOCKS = {
@@ -288,6 +414,7 @@ BLOCKS = {
     "billing-run": block_billing_run,
     "payment-methods": block_payment_methods,
     "second-month": block_second_month,
+    "grants": block_grants,
 }
 
 

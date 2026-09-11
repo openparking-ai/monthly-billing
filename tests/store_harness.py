@@ -42,7 +42,16 @@ def migrate(dsn: str) -> Any:
         cursor.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
         cursor.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
         for path in sorted(MIGRATIONS.glob("*.sql")):
-            cursor.execute(path.read_text())
+            try:
+                cursor.execute(path.read_text())
+            except Exception:
+                # A migration file opens its own BEGIN and never reaches its COMMIT
+                # when it raises, so the connection is left inside an aborted
+                # transaction. End it here, so the failure is the migration's
+                # message and not "current transaction is aborted" on the next
+                # statement -- and so the catalogue is the pre-migration state.
+                cursor.execute("ROLLBACK")
+                raise
         cursor.execute(f"ALTER ROLE monthly_billing_app LOGIN PASSWORD '{APP_PASSWORD}'")
     return owner
 

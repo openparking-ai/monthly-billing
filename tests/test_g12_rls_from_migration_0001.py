@@ -189,3 +189,81 @@ def test_a_tenant_cannot_write_a_row_attributed_to_another(as_app, migrated):
                 (ids["beta"], "smuggled", "Smuggled"),
             )
     as_app.rollback()
+
+
+@pytest.mark.guarantee("G12")
+def test_a_migration_that_refuses_leaves_the_prior_schema_and_a_usable_connection():
+    """0002 replaces ``charge_attempts`` and refuses to run if the old table holds
+    a row. The refusal must leave the catalogue at the 0001 state -- no partial
+    DDL -- and the harness must end the aborted transaction the migration's own
+    BEGIN opened, so the next statement is not "current transaction is aborted".
+    The documented apply command carries ``ON_ERROR_STOP=1`` for the same reason:
+    the L3 measured the bare command exiting 0 on this exact refusal."""
+    import psycopg
+
+    from monthly_billing.store.postgres import connect
+    from store_harness import DSN, migrate
+
+    def catalogue(connection):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT c.relname, "
+                "(SELECT string_agg(a.attname, ',' ORDER BY a.attnum) FROM pg_attribute a "
+                " WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped), "
+                "(SELECT string_agg(k.conname, ',' ORDER BY k.conname) FROM pg_constraint k "
+                " WHERE k.conrelid = c.oid) "
+                "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = 'public' AND c.relkind = 'r' ORDER BY 1"
+            )
+            return cursor.fetchall()
+
+    owner = connect(DSN)
+    owner.autocommit = True
+    try:
+        with owner.cursor() as cursor:
+            cursor.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+            cursor.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
+            cursor.execute((MIGRATIONS / "0001_tenants_agreements_and_rls.sql").read_text())
+            cursor.execute("INSERT INTO tenants (slug, name) VALUES ('t', 't') RETURNING id")
+            (tenant_id,) = cursor.fetchone()
+            cursor.execute(
+                "INSERT INTO garages (tenant_id, external_id, timezone, currency, billing_day, "
+                "payment_grace_days, identity_rule) VALUES (%s, 'g', 'UTC', 'USD', "
+                "'last_day_of_month', 5, 'exact') RETURNING id",
+                (tenant_id,),
+            )
+            (garage_id,) = cursor.fetchone()
+            cursor.execute(
+                "INSERT INTO payers (tenant_id, external_id, name) VALUES (%s, 'p', 'p') "
+                "RETURNING id",
+                (tenant_id,),
+            )
+            (payer_id,) = cursor.fetchone()
+            cursor.execute(
+                "INSERT INTO invoices (tenant_id, reference, payer_id, garage_id, currency, "
+                "period_start_day, due_at) VALUES (%s, 'r', %s, %s, 'USD', '2026-01-01', now()) "
+                "RETURNING id",
+                (tenant_id, payer_id, garage_id),
+            )
+            (invoice_id,) = cursor.fetchone()
+            cursor.execute(
+                "INSERT INTO charge_attempts (tenant_id, invoice_id, attempts) VALUES (%s, %s, 1)",
+                (tenant_id, invoice_id),
+            )
+        before = catalogue(owner)
+        with pytest.raises(psycopg.errors.RaiseException) as refused:
+            with owner.cursor() as cursor:
+                try:
+                    cursor.execute(
+                        (MIGRATIONS / "0002_billing_run_payments_and_reversals.sql").read_text()
+                    )
+                except Exception:
+                    cursor.execute("ROLLBACK")  # what store_harness.migrate does
+                    raise
+        assert "charge_attempts holds 1 row(s)" in str(refused.value)
+        assert catalogue(owner) == before, "the refused migration left partial DDL behind"
+        assert len(before) == 12
+    finally:
+        owner.close()
+    # and the harness's own migrate() rebuilds cleanly from here for the next module
+    migrate(DSN).close()

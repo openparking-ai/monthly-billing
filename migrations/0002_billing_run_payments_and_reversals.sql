@@ -28,6 +28,21 @@ ALTER TABLE invoices
   ADD CONSTRAINT invoices_one_per_payer_per_period
   UNIQUE (tenant_id, garage_id, payer_id, period_start_day);
 
+-- The pair every money-history row points at. Redundant beside the primary key
+-- on purpose: a composite foreign key (tenant_id, invoice_id) needs a unique
+-- target of the same shape, and that key is what stops a payment in one tenant
+-- from pointing at an invoice in another -- a foreign-key check runs past
+-- row-level security, so the policy alone would not.
+ALTER TABLE invoices ADD CONSTRAINT invoices_tenant_id_id_key UNIQUE (tenant_id, id);
+
+-- ---------------------------------------------------------------------------
+-- owner_exceptions -- an amount is a positive number of minor units. The kind
+-- carries the direction; the sign never does. A negative credit read as a debit
+-- is exactly the quiet inversion this refuses, and zero is not an amount.
+-- ---------------------------------------------------------------------------
+ALTER TABLE owner_exceptions
+  ADD CONSTRAINT owner_exceptions_amount_is_positive CHECK (amount_minor > 0);
+
 -- ---------------------------------------------------------------------------
 -- payments — money received against an invoice. Card, cheque or ACH.
 --
@@ -46,7 +61,7 @@ ALTER TABLE invoices
 CREATE TABLE payments (
   id                   uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id            uuid        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  invoice_id           uuid        NOT NULL REFERENCES invoices(id) ON DELETE RESTRICT,
+  invoice_id           uuid        NOT NULL,
   method               text        NOT NULL CHECK (method IN ('card', 'cheque', 'ach')),
   amount_minor         bigint      NOT NULL CHECK (amount_minor > 0),
   currency             char(3)     NOT NULL,
@@ -61,7 +76,11 @@ CREATE TABLE payments (
   -- with a card brand on it is a record somebody assembled wrong.
   CONSTRAINT payments_card_fields_only_on_a_card CHECK (
     method = 'card' OR (card_brand IS NULL AND card_last4 IS NULL)
-  )
+  ),
+  -- The invoice this pays is in THIS tenant, by key and not by policy.
+  CONSTRAINT payments_invoice_in_tenant
+    FOREIGN KEY (tenant_id, invoice_id) REFERENCES invoices (tenant_id, id) ON DELETE RESTRICT,
+  UNIQUE (tenant_id, id)
 );
 
 CREATE INDEX payments_tenant_id_idx ON payments (tenant_id);
@@ -84,7 +103,7 @@ CREATE POLICY payments_tenant_isolation ON payments
 CREATE TABLE payment_reversals (
   id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id    uuid        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  payment_id   uuid        NOT NULL REFERENCES payments(id) ON DELETE RESTRICT,
+  payment_id   uuid        NOT NULL,
   reason       text        NOT NULL
                CHECK (reason IN ('bounced_cheque', 'ach_returned', 'chargeback',
                                  'processor_reversed')),
@@ -92,6 +111,8 @@ CREATE TABLE payment_reversals (
   recorded_by  text        NOT NULL CHECK (length(btrim(recorded_by)) > 0),
   note         text        NOT NULL DEFAULT '',
   created_at   timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT payment_reversals_payment_in_tenant
+    FOREIGN KEY (tenant_id, payment_id) REFERENCES payments (tenant_id, id) ON DELETE RESTRICT,
   UNIQUE (tenant_id, payment_id)
 );
 
@@ -137,7 +158,7 @@ DROP TABLE charge_attempts;
 CREATE TABLE charge_attempts (
   id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id    uuid        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  invoice_id   uuid        NOT NULL REFERENCES invoices(id) ON DELETE RESTRICT,
+  invoice_id   uuid        NOT NULL,
   kind         text        NOT NULL CHECK (kind IN ('attempt', 'payment_method_changed')),
   outcome      text        CHECK (outcome IN ('success', 'decline', 'error')),
   detail       text        NOT NULL DEFAULT '',
@@ -150,7 +171,9 @@ CREATE TABLE charge_attempts (
   CONSTRAINT charge_attempts_outcome_iff_attempt CHECK (
     (kind =  'attempt' AND outcome IS NOT NULL) OR
     (kind <> 'attempt' AND outcome IS NULL)
-  )
+  ),
+  CONSTRAINT charge_attempts_invoice_in_tenant
+    FOREIGN KEY (tenant_id, invoice_id) REFERENCES invoices (tenant_id, id) ON DELETE RESTRICT
 );
 
 CREATE INDEX charge_attempts_tenant_id_idx ON charge_attempts (tenant_id);
@@ -167,5 +190,15 @@ CREATE POLICY charge_attempts_tenant_isolation ON charge_attempts
 -- grant died with the old table.
 -- ---------------------------------------------------------------------------
 GRANT SELECT, INSERT ON payments, payment_reversals, charge_attempts TO monthly_billing_app;
+
+-- And the invoice's own money is not edited either. 0001 granted the application
+-- DML on everything; a priced line and a recorded decision are history the same
+-- way a payment is, so UPDATE and DELETE come back off invoice_lines and
+-- owner_exceptions, and DELETE off invoices. UPDATE on invoices STAYS: paid_at is
+-- derived by the application after every payment, reversal and adjustment, and
+-- that is the one column it writes. Nothing in the module updates or deletes
+-- any of these; the revoke makes the grant say what the code already does.
+REVOKE UPDATE, DELETE ON invoice_lines, owner_exceptions FROM monthly_billing_app;
+REVOKE DELETE ON invoices FROM monthly_billing_app;
 
 COMMIT;

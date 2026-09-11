@@ -127,3 +127,25 @@ def test_the_currency_decides_the_rendering_not_the_number_100():
     assert format_minor(12000, "USD") == "120.00 USD"
     assert format_minor(12000, "JPY") == "12000 JPY"
     assert format_minor(12000, "KWD") == "12.000 KWD"
+
+
+@pytest.mark.guarantee("G1")
+def test_two_currencies_do_not_sum_and_the_helper_that_says_so_can_raise():
+    """``refuse_mixed_currency`` is a public helper for a library caller holding
+    agreements at several garages -- this module's own run prices one garage,
+    so nothing inside calls it. It publishes ``REFUSAL_CURRENCY_MISMATCH``, and
+    a published refusal that nothing can raise is a false sentence, so this is
+    the proof that something can."""
+    import dataclasses
+
+    from fixtures import month_end_garage
+    from monthly_billing.findings import REFUSAL_CURRENCY_MISMATCH, Refused
+    from monthly_billing.invoice import refuse_mixed_currency
+
+    usd = month_end_garage()
+    jpy = dataclasses.replace(usd, id="garage-tokyo", currency="JPY")
+    refuse_mixed_currency((usd, dataclasses.replace(usd, id="garage-two")))  # one currency: fine
+    with pytest.raises(Refused) as refused:
+        refuse_mixed_currency((usd, jpy))
+    assert refused.value.code == REFUSAL_CURRENCY_MISMATCH
+    assert "JPY" in str(refused.value) and "USD" in str(refused.value)

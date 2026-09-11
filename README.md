@@ -117,8 +117,8 @@ superuser bypasses row-level security unconditionally, and `FORCE` does not stop
 one.
 
 ```
-psql "$DSN" -f migrations/0001_tenants_agreements_and_rls.sql
-psql "$DSN" -f migrations/0002_billing_run_payments_and_reversals.sql
+psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0001_tenants_agreements_and_rls.sql
+psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0002_billing_run_payments_and_reversals.sql
 MONTHLY_BILLING_APP_PASSWORD=... python scripts/ensure-app-role.py "$DSN"
 ```
 

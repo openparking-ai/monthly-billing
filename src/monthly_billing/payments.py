@@ -48,6 +48,12 @@ from enum import Enum
 from typing import Any
 from uuid import UUID
 
+from .findings import (
+    REFUSAL_ALREADY_REVERSED,
+    REFUSAL_CARD_FIELDS_WITHOUT_A_CARD,
+    REFUSAL_REVERSAL_REASON_MISMATCH,
+    Refused,
+)
 from .store.postgres import tenant
 from .store.writes import as_uuid, guarded_insert, guarded_update
 
@@ -72,6 +78,17 @@ class ReversalReason(Enum):
     ACH_RETURNED = "ach_returned"
     CHARGEBACK = "chargeback"
     PROCESSOR_REVERSED = "processor_reversed"
+
+
+#: Which reasons a payment of each method can be reversed for. A cheque bounces;
+#: an ACH debit is returned; a card payment is charged back or reversed by the
+#: processor. A reason from the wrong column is refused by name, and the contract
+#: derives its table from this one place.
+REASONS_FOR_METHOD: dict[PaymentMethod, frozenset[ReversalReason]] = {
+    PaymentMethod.CHEQUE: frozenset({ReversalReason.BOUNCED_CHEQUE}),
+    PaymentMethod.ACH: frozenset({ReversalReason.ACH_RETURNED}),
+    PaymentMethod.CARD: frozenset({ReversalReason.CHARGEBACK, ReversalReason.PROCESSOR_REVERSED}),
+}
 
 
 class InvoiceNotFound(LookupError):
@@ -209,6 +226,12 @@ def _record_payment(
     card_last4: str | None,
 ) -> tuple[UUID, PaidState]:
     tenant_id = as_uuid(tenant_id)
+    if method is not PaymentMethod.CARD and (card_brand is not None or card_last4 is not None):
+        raise Refused(
+            REFUSAL_CARD_FIELDS_WITHOUT_A_CARD,
+            f"a {method.value} payment against {invoice_reference!r} carries a card brand "
+            "or last four.",
+        )
     if isinstance(amount_minor, bool) or not isinstance(amount_minor, int) or amount_minor <= 0:
         raise ValueError(
             f"a payment is a positive integer of minor units, not {amount_minor!r}. A "
@@ -260,11 +283,25 @@ def record_reversal(
     """
     tenant_id, payment_id = as_uuid(tenant_id), as_uuid(payment_id)
     with tenant(connection, tenant_id) as cursor:
-        cursor.execute("SELECT invoice_id FROM payments WHERE id = %s", (payment_id,))
+        cursor.execute("SELECT invoice_id, method FROM payments WHERE id = %s", (payment_id,))
         row = cursor.fetchone()
         if row is None:
             raise PaymentNotFound(f"no payment with id {payment_id!r}.")
-        invoice_uuid = as_uuid(row[0])
+        invoice_uuid, method = as_uuid(row[0]), PaymentMethod(row[1])
+        if reason not in REASONS_FOR_METHOD[method]:
+            raise Refused(
+                REFUSAL_REVERSAL_REASON_MISMATCH,
+                f"payment {payment_id!r} is a {method.value} payment and the reason given "
+                f"is {reason.value!r}.",
+            )
+        cursor.execute(
+            "SELECT 1 FROM payment_reversals WHERE payment_id = %s", (payment_id,)
+        )
+        if cursor.fetchone() is not None:
+            raise Refused(
+                REFUSAL_ALREADY_REVERSED,
+                f"payment {payment_id!r} already has a reversal recorded.",
+            )
         guarded_insert(
             cursor,
             "payment_reversals",

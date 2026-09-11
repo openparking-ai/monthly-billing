@@ -10,11 +10,22 @@ Three persisted non-success attempts since the last method change and the next
 charge is refused by name; a persisted method change and the fourth is allowed.
 A control plants a rebuild that ignores the method-change rows and requires red.
 
-**EVERY ATTEMPT IS PERSISTED, SUCCESS OR NOT, BEFORE ITS RESULT IS ACTED ON.**
-The row is the record that a processor was called. A success additionally
-records the card payment -- the ONLY path that writes a ``card`` payment -- and
-re-derives ``paid_at``. The table is append-only by grant, so nothing here
-overwrites what happened.
+**EVERY ATTEMPT IS PERSISTED, SUCCESS OR NOT, BEFORE ITS RESULT IS ACTED ON --
+AND WHATEVER THE PROCESSOR DID.** The row is the record that a processor was
+called. A processor that raised is an ``error`` row naming the exception; a result
+the guard refused inside the processor's own return is an ``error`` row whose
+detail says the outcome is UNKNOWN (see ``payment.result_of``). A success
+additionally records the card payment -- the ONLY path that writes a ``card``
+payment -- and re-derives ``paid_at``. The table is append-only by grant, so
+nothing here overwrites what happened.
+
+**A CHARGE IS FOR THE BALANCE, AND A PAID INVOICE IS NEVER CHARGED.** The
+outstanding balance -- the invoice's total minus its unreversed payments, read
+through the same ``paid_state`` the derivation uses, so there is one reading of
+"owed" and not two -- is what the request carries. A balance of nothing is
+``REFUSAL_NOTHING_OWED`` before the processor is called and before any row is
+written, because nothing was attempted. A control plants the total back in place
+of the balance and requires red.
 
 **THE MANDATE IS CHECKED FOR EVERY AGREEMENT ON THE INVOICE.** A payer's invoice
 itemises several agreements; if any one of them has no mandate, nothing is
@@ -30,7 +41,13 @@ from typing import Any
 
 from .invoice import Invoice, InvoiceLine, LineKind
 from .payment import ChargeResult, Outcome, PaymentProcessor, RetryState, charge_invoice
-from .payments import PaidState, PaymentMethod, _record_payment, invoice_uuid_for
+from .payments import (
+    PaidState,
+    PaymentMethod,
+    _record_payment,
+    invoice_uuid_for,
+    paid_state,
+)
 from .store.postgres import tenant
 from .store.records import load_agreements_at_garage
 from .store.writes import as_uuid, guarded_insert
@@ -133,12 +150,14 @@ def attempt_charge(
             if item.agreement.id in on_invoice
         ]
         retry = retry_state_from_rows(invoice_reference, _load_attempt_rows(cursor, invoice_uuid))
+        owed = paid_state(cursor, invoice_uuid)
     connection.rollback()
 
     # The mandate rule, for every agreement the invoice itemises: the first one
     # without a mandate is the one the refusal names.
     gate = next((a for a in agreements if a.mandate is None), agreements[0])
-    result, retry_after = charge_invoice(processor, gate, invoice, retry)
+    balance = owed.total_minor - owed.paid_minor
+    result, retry_after = charge_invoice(processor, gate, invoice, retry, amount_minor=balance)
 
     with tenant(connection, tenant_id) as cursor:
         guarded_insert(
@@ -161,7 +180,7 @@ def attempt_charge(
         return ChargeOutcome(result=result, retry=retry_after, payment_id=None, paid=None)
 
     payment_id, paid = _record_payment(
-        connection, tenant_id, invoice_reference, PaymentMethod.CARD, invoice.total_minor, now,
+        connection, tenant_id, invoice_reference, PaymentMethod.CARD, balance, now,
         recorded_by=recorded_by, processor_reference=result.reference,
         card_brand=None, card_last4=None,
     )

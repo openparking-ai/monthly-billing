@@ -15,7 +15,6 @@ turn these tests red.
 
 from __future__ import annotations
 
-import dataclasses
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -50,14 +49,22 @@ def _issued_unpaid(app, tenant_id, **overrides):
 
 
 @pytest.mark.guarantee("G21")
-def test_the_answer_is_the_pure_answer_class_with_its_field_set(app, tenant_id):
+def test_the_answer_is_the_pure_answer_class_and_no_money_is_in_its_prose(app, tenant_id):
+    """``type(answer) is Answer`` is what pins the field set -- G6 judges that
+    class's fields -- so the earlier assertion comparing the instance's fields to
+    the class's own was two copies of one claim and is gone. What G6 does NOT
+    run on is the prose of a STORE-BACKED answer; that is asserted here with
+    G6's own amount pattern, on both a covered and a not-covered answer, and a
+    control plants a balance sentence into the store call."""
+    from test_g6_no_money_crosses_the_entitlement_call import MONEY_IN_PROSE
+
     _issued_unpaid(app, tenant_id)
-    answer = covered_from_store(app, tenant_id, GARAGE.id, "CAR001", _at(date(2026, 5, 3)))
-    assert type(answer) is Answer
-    assert {f.name for f in dataclasses.fields(answer)} == {
-        f.name for f in dataclasses.fields(Answer)
-    }
-    assert answer.covered and answer.entitlement == 10
+    covered = covered_from_store(app, tenant_id, GARAGE.id, "CAR001", _at(date(2026, 5, 3)))
+    unpaid = covered_from_store(app, tenant_id, GARAGE.id, "CAR001", _at(date(2026, 5, 20)))
+    assert type(covered) is Answer and type(unpaid) is Answer
+    assert covered.covered and covered.entitlement == 10 and not unpaid.covered
+    for answer in (covered, unpaid):
+        assert not MONEY_IN_PROSE.search(answer.reason), answer.reason
 
 
 @pytest.mark.guarantee("G21")

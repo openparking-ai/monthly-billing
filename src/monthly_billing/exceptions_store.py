@@ -2,9 +2,10 @@
 
 Two attachment points, as M1 defined them: an exception sits on an AGREEMENT
 (a grace extension, a block, an unblock) or on an INVOICE (a waived fee, a
-credit, a refund -- and a grace extension can sit here too). A monetary kind on
-an invoice lands an ``exception_adjustment`` line and re-derives ``paid_at``,
-because the line moves the total; see payments.py for the three events.
+credit, a refund -- and a grace extension can sit here too). A kind that changes
+what is owed lands an ``exception_adjustment`` line and re-derives ``paid_at``,
+because the line moves the total; see payments.py for the three events. A refund
+is recorded and lands nothing; see ``record_invoice_exception``.
 
 The note is stored and reaches no arithmetic. The amount is a typed column.
 """
@@ -14,7 +15,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from .exceptions_by_owner import MONETARY_KINDS, ExceptionKind, OwnerException
+from .exceptions_by_owner import LANDS_A_LINE, ExceptionKind, OwnerException
 from .invoice import LineKind
 from .payments import PaidState, invoice_uuid_for, rederive_paid_at
 from .store.postgres import tenant
@@ -59,10 +60,13 @@ def record_invoice_exception(
     """An owner's exception against an invoice, and -- for a monetary kind --
     the adjustment line it lands, and the derivation that follows it.
 
-    A waived fee, a credit and a refund all REDUCE what the payer owes on this
-    invoice, so the adjustment line carries the negative of the amount. The line
-    names the exception (the migration insists), so a figure nobody can account
-    for cannot appear. The note is stored and reaches no arithmetic.
+    A waived fee and a credit REDUCE what the payer owes on this invoice, so the
+    adjustment line carries the negative of the amount (``LANDS_A_LINE``). A
+    refund lands NO line: the decision and its amount are recorded, the total and
+    ``paid_at`` are untouched -- a paid period is paid -- and the money going back
+    is a movement for collection's records, not a billing line. The line names the
+    exception (the migration insists), so a figure nobody can account for cannot
+    appear. The note is stored and reaches no arithmetic.
     """
     if exception.invoice_reference is None:
         raise ValueError("record_invoice_exception takes an exception attached to an invoice.")
@@ -84,7 +88,7 @@ def record_invoice_exception(
             },
         )
         (exception_uuid,) = cursor.fetchone()
-        if exception.kind in MONETARY_KINDS:
+        if exception.kind in LANDS_A_LINE:
             cursor.execute(
                 "SELECT agreement_id, agreement_version, period_start_day, period_end_day "
                 "FROM invoice_lines WHERE invoice_id = %s ORDER BY created_at LIMIT 1",
@@ -117,6 +121,5 @@ def _adjustment_label(exception: OwnerException) -> str:
     words = {
         ExceptionKind.WAIVE_FEE: "Fee waived",
         ExceptionKind.CREDIT: "Credit",
-        ExceptionKind.REFUND: "Refund",
     }
     return f"{words[exception.kind]} by {exception.recorded_by} (exception {exception.id})"

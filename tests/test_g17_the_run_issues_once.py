@@ -81,6 +81,8 @@ def test_both_locks_are_in_the_catalogue(app, tenant_id):
     locks = sorted(tuple(row[0]) for row in rows)
     assert locks == [
         ("tenant_id", "garage_id", "payer_id", "period_start_day"),
+        # the target of the money-history tables' composite tenant keys, not a lock
+        ("tenant_id", "id"),
         ("tenant_id", "reference"),
     ], f"the invoices table carries these unique constraints: {locks}"
 

@@ -5,7 +5,10 @@ it has already issued a period and then decide not to; it tries to issue, and
 the database refuses a second invoice for the same tenant, garage, payer and
 period (migration 0002). The run catches that refusal and reports it per payer.
 A run that remembered what it had done would be right until the day two ran at
-once, and then it would issue twice and remember once.
+once, and then it would issue twice and remember once. The refusal is read BY
+CONSTRAINT NAME: only the period lock means "already issued"; any other unique
+violation is reported as what it is, because "this period was already invoiced"
+said about a reference collision is a false sentence in a report somebody acts on.
 
 **ONE TRANSACTION PER PAYER.** A payer's invoice and its lines land together or
 not at all, and one payer's refusal -- a currency the module will not price, an
@@ -60,6 +63,19 @@ class RunOutcome(Enum):
     ALREADY_ISSUED = "already_issued"
     NOTHING_BILLABLE = "nothing_billable"
     REFUSED = "refused"
+    CONSTRAINT_VIOLATED = "constraint_violated"
+
+
+#: The one constraint whose refusal MEANS "already issued". Any other unique
+#: violation under the insert is a different fact and is reported as one, by
+#: name -- a reference collision is not a period that was invoiced.
+PERIOD_LOCK = "invoices_one_per_payer_per_period"
+
+#: The outcomes that make the command exit non-zero: the payer was not issued and
+#: it was not because nothing was owed or because it already had been.
+FAILED_OUTCOMES: frozenset[RunOutcome] = frozenset(
+    {RunOutcome.REFUSED, RunOutcome.CONSTRAINT_VIOLATED}
+)
 
 
 #: What each outcome means to the operator reading the report. The contract
@@ -77,6 +93,12 @@ RUN_OUTCOME_MEANS: dict[RunOutcome, str] = {
     ),
     RunOutcome.REFUSED: (
         "The module could not price this payer and says why. The payers after it "
+        "were still processed; the command exits non-zero."
+    ),
+    RunOutcome.CONSTRAINT_VIOLATED: (
+        "The database refused this payer's invoice on a constraint OTHER than the "
+        "one-invoice-per-period lock, and the line names it. Nothing was issued for "
+        "this payer and nothing is claimed about the period; the payers after it "
         "were still processed; the command exits non-zero."
     ),
 }
@@ -99,7 +121,9 @@ class RunReport:
 
     @property
     def refused(self) -> bool:
-        return any(line.outcome is RunOutcome.REFUSED for line in self.lines)
+        """Whether any payer failed -- refused, or stopped by a constraint that is
+        not the period lock. The command's non-zero exit reads this."""
+        return any(line.outcome in FAILED_OUTCOMES for line in self.lines)
 
     def rendered(self) -> str:
         head = (
@@ -211,16 +235,36 @@ def run_billing(
                     now=now,
                 )
             connection.commit()
-        except psycopg.errors.UniqueViolation:
+        except psycopg.errors.UniqueViolation as violation:
             connection.rollback()
-            lines.append(
-                RunLine(
-                    payer_id,
-                    RunOutcome.ALREADY_ISSUED,
-                    "this period was already invoiced; nothing issued and nothing re-priced",
-                    reference=reference,
+            constraint = violation.diag.constraint_name
+            # A genuine duplicate violates BOTH locks, and the database names
+            # whichever index it checked first -- the 0001 reference lock, as
+            # measured. So the name alone does not settle it: the period lock's
+            # own fact is read back. Already issued means a row for this garage,
+            # payer and period EXISTS; anything else is the other constraint.
+            with tenant(connection, tenant_id) as cursor:
+                issued = _period_is_issued(cursor, stored.uuid, payer_uuid, period.start_day)
+            connection.rollback()
+            if constraint == PERIOD_LOCK or issued:
+                lines.append(
+                    RunLine(
+                        payer_id,
+                        RunOutcome.ALREADY_ISSUED,
+                        "this period was already invoiced; nothing issued and nothing re-priced",
+                        reference=reference,
+                    )
                 )
-            )
+            else:
+                lines.append(
+                    RunLine(
+                        payer_id,
+                        RunOutcome.CONSTRAINT_VIOLATED,
+                        f"the database refused the invoice on {constraint!r}; nothing issued, "
+                        "and this period is NOT known to be invoiced",
+                        reference=reference,
+                    )
+                )
             continue
 
         lines.append(
@@ -235,6 +279,15 @@ def run_billing(
         )
 
     return RunReport(garage_id=garage.id, period=period, lines=tuple(lines))
+
+
+def _period_is_issued(cursor: Any, garage_uuid: Any, payer_uuid: Any, start_day: date) -> bool:
+    """The fact the period lock guards, read directly."""
+    cursor.execute(
+        "SELECT 1 FROM invoices WHERE garage_id = %s AND payer_id = %s AND period_start_day = %s",
+        (garage_uuid, payer_uuid, start_day),
+    )
+    return cursor.fetchone() is not None
 
 
 def _persist(

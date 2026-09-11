@@ -27,6 +27,23 @@ reset itself on a fact it could not see would be a count that never reset.
 ``record_payment_method_changed`` is how the caller tells it. Stated because the
 specification asked for a behaviour that its own PCI rule makes unobservable, and
 an input is the only honest way to have both.
+
+**A CHARGE IS FOR THE BALANCE, AND NOTHING OWED IS REFUSED BY NAME.** ``charge_invoice``
+takes the amount to charge; the store-backed caller passes the outstanding balance
+(total minus unreversed payments) and a caller with no store passes nothing and
+gets the total. An amount of zero or less is ``REFUSAL_NOTHING_OWED`` before the
+processor is called: a paid invoice is never charged again, a part-paid one is
+charged its remainder, and a fully waived one is not charged at all.
+
+**A PROCESSOR'S RESULT IS NEVER DISCARDED SILENTLY.** The processor call is the
+one thing here this module does not control. If it raises, the outcome is ERROR
+with the exception named in the detail; if what it returned could not even be
+received -- a result carrying an instrument-shaped reference is refused by the
+guard inside the processor's own return -- the outcome is ERROR and the detail
+says UNKNOWN, because money may have moved and this module cannot know. A row is
+written for every one of those by the store-backed caller; a message that would
+itself trip the guard is replaced by the fixed word ``withheld`` rather than
+losing the row to its own text.
 """
 
 from __future__ import annotations
@@ -36,9 +53,14 @@ from enum import Enum
 from typing import Protocol
 
 from .agreement import Agreement
-from .findings import REFUSAL_NO_MANDATE, REFUSAL_RETRIES_EXHAUSTED, Refused
+from .findings import (
+    REFUSAL_NO_MANDATE,
+    REFUSAL_NOTHING_OWED,
+    REFUSAL_RETRIES_EXHAUSTED,
+    Refused,
+)
 from .invoice import Invoice
-from .sensitive import refuse_instrument_like
+from .sensitive import InstrumentLike, refuse_instrument_like
 
 #: His rule. Three, and the fourth needs a new payment method first.
 MAX_ATTEMPTS = 3
@@ -153,18 +175,57 @@ class StubProcessor:
         )
 
 
+#: The detail an attempt carries when the processor's result could not be received.
+#: Fixed text, because the thing it describes is exactly the case where nothing the
+#: processor said may be repeated.
+RESULT_UNKNOWN_DETAIL = (
+    "processor result refused by the instrument guard; outcome unknown -- reconcile "
+    "with the processor"
+)
+
+#: The detail an attempt carries when the processor raised and its message would
+#: itself trip the guard. The row is never lost to its own text.
+DETAIL_WITHHELD = "withheld"
+
+
+def result_of(processor: PaymentProcessor, request: ChargeRequest) -> ChargeResult:
+    """Call the processor and ALWAYS come back with a result.
+
+    A raise becomes ERROR naming the exception; a result the guard refused inside
+    the processor's own return becomes ERROR saying unknown. See the module
+    docstring: a reported result is never discarded silently.
+    """
+    try:
+        return processor.charge(request)
+    except InstrumentLike:
+        return ChargeResult(outcome=Outcome.ERROR, detail=RESULT_UNKNOWN_DETAIL)
+    except Exception as exc:  # noqa: BLE001 -- the processor is the one thing not ours
+        detail = f"{type(exc).__name__}: {exc}"
+        try:
+            return ChargeResult(outcome=Outcome.ERROR, detail=detail)
+        except InstrumentLike:
+            return ChargeResult(outcome=Outcome.ERROR, detail=DETAIL_WITHHELD)
+
+
 def charge_invoice(
     processor: PaymentProcessor,
     agreement: Agreement,
     invoice: Invoice,
     retry: RetryState,
+    *,
+    amount_minor: int | None = None,
 ) -> tuple[ChargeResult, RetryState]:
     """Attempt one charge, or refuse by name.
 
-    Two refusals, both before anything is attempted: no mandate, and retries
-    exhausted. Refusing before the attempt matters -- a processor that has already
-    been called cannot be un-called, and "we tried it anyway and then complained"
-    is how a customer gets charged on an agreement nobody agreed to.
+    Three refusals, all before anything is attempted: no mandate, retries
+    exhausted, and nothing owed. Refusing before the attempt matters -- a
+    processor that has already been called cannot be un-called, and "we tried it
+    anyway and then complained" is how a customer gets charged on an agreement
+    nobody agreed to, or twice for one month.
+
+    ``amount_minor`` is what is charged: the caller's balance, or the invoice
+    total when none is given. The request carries that amount and never the total
+    by default of somebody forgetting to subtract.
     """
     if agreement.mandate is None:
         raise Refused(
@@ -180,12 +241,20 @@ def charge_invoice(
             f"and the maximum is {MAX_ATTEMPTS}.",
         )
 
-    result = processor.charge(
+    amount = invoice.total_minor if amount_minor is None else amount_minor
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+        raise Refused(
+            REFUSAL_NOTHING_OWED,
+            f"invoice {retry.invoice_reference!r} has {amount!r} minor units to charge.",
+        )
+
+    result = result_of(
+        processor,
         ChargeRequest(
             payer_id=invoice.payer_id,
-            amount_minor=invoice.total_minor,
+            amount_minor=amount,
             currency=invoice.currency,
             invoice_reference=retry.invoice_reference,
-        )
+        ),
     )
     return result, retry.after_attempt(result)

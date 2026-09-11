@@ -78,7 +78,7 @@ def covered_from_store(
 
         chosen: StoredAgreement = max(mine, key=lambda i: (i.agreement.id, i.agreement.version))
         unpaid_since = _earliest_unpaid_due_at(cursor, chosen.payer_uuid, stored.uuid)
-        exceptions = _exceptions_for(cursor, chosen.uuid, chosen.payer_uuid, stored.uuid)
+        exceptions = _exceptions_for(cursor, chosen.agreement.id, chosen.payer_uuid, stored.uuid)
     connection.rollback()
 
     grace = applied_grace_days(garage.payment_grace_days, exceptions)
@@ -104,21 +104,31 @@ def _earliest_unpaid_due_at(cursor: Any, payer_uuid: Any, garage_uuid: Any) -> d
 
 
 def _exceptions_for(
-    cursor: Any, agreement_uuid: Any, payer_uuid: Any, garage_uuid: Any
+    cursor: Any, agreement_external_id: str, payer_uuid: Any, garage_uuid: Any
 ) -> tuple[OwnerException, ...]:
     """The exceptions on the agreement, plus those on the payer's unpaid invoices
-    at this garage -- the two places a grace extension or a block can sit."""
+    at this garage -- the two places a grace extension or a block can sit.
+
+    **BY THE AGREEMENT'S IDENTITY, ACROSS EVERY VERSION.** An exception is stored
+    against the version row the owner was looking at -- that is a fact worth
+    keeping -- but it is READ by ``external_id``, because a price change is a new
+    version row and an owner's block must not lift on the day the price moved.
+    The engine's ``OwnerException.agreement_id`` is the external id for the same
+    reason. A control plants the read back onto one version's row and requires
+    red.
+    """
     cursor.execute(
         """
-        SELECT e.id, e.agreement_id, i.reference, e.kind, e.recorded_by, e.recorded_at,
+        SELECT e.id, a.external_id, i.reference, e.kind, e.recorded_by, e.recorded_at,
                e.note, e.amount_minor, e.extra_grace_days
         FROM owner_exceptions e
+        LEFT JOIN agreements a ON a.id = e.agreement_id
         LEFT JOIN invoices i ON i.id = e.invoice_id
-        WHERE e.agreement_id = %s
+        WHERE a.external_id = %s
            OR (i.payer_id = %s AND i.garage_id = %s AND i.paid_at IS NULL)
         ORDER BY e.recorded_at
         """,
-        (agreement_uuid, payer_uuid, garage_uuid),
+        (agreement_external_id, payer_uuid, garage_uuid),
     )
     out = []
     for row in cursor.fetchall():
@@ -126,7 +136,7 @@ def _exceptions_for(
         out.append(
             OwnerException(
                 id=str(eid),
-                agreement_id=None if agreement_ref is None else str(agreement_ref),
+                agreement_id=agreement_ref,
                 invoice_reference=invoice_ref,
                 kind=ExceptionKind(kind),
                 recorded_by=by,
