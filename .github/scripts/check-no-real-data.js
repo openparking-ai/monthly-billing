@@ -19,6 +19,18 @@ import { createHash } from 'node:crypto';
 
 const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
 
+/**
+ * Backslashes are removed BEFORE matching, and this is load-bearing. A real
+ * address held as a regex literal carries a backslash before each dot in its
+ * host, and EMAIL does not match that spelling: the guard was blind to exactly
+ * the form a guard-shaped file uses. (Not written out here even as a shape --
+ * this file is inside the scanned set, and the fix would catch it.) That is how two real
+ * addresses sat in a sibling scanner's own source, and it is the fourth place
+ * in this project the same shape has appeared. The pre-push hook strips them
+ * for the same reason; the repo-side half now agrees with it.
+ */
+const unescaped = (text) => text.replace(/\\/g, '');
+
 /** Addresses that are fine to write down. */
 const ALLOWED_EMAIL = [
   /@users\.noreply\.github\.com$/i,
@@ -60,7 +72,7 @@ function trackedFiles() {
 
 function scanText(file, text) {
   const problems = [];
-  for (const match of text.match(EMAIL) ?? []) {
+  for (const match of unescaped(text).match(EMAIL) ?? []) {
     const why = FORBIDDEN_DIGESTS.get(digestOf(match));
     if (why) {
       problems.push({ file, value: `sha256:${digestOf(match).slice(0, 12)}`, why });
@@ -94,6 +106,10 @@ function scanRepo() {
 //: genuinely real-looking address.
 const REAL_LOOKING = ['someone.real', 'a-real-company.example-not'].join('@');
 const INVENTED = ['nobody', 'example.com'].join('@');
+//: The same two, spelled the way a regex literal spells them. The first must
+//: still be caught -- that is the blind spot -- and the second must still pass,
+//: or the fix has made the allowlist a nuisance instead of closing a hole.
+const escaped = (address) => address.replace(/\./g, '\\.');
 
 function selfTest() {
   const probe = '_no_real_data_control.md';
@@ -109,7 +125,18 @@ function selfTest() {
       console.error('SELF-TEST FAILED: an example.com address was wrongly rejected');
       return false;
     }
-    console.log('self-test OK — a real-looking address fails; an example.com one passes.');
+    const caughtEscaped = scanText(probe, `const re = /${escaped(REAL_LOOKING)}/;\n`);
+    if (caughtEscaped.length === 0) {
+      console.error('SELF-TEST FAILED: a real-looking address with escaped dots was not caught');
+      return false;
+    }
+    const cleanEscaped = scanText(probe, `const re = /${escaped(INVENTED)}/;\n`);
+    if (cleanEscaped.length !== 0) {
+      console.error('SELF-TEST FAILED: an example.com address with escaped dots was wrongly rejected');
+      return false;
+    }
+    console.log('self-test OK — a real-looking address fails, with escaped dots too;');
+    console.log('               an example.com one passes, with escaped dots too.');
     return true;
   } finally {
     rmSync(probe, { force: true });
