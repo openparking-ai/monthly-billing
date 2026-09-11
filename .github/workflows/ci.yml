@@ -14,7 +14,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { persist-credentials: false }
+        with:
+          # Full history, as emails.yml already does and for the same reason.
+          # The sibling-name guard below reads COMMIT MESSAGES as well as files.
+          # At the default depth of 1 a pull-request checkout is one synthetic
+          # merge commit, so the guard's commit half saw nothing and passed --
+          # measured: depth 1 sees 1 commit, full depth sees the branch.
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -31,14 +38,26 @@ jobs:
           node .github/scripts/check-no-real-data.js --self-test
           node .github/scripts/check-no-real-data.js
 
-      - name: No name from the maintainer's other software
+      - name: No name from the maintainer's other software (self-test)
         # Same shape, and the same reason. This guard holds its forbidden words
         # as digests rather than spelling them, so its self-test proves the
         # MECHANISM -- see the script's header for what that does and does not
         # establish. It also asserts the attribution line is PRESENT.
-        run: |
-          node .github/scripts/check-no-sibling-names.js --self-test
-          node .github/scripts/check-no-sibling-names.js
+        run: node .github/scripts/check-no-sibling-names.js --self-test
+
+      - name: No name from the maintainer's other software (this pull request)
+        # The tracked files, plus every commit message the pull request would
+        # bring in -- the range, not whatever HEAD happens to be. Without the
+        # range the guard scans the checkout's own log, which is one commit.
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: node .github/scripts/check-no-sibling-names.js "$BASE..$HEAD"
+
+      - name: No name from the maintainer's other software (whole history)
+        if: github.event_name != 'pull_request'
+        run: node .github/scripts/check-no-sibling-names.js
 
   test:
     name: test
