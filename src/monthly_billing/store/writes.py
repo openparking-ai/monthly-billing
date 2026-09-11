@@ -20,12 +20,27 @@ becoming the leak.
 from __future__ import annotations
 
 from typing import Any, Protocol
+from uuid import UUID
 
 from ..sensitive import InstrumentLike, refuse_instrument_like
 
 
 class InstrumentRefusedAtTheStore(InstrumentLike):
     """An instrument-shaped value was refused on its way into the database."""
+
+
+def as_uuid(value: Any) -> UUID:
+    """The store's ids are ``UUID`` OBJECTS, never their text.
+
+    A uuid rendered as text is a string of digits and dashes, and the instrument
+    guard reads strings: one in a few dozen has a digit-and-dash stretch long
+    enough to satisfy the card check and is refused as a card number. It is a
+    false positive, but the guard cannot know that, and loosening the guard for
+    "things that look like uuids" would be a hole shaped exactly like a card
+    number with dashes in it. So the ids stay typed, the guard skips non-strings,
+    and every public entry point converts what it was handed here.
+    """
+    return value if isinstance(value, UUID) else UUID(str(value))
 
 
 class Cursor(Protocol):
@@ -76,4 +91,32 @@ def guarded_insert(cursor: Cursor, table: str, record: dict[str, Any]) -> Any:
     return cursor.execute(
         f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) RETURNING id",
         tuple(record.values()),
+    )
+
+
+def guarded_update(
+    cursor: Cursor, table: str, record: dict[str, Any], where: dict[str, Any]
+) -> Any:
+    """Update the columns in ``record`` on the rows matching ``where``, scanned
+    first exactly as an insert is.
+
+    The only UPDATE this module makes is the derived ``invoices.paid_at`` -- the
+    three append-only tables have no UPDATE granted at all -- but a second write
+    path that skipped the scan would be a second path, so it goes through the
+    same chokepoint and the same identifier rule.
+    """
+    refuse_instrument_in_record(table, {**record, **where})
+    if not record or not where:
+        raise ValueError(f"an update on {table} needs both columns to set and rows to match.")
+    for identifier in (table, *record, *where):
+        if not identifier.replace("_", "").isalnum():
+            raise ValueError(
+                f"{identifier!r} is not a table or column name. See guarded_insert for "
+                "why these are restricted rather than escaped."
+            )
+    assignments = ", ".join(f"{column} = %s" for column in record)
+    conditions = " AND ".join(f"{column} = %s" for column in where)
+    return cursor.execute(
+        f"UPDATE {table} SET {assignments} WHERE {conditions}",
+        (*record.values(), *where.values()),
     )

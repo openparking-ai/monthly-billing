@@ -60,8 +60,14 @@ Stated first, so nothing here is later read as a promise:
 | **G14** | Every fixture carries its own control asserting it holds the property it claims to represent, and those controls run as tests. A DST fixture whose zone does not shift, or two identity rules that agree, read as coverage while sampling one point on the axis that decides. |
 | **G15** | docs/CONTRACT.md is GENERATED from this registry and from the enums and refusal codes that implement it, and its prose is derived rather than fixed: a value that contradicts a published sentence changes the sentence, because generation is not verification. |
 | **G16** | Every test module contributes at least one registered guarantee, derived from the filesystem and read from the AST -- so a module cannot be added, skipped or deleted without a guard noticing. A module that PLANTS a defect may not be excused at all. |
+| **G17** | A billing run is idempotent BY CONSTRAINT: the database holds one invoice per tenant, garage, payer and period, so a second run of the same period issues nothing, re-prices nothing, and says so per payer rather than erroring or duplicating. |
+| **G18** | A period is owned by exactly one of the first charge and the billing run, decided by PERIOD and never by line count: the run does not re-issue the two periods the first charge covered, and it does issue every period after them. |
+| **G19** | An invoice is paid only by unreversed payments summing to its total, and paid_at is DERIVED after each of the three events that can change that -- a payment, a reversal, an owner adjustment that moves the total. A reversal reopens the invoice from its ORIGINAL due date, never from the reversal. |
+| **G20** | Payments, reversals and charge attempts are append-only BY GRANT: the application role has no UPDATE and no DELETE on them, so money history is never edited, only added to -- and the store's instrument guard scans every row of theirs on the way in, as it does everywhere. |
+| **G21** | The store-backed entitlement call returns the pure function's answer and nothing else -- the same field set, no money -- with 'unpaid since' derived as the earliest unpaid due date, and it HONOURS the owner's grace extensions and blocks rather than reading the garage's base figure alone. |
+| **G22** | The charge log is the truth for retries: the retry state is rebuilt from the persisted attempts since the last persisted payment-method change, so three recorded non-success attempts refuse the fourth by name, a recorded method change allows it, and a restart forgets nothing. |
 
-That is 16 guarantees. Every one of them has a fail control that has been proven to fire, and the count above is derived from the registry rather than typed here.
+That is 22 guarantees. Every one of them has a fail control that has been proven to fire, and the count above is derived from the registry rather than typed here.
 <!-- END:guarantees -->
 
 ## The entitlement answer
@@ -209,6 +215,96 @@ Invoice to payer payer-acme for garage garage-downtown
 
 The agreement starts 2026-03-10 and the garage bills on `last_day_of_month`, so the first period runs 2026-02-28 to 2026-03-31 and 21 of 31 days of it are billable. The part period and the following one are separate lines, never summed.
 <!-- END:worked-example -->
+
+## The billing run
+
+M1 priced a period as a pure function. The run is what issues it: one command,
+called by the operator's platform on the billing day -- the platform is an
+ordinary client and nothing in this module wakes itself up. For every payer
+with an agreement at the garage, the period's invoice is built with the same
+function and written, with its lines, in one transaction. **It is idempotent by
+constraint**: the database holds one invoice per tenant, garage, payer and
+period, so a second run of the same period issues nothing and says so. The
+first charge, taken on the binding day, owns the period containing the start
+day and the one after it; the run owns every period after those, by period and
+never by line count.
+
+<!-- GENERATED:billing-run -->
+| outcome | what it means |
+|---|---|
+| `issued` | The invoice and its lines were written, in one transaction. |
+| `already_issued` | This period was already invoiced for this payer. Nothing was issued and nothing was re-priced; the database refused the duplicate and the run reports it. |
+| `nothing_billable` | No agreement of this payer's has a billable day in the period -- paused, cancelled, not started, or owned by the first charge -- so no invoice exists. |
+| `refused` | The module could not price this payer and says why. The payers after it were still processed; the command exits non-zero. |
+
+Every payer at the garage gets exactly one of these 4 outcomes, per run. The run exits non-zero if any payer was refused, and zero otherwise -- `already_issued` is an answer, not an error.
+<!-- END:billing-run -->
+
+An invoice is **due at the start instant of its period** -- the billing day,
+garage-local, paid in advance -- and the garage's grace period counts from
+there.
+
+## Payments received
+
+**Paid is derived, never set by hand.** An invoice is paid when the sum of its
+unreversed payments reaches its total, and `paid_at` is the instant of the
+event that made that true. It is re-derived after each of the three events
+that can change it: a payment, a reversal, and an owner's adjustment that moves
+the total. A reversal reopens the invoice **from its original due date** -- a
+cheque that bounced was never money -- and is a second row beside the payment,
+never an edit to it. A partial payment leaves the invoice unpaid; the module
+decides nothing about it, and the owner records an exception with an amount
+if they decide something.
+
+<!-- GENERATED:payment-methods -->
+**Payment methods** — how money is recorded as received:
+
+- `card` — written ONLY by the charge path, when the processor says SUCCESS
+- `cheque` — recorded by the operator, one command
+- `ach` — recorded by the operator, one command
+
+2 of the 3 methods can be recorded by hand; the rest cannot, so a card payment nobody charged has nowhere to land.
+
+**Reversal reasons** — a payment that did not stand, as a second row:
+
+- `bounced_cheque`
+- `ach_returned`
+- `chargeback`
+- `processor_reversed`
+
+A payment has at most one reversal, and there are 4 reasons it can carry. What happens next is the owner's decision, recorded as an exception.
+<!-- END:payment-methods -->
+
+Payments, reversals and charge attempts are **append-only by grant**: the
+application role has no `UPDATE` and no `DELETE` on them. The charge log is the
+truth for retries -- the retry state is rebuilt from the persisted attempts
+since the last persisted payment-method change, so nothing is forgotten on a
+restart.
+
+### The second month
+
+<!-- GENERATED:second-month -->
+```
+$ monthly-billing run --garage garage-downtown --period-containing 2026-05-01
+Billing run for garage garage-downtown, period 2026-04-30 to 2026-05-31
+  payer-acme: ISSUED — 2 line(s), total 14500 USD minor
+
+$ monthly-billing covered-in-store --garage garage-downtown --vehicle "ABC-123" --at 2026-05-05T09:00 (local)
+COVERED
+
+$ monthly-billing covered-in-store --garage garage-downtown --vehicle "ABC-123" --at 2026-05-06T09:00 (local)
+NOT COVERED
+  This agreement has an unpaid invoice past the garage's grace period. Not covered means this stay is an ordinary transient stay and is priced like any other. It does not mean refuse entry, and it never means refuse exit.
+
+$ monthly-billing record-payment --invoice garage-downtown/2026-04-30/payer-acme --method cheque --amount-minor 14500 --received-at 2026-05-08T10:00 (local)
+  invoice PAID at 2026-05-08T10:00:00-06:00
+
+$ monthly-billing covered-in-store --garage garage-downtown --vehicle "ABC-123" --at 2026-05-09T09:00 (local)
+COVERED
+```
+
+The run issued garage-downtown/2026-04-30/payer-acme for the period 2026-04-30 to 2026-05-31, due on its first day, 14500 minor units. The garage states a grace of 5 days, so the vehicle is still covered on 2026-05-05 and reads `UNPAID_PAST_GRACE` on 2026-05-06. A cheque recorded on 2026-05-08 for the full amount pays it from that instant, and the vehicle is covered again. The lane was told nothing about money at any point.
+<!-- END:second-month -->
 
 ## Payment instruments
 

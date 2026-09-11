@@ -107,6 +107,43 @@ GUARANTEES: dict[str, str] = {
         "name rather than credited or ignored. This module does not decide refunds; "
         "the owner records an exception with an amount."
     ),
+    "G17": (
+        "A billing run is idempotent BY CONSTRAINT: the database holds one invoice "
+        "per tenant, garage, payer and period, so a second run of the same period "
+        "issues nothing, re-prices nothing, and says so per payer rather than "
+        "erroring or duplicating."
+    ),
+    "G18": (
+        "A period is owned by exactly one of the first charge and the billing run, "
+        "decided by PERIOD and never by line count: the run does not re-issue the "
+        "two periods the first charge covered, and it does issue every period after "
+        "them."
+    ),
+    "G19": (
+        "An invoice is paid only by unreversed payments summing to its total, and "
+        "paid_at is DERIVED after each of the three events that can change that -- "
+        "a payment, a reversal, an owner adjustment that moves the total. A "
+        "reversal reopens the invoice from its ORIGINAL due date, never from the "
+        "reversal."
+    ),
+    "G20": (
+        "Payments, reversals and charge attempts are append-only BY GRANT: the "
+        "application role has no UPDATE and no DELETE on them, so money history is "
+        "never edited, only added to -- and the store's instrument guard scans every "
+        "row of theirs on the way in, as it does everywhere."
+    ),
+    "G21": (
+        "The store-backed entitlement call returns the pure function's answer and "
+        "nothing else -- the same field set, no money -- with 'unpaid since' derived "
+        "as the earliest unpaid due date, and it HONOURS the owner's grace extensions "
+        "and blocks rather than reading the garage's base figure alone."
+    ),
+    "G22": (
+        "The charge log is the truth for retries: the retry state is rebuilt from the "
+        "persisted attempts since the last persisted payment-method change, so three "
+        "recorded non-success attempts refuse the fourth by name, a recorded method "
+        "change allows it, and a restart forgets nothing."
+    ),
 }
 
 

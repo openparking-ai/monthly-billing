@@ -39,16 +39,23 @@ def connect(dsn: str) -> Any:
     return psycopg.connect(dsn)
 
 
-@contextmanager
-def tenant(connection: Any, tenant_id: str) -> Iterator[Any]:
-    """Run inside one tenant's context, and put it back afterwards.
+def set_tenant(cursor: Any, tenant_id: Any) -> None:
+    """Put this TRANSACTION into one tenant's context.
 
     ``set_config(..., true)`` is transaction-local, so the context cannot leak
     into the next statement on a pooled connection -- which is how one tenant
-    ends up reading another's rows through a connection that was reused.
+    ends up reading another's rows through a connection that was reused. The
+    corollary binds every caller that commits: a commit ends the transaction and
+    the context with it, so the next transaction sets it again or reads nothing.
     """
+    cursor.execute(f"SELECT set_config('{TENANT_SETTING}', %s, true)", (str(tenant_id),))
+
+
+@contextmanager
+def tenant(connection: Any, tenant_id: Any) -> Iterator[Any]:
+    """A cursor inside one tenant's context, for the current transaction."""
     with connection.cursor() as cursor:
-        cursor.execute(f"SELECT set_config('{TENANT_SETTING}', %s, true)", (tenant_id,))
+        set_tenant(cursor, tenant_id)
         yield cursor
 
 

@@ -18,6 +18,7 @@ agree happily while both carried the same error.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -31,7 +32,15 @@ import generate_contract as gen  # noqa: E402
 
 @pytest.mark.guarantee("G15")
 def test_the_document_on_disk_is_the_generated_one():
-    """What `--check` runs in CI, asserted here too so a local run catches it."""
+    """What `--check` runs in CI, asserted here too so a local run catches it.
+
+    The second-month block is produced by running the store, so this needs a
+    database -- the same allowance G12 has, for the same reason. CI always sets
+    the DSN, so CI never skips it.
+    """
+    pytest.importorskip("psycopg")
+    if not os.environ.get("MONTHLY_BILLING_TEST_DSN"):
+        pytest.skip("MONTHLY_BILLING_TEST_DSN is not set")
     current = gen.DOC.read_text()
     assert current == gen.render(current), (
         "docs/CONTRACT.md does not match its generator. Run "
@@ -149,6 +158,90 @@ def test_the_worked_example_is_produced_by_running_the_module():
     assert format_minor(invoice.total_minor, garage.currency) in block
     for line in invoice.lines:
         assert format_minor(line.amount_minor, garage.currency) in block
+
+
+@pytest.mark.guarantee("G15")
+def test_a_new_run_outcome_appears_with_its_sentence():
+    """PLANT: an outcome added to the run's enum, with its meaning, must be
+    published -- and one added WITHOUT a meaning must refuse to render."""
+    from enum import Enum
+
+    class Planted(Enum):
+        ISSUED = "issued"
+        ALREADY_ISSUED = "already_issued"
+        NOTHING_BILLABLE = "nothing_billable"
+        REFUSED = "refused"
+        PLANTED = "planted_outcome"
+
+    original_enum, original_means = gen.RunOutcome, gen.RUN_OUTCOME_MEANS
+    means = {Planted(o.value): text for o, text in original_means.items()}
+    gen.RunOutcome = Planted
+    gen.RUN_OUTCOME_MEANS = means
+    try:
+        with pytest.raises(SystemExit):
+            gen.block_billing_run()  # an outcome with no sentence refuses
+        means[Planted.PLANTED] = "A planted outcome sentence."
+        rendered = gen.block_billing_run()
+    finally:
+        gen.RunOutcome, gen.RUN_OUTCOME_MEANS = original_enum, original_means
+    assert "`planted_outcome`" in rendered and "A planted outcome sentence." in rendered
+    assert f"exactly one of these {len(Planted)} outcomes" in rendered
+
+
+@pytest.mark.guarantee("G15")
+def test_the_payment_methods_block_follows_the_enums_and_the_operator_set():
+    """PLANT: shrinking the operator-recorded set must change the count sentence
+    and the per-method wording; every reversal reason is listed."""
+    from monthly_billing.payments import PaymentMethod, ReversalReason
+
+    before = gen.block_payment_methods()
+    for reason in ReversalReason:
+        assert f"`{reason.value}`" in before
+    for method in PaymentMethod:
+        assert f"`{method.value}`" in before
+    assert f"{len(gen.OPERATOR_RECORDED)} of the {len(PaymentMethod)} methods" in before
+
+    original = gen.OPERATOR_RECORDED
+    gen.OPERATOR_RECORDED = frozenset({PaymentMethod.CHEQUE})
+    try:
+        after = gen.block_payment_methods()
+    finally:
+        gen.OPERATOR_RECORDED = original
+    assert f"1 of the {len(PaymentMethod)} methods" in after
+    assert "`ach` — written ONLY by the charge path" in after
+
+
+@pytest.mark.guarantee("G15")
+@pytest.mark.parametrize("grace", [5, 12], ids=["as-stated", "planted-grace"])
+def test_the_second_month_is_produced_by_running_the_store(grace):
+    """The block is the store's own output. PLANT: a garage stating a different
+    grace must move the dates and the sentence -- if the block were a transcript,
+    the plant would change nothing."""
+    import dataclasses
+    from datetime import date, timedelta
+
+    from monthly_billing import cli
+
+    pytest.importorskip("psycopg")
+    if not os.environ.get("MONTHLY_BILLING_TEST_DSN"):
+        pytest.skip("MONTHLY_BILLING_TEST_DSN is not set")
+
+    real = cli.load_garage_file
+
+    def planted(path: str):
+        return dataclasses.replace(real(path), payment_grace_days=grace)
+
+    cli.load_garage_file = planted
+    try:
+        block = gen.block_second_month()
+    finally:
+        cli.load_garage_file = real
+
+    due = date(2026, 4, 30)
+    assert f"grace of {grace} days" in block
+    assert f"still covered on {due + timedelta(days=grace)}" in block
+    assert f"`UNPAID_PAST_GRACE` on {due + timedelta(days=grace + 1)}" in block
+    assert "14500" in block, "the run's total, recomputed by the store, not typed"
 
 
 @pytest.mark.guarantee("G15")

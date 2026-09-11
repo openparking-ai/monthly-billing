@@ -384,6 +384,144 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "period whole, so an owner pauses an account mid-period and the module "
         "silently decides a refund nobody authorised",
     ),
+    "G17": (
+        "tests/test_g17_the_run_issues_once.py",
+        "migrations/0002_billing_run_payments_and_reversals.sql",
+        source(
+            "ALTER TABLE invoices",
+            "  ADD CONSTRAINT invoices_one_per_payer_per_period",
+            "  UNIQUE (tenant_id, garage_id, payer_id, period_start_day);",
+        ),
+        "-- PLANTED: the one-invoice-per-period constraint is gone",
+        "the period lock from 0002 is missing from the catalogue. The behavioural "
+        "tests stay green -- the reference lock from 0001 still stops the duplicate, "
+        "which is what having two independent locks means -- so this is caught by "
+        "the catalogue test that reads both constraints by their columns",
+    ),
+    "G17/both-locks": (
+        "tests/test_g17_the_run_issues_once.py",
+        "migrations/0002_billing_run_payments_and_reversals.sql",
+        source(
+            "ALTER TABLE invoices",
+            "  ADD CONSTRAINT invoices_one_per_payer_per_period",
+            "  UNIQUE (tenant_id, garage_id, payer_id, period_start_day);",
+        ),
+        source(
+            "-- PLANTED: BOTH locks gone -- the period lock is never added and the",
+            "-- reference lock from 0001 is dropped, so nothing in the database stops",
+            "-- a second invoice for the same period",
+            "ALTER TABLE invoices DROP CONSTRAINT invoices_tenant_id_reference_key;",
+        ),
+        "with no constraint left, a second run of the same period issues a second "
+        "invoice. If the run were idempotent by convention -- remembering what it "
+        "had issued -- this plant would change nothing and the control would be "
+        "dead; it is idempotent by constraint, and this is the proof",
+    ),
+    "G18": (
+        "tests/test_g17_the_run_issues_once.py",
+        "billing_run.py",
+        "    return period.start_day in (partial.start_day, following.start_day)",
+        "    return False  # PLANTED: the run owns every period, the first charge none",
+        "the ownership rule says the run owns every period, so the two periods the "
+        "first charge already billed are billed again by the next run -- a new "
+        "parker charged twice for the same month",
+    ),
+    "G19/reopen": (
+        "tests/test_g19_paid_is_derived.py",
+        "payments.py",
+        '        guarded_update(cursor, "invoices", {"paid_at": None}, {"id": invoice_uuid})',
+        source(
+            "        guarded_update(  # PLANTED: unpaid from the REVERSAL, not the billing day",
+            '            cursor, "invoices", {"paid_at": None, "due_at": event_at},',
+            '            {"id": invoice_uuid},',
+            "        )",
+        ),
+        "a reversal moves the due date to the day the bank said no, so a payer "
+        "whose cheque bounced gets a fresh grace period they never paid for -- the "
+        "other reading of 'reopens', planted to prove the test tells them apart",
+    ),
+    "G19/adjustment": (
+        "tests/test_g19_paid_is_derived.py",
+        "exceptions_store.py",
+        "        state = rederive_paid_at(cursor, invoice_uuid, exception.recorded_at)",
+        "        state = paid_state(cursor, invoice_uuid)  # PLANTED: read, never re-derived",
+        "the third event stops re-deriving: an owner waives the remainder of a "
+        "partly paid invoice and paid_at stays NULL, so the credited payer reads "
+        "as unpaid at the barrier -- the omission that is easy to make",
+    ),
+    "G20": (
+        "tests/test_g20_money_history_is_append_only.py",
+        "migrations/0002_billing_run_payments_and_reversals.sql",
+        source(
+            "GRANT SELECT, INSERT ON payments, payment_reversals, charge_attempts "
+            "TO monthly_billing_app;",
+        ),
+        source(
+            "GRANT SELECT, INSERT, UPDATE, DELETE  -- PLANTED: append-only in a comment only",
+            "  ON payments, payment_reversals, charge_attempts TO monthly_billing_app;",
+        ),
+        "the three money-history tables are granted UPDATE and DELETE, so a payment "
+        "can be edited or removed and 'append-only' is a sentence above the table "
+        "rather than a property of it",
+    ),
+    "G9/payments": (
+        "tests/test_g20_money_history_is_append_only.py",
+        "payments.py",
+        source(
+            "        guarded_insert(",
+            "            cursor,",
+            '            "payments",',
+            "            {",
+        ),
+        source(
+            "        (lambda cursor, table, record: cursor.execute(  # PLANTED: no chokepoint",
+            "            f\"INSERT INTO {table} ({', '.join(record)}) \"",
+            "            f\"VALUES ({', '.join(['%s'] * len(record))}) RETURNING id\",",
+            "            tuple(record.values()),",
+            "        ))(",
+            "            cursor,",
+            '            "payments",',
+            "            {",
+        ),
+        "the payment row goes to the database around the chokepoint, so a "
+        "card-shaped processor reference lands in `payments` unscanned -- the new "
+        "table is exactly the column the guard exists to cover",
+    ),
+    "G21/grace": (
+        "tests/test_g21_covered_from_the_store.py",
+        "entitlement_store.py",
+        "    grace = applied_grace_days(garage.payment_grace_days, exceptions)",
+        "    grace = garage.payment_grace_days  # PLANTED: the owner's extension is ignored",
+        "the store-backed call reads the garage's base grace and never the owner's "
+        "extend_grace exceptions, so an owner who gave a customer another week "
+        "watches the lane call them transient on day six",
+    ),
+    "G21/block": (
+        "tests/test_g21_covered_from_the_store.py",
+        "entitlement_store.py",
+        "        blocked_by_owner=is_blocked(exceptions),",
+        "        blocked_by_owner=False,  # PLANTED: a block is never read",
+        "the store-backed call never reads a block, so the owner's decision to "
+        "block an agreement reaches no barrier",
+    ),
+    "G22": (
+        "tests/test_g22_charge_attempts_are_the_truth.py",
+        "charging.py",
+        '        if kind == "payment_method_changed":',
+        "        if False:  # PLANTED: the method-change rows are never read",
+        "the rebuild ignores the persisted method-change rows, so the reset is a "
+        "row nobody reads: three old declines refuse a charge on the new card for "
+        "ever -- the lie on restart the log exists to prevent",
+    ),
+    "G12/0002": (
+        "tests/test_g12_rls_from_migration_0001.py",
+        "migrations/0002_billing_run_payments_and_reversals.sql",
+        "ALTER TABLE payments FORCE  ROW LEVEL SECURITY;",
+        "-- PLANTED: FORCE removed from payments",
+        "a table added by the SECOND migration ships without FORCE ROW LEVEL "
+        "SECURITY. The coverage check reads the catalogue, so it finds this without "
+        "anybody adding the new table to anything -- which is the promise G12 makes",
+    ),
 }
 
 

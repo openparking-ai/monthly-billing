@@ -104,3 +104,35 @@ def pytest_sessionfinish(session, exitstatus):
         "not a default.\n"
     )
     session.exitstatus = 1
+
+
+# ---------------------------------------------------------------------------
+# The store-backed fixtures. One migrated database per test module, as the
+# owner; one application connection (NOSUPERUSER, NOBYPASSRLS); one fresh
+# tenant per test. See tests/store_harness.py for what each of these does.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def owner():
+    from store_harness import DSN, migrate
+
+    connection = migrate(DSN)
+    yield connection
+    connection.close()
+
+
+@pytest.fixture(scope="module")
+def app(owner):
+    from store_harness import DSN, app_connection
+
+    connection = app_connection(DSN)
+    yield connection
+    connection.close()
+
+
+@pytest.fixture()
+def tenant_id(owner):
+    from store_harness import new_tenant
+
+    return new_tenant(owner)

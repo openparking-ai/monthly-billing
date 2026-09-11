@@ -71,9 +71,15 @@ class ChargeResult:
     outcome: Outcome
     #: Why, for a person. Never contains an instrument -- checked, not trusted.
     detail: str
+    #: The processor's own reference for a SUCCESS, if it gave one. It is what
+    #: the card payment row records as `processor_reference`, so a payment can
+    #: be traced back to the processor's side. Never an instrument -- checked.
+    reference: str | None = None
 
     def __post_init__(self) -> None:
         refuse_instrument_like(self.detail, "charge_result.detail")
+        if self.reference is not None:
+            refuse_instrument_like(self.reference, "charge_result.reference")
 
 
 @dataclass(frozen=True)
