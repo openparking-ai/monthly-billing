@@ -14,9 +14,19 @@ committed before the processor is asked, a re-ask is committed as an `ask` row
 before the processor is asked again, and what the module did not receive is an
 `unknown` row: no outcome, no count, the attempt still pending.
 
+The second branch review then ran the race in which the answer ARRIVES after
+the operator has resolved the attempt -- the worker's re-ask was at the
+processor when `resolve-attempt` ran -- and found the worker's answer refused
+and rolled back: a call the processor received, followed by no row. Now that
+answer is a `late` row beside the operator's resolution, carrying what the
+processor said; so every call that reaches the processor is followed by a row
+-- `outcome`, `unknown`, or `late`. (What a late SUCCESS does to the money is
+G31's.)
+
 The controls: the wrapper planted away (the raise propagates again, no row);
 the reservation's commit planted away (the processor sees no row); the ask row
-planted away (a re-ask leaves no row).
+planted away (a re-ask leaves no row); the late row planted away (a late answer
+leaves no row).
 """
 
 from __future__ import annotations
@@ -28,7 +38,7 @@ import pytest
 
 from fixtures import month_end_garage, simple_agreement
 from monthly_billing.billing_run import run_billing
-from monthly_billing.charging import attempt_charge, pending_attempts
+from monthly_billing.charging import LATE, attempt_charge, pending_attempts, resolve_attempt
 from monthly_billing.findings import REFUSAL_RETRIES_EXHAUSTED, Refused
 from monthly_billing.payment import (
     DETAIL_WITHHELD,
@@ -241,3 +251,117 @@ def test_a_re_ask_is_committed_as_an_ask_row_before_the_processor_is_asked_again
     assert {a for _, a in processor.saw} == {first.attempt_id}
     assert processor.key == first.attempt_id == second.attempt_id
     assert processor.amount == 12000
+
+
+def late_answer_race(tenant_id, reference, operator_says: Outcome, processor_says: Outcome):
+    """THE SECOND BRANCH L3'S `l3b_r3_late_answer` race, as a repo test.
+
+    The first ask is lost (an `unknown` row, the attempt pending); the worker's
+    re-ask is HELD at the processor; while it is held the operator resolves the
+    attempt with ``operator_says``; the processor then answers the worker with
+    ``processor_says``. Returns the worker's ``ChargeOutcome``, the operator's,
+    and the key the processor was asked under. Two connections of its own -- a
+    worker and an operator are two processes.
+    """
+    import threading
+
+    from store_harness import DSN, app_connection
+
+    worker_connection, operator_connection = app_connection(DSN), app_connection(DSN)
+    try:
+        attempt_charge(
+            worker_connection, tenant_id, _Raises(), reference, recorded_by="cron", now=_tick(1)
+        )
+        (attempt_id,) = pending_attempts(worker_connection, tenant_id, reference)
+        entered, proceed = threading.Event(), threading.Event()
+        keys: list = []
+
+        class _Held:
+            def charge(self, request):
+                keys.append(request.idempotency_key)
+                entered.set()
+                proceed.wait(20)
+                return ChargeResult(
+                    outcome=processor_says, detail="approved by the processor",
+                    reference="auth-processor" if processor_says is Outcome.SUCCESS else None,
+                )
+
+        result: dict = {}
+
+        def worker():
+            try:
+                result["worker"] = attempt_charge(
+                    worker_connection, tenant_id, _Held(), reference,
+                    recorded_by="cron", now=_tick(2),
+                )
+            except Exception as exc:  # noqa: BLE001 -- the shape of a failure is the finding
+                result["worker"] = exc
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        assert entered.wait(20), "the worker never reached the processor"
+        result["operator"] = resolve_attempt(
+            operator_connection, tenant_id, attempt_id,
+            ChargeResult(
+                outcome=operator_says, detail=f"operator says {operator_says.value}",
+                reference="auth-op" if operator_says is Outcome.SUCCESS else None,
+            ),
+            recorded_by="operator", now=_tick(2),
+        )
+        proceed.set()
+        thread.join(timeout=20)
+        assert not isinstance(result["worker"], Exception), result["worker"]
+        return result["worker"], result["operator"], keys
+    finally:
+        worker_connection.close()
+        operator_connection.close()
+
+
+@pytest.mark.guarantee("G24")
+@pytest.mark.parametrize("operator_says", [Outcome.SUCCESS, Outcome.DECLINE])
+@pytest.mark.parametrize("processor_says", [Outcome.SUCCESS, Outcome.DECLINE])
+def test_an_answer_that_lands_after_the_operator_resolved_is_a_late_row_never_dropped(
+    app, tenant_id, operator_says, processor_says
+):
+    """The four arms of the race: whatever the operator typed and whatever the
+    processor said, the processor's answer is a `late` row beside the operator's
+    `outcome` row, carrying the outcome and the detail (and the reference when
+    given), and the worker's call returns normally, marked late. Two calls
+    reached the processor; two rows follow them -- the `unknown` and the
+    `late` -- and the operator's outcome row is the operator's. The late row is
+    not an outcome: the fold does not count it, the attempt is not pending, and
+    the operator's second resolution is still refused by name."""
+    from monthly_billing.findings import REFUSAL_ATTEMPT_ALREADY_RESOLVED
+
+    reference = _issued(app, tenant_id)
+    worker, operator, keys = late_answer_race(tenant_id, reference, operator_says, processor_says)
+    assert worker.late and worker.result.outcome is processor_says
+    assert worker.attempt_id == operator.attempt_id and keys == [operator.attempt_id]
+    log = query(
+        app, tenant_id,
+        "SELECT kind, outcome, detail, recorded_by FROM charge_attempts ORDER BY sequence",
+    )
+    assert [k for k, _, _, _ in log] == ["attempt", "unknown", "ask", "outcome", LATE], log
+    assert log[3] == (
+        "outcome", operator_says.value, f"operator says {operator_says.value}", "operator"
+    )
+    _, late_outcome, late_detail, late_by = log[4]
+    assert late_outcome == processor_says.value and late_by == "cron"
+    assert late_detail.startswith("approved by the processor")
+    assert ("auth-processor" in late_detail) == (processor_says is Outcome.SUCCESS)
+    followed = query(
+        app, tenant_id,
+        "SELECT count(*) FROM charge_attempts WHERE kind IN ('unknown', 'late')",
+    )
+    assert followed == [(2,)], "a call the processor received is followed by no row"
+    assert pending_attempts(app, tenant_id, reference) == ()
+    assert worker.retry.attempts == (1 if operator_says is Outcome.DECLINE else 0), (
+        "the late row counted toward the three, or the operator's decline did not"
+    )
+    with pytest.raises(Refused) as refused:
+        resolve_attempt(
+            app, tenant_id, operator.attempt_id,
+            ChargeResult(outcome=Outcome.SUCCESS, detail="again", reference="auth-again"),
+            recorded_by="operator", now=_tick(3),
+        )
+    assert refused.value.code == REFUSAL_ATTEMPT_ALREADY_RESOLVED

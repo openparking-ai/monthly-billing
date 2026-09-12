@@ -50,6 +50,7 @@ from monthly_billing.agreement import (  # noqa: E402
     load_agreement_file,
 )
 from monthly_billing.billing_run import FAILED_OUTCOMES, RUN_OUTCOME_MEANS, RunOutcome  # noqa: E402
+from monthly_billing.charging import LATE  # noqa: E402
 from monthly_billing.entitlement import Answer  # noqa: E402
 from monthly_billing.exceptions_by_owner import (  # noqa: E402
     LANDS_A_LINE,
@@ -279,7 +280,18 @@ def block_payment_methods() -> str:
         "key, so a repeated request charges once. An operator records what the processor "
         "said once (`resolve-attempt`); a second answer for the same attempt is "
         f"`{REFUSAL_ATTEMPT_ALREADY_RESOLVED}`, from the check under the lock and from "
-        "the database's one-outcome-per-attempt index caught by its name. A pending "
+        "the database's one-outcome-per-attempt index caught by its name. The processor's "
+        "own answer to an ask that was at the processor when the operator resolved is not "
+        "a second answer: it is recorded beside the operator's resolution as a "
+        f"`{LATE}` row carrying what the processor said, never dropped, and a late "
+        "success is honoured -- the processor's word on money outranks the operator's "
+        "typed one. A late SUCCESS the operator did not record writes the card payment "
+        "for the amount RESERVED in the same transaction (the money moved; the invoice "
+        "is paid and no fresh key is minted); a late SUCCESS on a recorded success writes "
+        "no second payment; a late decline or error is the row only -- the operator's "
+        "SUCCESS and its payment stand, and the contradiction is in the log for the "
+        "operator's reversal. A late row is not an outcome and the attempt is not "
+        "pending: `pending-attempts` does not list it. A pending "
         "attempt comes only from the library's `attempt_charge`; nothing on the command "
         "line charges.",
     ]

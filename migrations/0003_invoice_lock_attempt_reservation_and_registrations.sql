@@ -56,11 +56,23 @@ BEGIN;
 --                         success, decline or error. On success the card
 --                         payment is written in the SAME transaction. At most
 --                         one per attempt.
+--   kind = 'late'      -- what the processor said to an ask that was at the
+--                         processor when the OPERATOR resolved the attempt: the
+--                         answer landed after the outcome row and is recorded
+--                         beside it, never dropped. Carries the outcome and the
+--                         detail (and the reference, when given), no money. A
+--                         late SUCCESS the operator did not record writes the
+--                         card payment for the amount reserved in the same
+--                         transaction -- the money moved. It is not an outcome
+--                         row: the fold does not count it, and the attempt is
+--                         not pending.
 --   kind = 'payment_method_changed' -- as before, now written under the invoice
 --                         lock so that its place in the log is its place in
 --                         time relative to the reservations around it.
 --
--- Per attempt the log reads `attempt, [unknown, ask, unknown, ask ...], outcome`.
+-- Per attempt the log reads `attempt, [unknown, ask, unknown, ask ...], outcome`
+-- -- and, when the operator resolved it while a re-ask was at the processor,
+-- `late` after the outcome.
 -- A pending attempt -- an `attempt` row with no `outcome` row -- is never
 -- charged past: if its last row is `attempt` or `ask` a request may be in
 -- flight and the next charge is refused by name; if its last row is `unknown`
@@ -105,12 +117,12 @@ ALTER TABLE charge_attempts
 
 ALTER TABLE charge_attempts
   ADD CONSTRAINT charge_attempts_kind_check
-    CHECK (kind IN ('attempt', 'unknown', 'ask', 'outcome', 'payment_method_changed')),
+    CHECK (kind IN ('attempt', 'unknown', 'ask', 'outcome', 'late', 'payment_method_changed')),
   -- The shapes, each all-or-nothing. A reservation names its attempt and
   -- carries the money and no outcome; an unknown and an ask name their attempt
-  -- and carry neither money nor outcome; an outcome names its attempt, says how
-  -- it went, and carries no money of its own (the reservation already did); a
-  -- method change carries none of it.
+  -- and carry neither money nor outcome; an outcome, and a late answer, names
+  -- its attempt, says how it went, and carries no money of its own (the
+  -- reservation already did); a method change carries none of it.
   ADD CONSTRAINT charge_attempts_shape_by_kind CHECK (
     (kind = 'attempt'
        AND outcome IS NULL AND attempt_id IS NOT NULL
@@ -118,7 +130,7 @@ ALTER TABLE charge_attempts
     (kind IN ('unknown', 'ask')
        AND outcome IS NULL AND attempt_id IS NOT NULL
        AND amount_minor IS NULL AND currency IS NULL) OR
-    (kind = 'outcome'
+    (kind IN ('outcome', 'late')
        AND outcome IS NOT NULL AND attempt_id IS NOT NULL
        AND amount_minor IS NULL AND currency IS NULL) OR
     (kind = 'payment_method_changed'
@@ -126,8 +138,8 @@ ALTER TABLE charge_attempts
        AND amount_minor IS NULL AND currency IS NULL)
   );
 
--- One reservation and at most one outcome per attempt id; unknowns and asks
--- are any number and are not indexed here. The module refuses a second outcome
+-- One reservation and at most one outcome per attempt id; unknowns, asks and
+-- late answers are any number and are not indexed here. The module refuses a second outcome
 -- by name under the invoice lock before this fires, so through the module's
 -- own paths the index is never reached. What it does when it IS reached -- a
 -- raw insert, or the check bypassed in-process -- is hand the module a

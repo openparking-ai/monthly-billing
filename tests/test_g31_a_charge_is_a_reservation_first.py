@@ -18,13 +18,26 @@ attempt stays pending, and the next call asks again with the SAME key for the
 amount RESERVED -- once with no answer (a second unknown, still pending), once
 with an answer (the outcome, one payment of the reserved amount).
 
+The second branch review then ran the race in which the operator resolves the
+attempt while the worker's re-ask is at the processor and the processor then
+ANSWERS: the worker's answer was refused and rolled back, and with the operator
+having typed DECLINE and the processor having said SUCCESS, the next charge
+minted a fresh key -- money moved twice. The processor's word on money
+outranks the operator's typed one: a late SUCCESS the operator did not record
+writes the card payment for the amount RESERVED, in the same transaction as
+its `late` row, so the invoice is paid and no fresh key is minted; a late
+SUCCESS on a recorded success writes no second payment; a late decline or
+error writes the row only and the operator's payment stands. The operator's
+second resolution stays refused by name.
+
 Controls: the reservation's commit planted away (G24's test sees no row from
 the processor); T2 split into two transactions (the outcome row survives a
 crash before the payment -- the atomicity test here goes red); a pending
 attempt charged past; an unknown settled as an error outcome; a resume that
 mints a fresh key; the one-outcome-per-attempt index not caught by name; the
 refusal without the attempt id; the listing that cannot tell in-flight from
-unknown.
+unknown; a late success not honoured (the payment planted away -- the next
+charge mints a fresh key again).
 """
 
 from __future__ import annotations
@@ -487,3 +500,86 @@ def _issued_second(app, tenant_id) -> str:
     (line,) = run_billing(app, tenant_id, GARAGE.id, date(2026, 6, 1), now=_tick(2)).lines
     _issued_second.reference = line.reference
     return line.reference
+
+
+@pytest.mark.guarantee("G31")
+def test_a_late_success_the_operator_did_not_record_is_paid_and_no_fresh_key_is_minted(
+    app, tenant_id
+):
+    """THE SECOND BRANCH L3'S FINDING (i), the arm with money in it: the
+    operator resolves DECLINE while the re-ask is at the processor; the
+    processor says SUCCESS. The late row carries the SUCCESS and the card
+    payment for the RESERVED amount lands with it, so the invoice is paid, and
+    the next charge is nothing owed with the processor not asked -- no fresh
+    key. The operator's decline still counts one toward the three."""
+    from test_g24_every_processor_call_leaves_a_row import late_answer_race
+
+    reference = _issued(app, tenant_id)
+    worker, operator, keys = late_answer_race(
+        tenant_id, reference, Outcome.DECLINE, Outcome.SUCCESS
+    )
+    assert worker.late and worker.payment_id is not None
+    assert worker.paid is not None and worker.paid.paid and worker.paid.overpaid_minor == 0
+    assert operator.payment_id is None and operator.result.outcome is Outcome.DECLINE
+    assert query(
+        app, tenant_id, "SELECT amount_minor, method, processor_reference FROM payments"
+    ) == [(12000, "card", "auth-processor")]
+    assert _kinds(app, tenant_id) == ["attempt", "unknown", "ask", "outcome", "late"]
+    assert query(app, tenant_id, "SELECT paid_at IS NOT NULL FROM invoices") == [(True,)]
+    assert worker.retry.attempts == 1
+    processor = _Succeeds()
+    with pytest.raises(Refused) as refused:
+        attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(4))
+    assert refused.value.code == REFUSAL_NOTHING_OWED and processor.calls == 0, (
+        "a late success was not honoured: the next charge minted a fresh key"
+    )
+    assert _kinds(app, tenant_id) == ["attempt", "unknown", "ask", "outcome", "late"]
+
+
+@pytest.mark.guarantee("G31")
+@pytest.mark.parametrize("processor_says", [Outcome.SUCCESS, Outcome.DECLINE])
+def test_a_late_answer_on_a_recorded_success_writes_no_second_payment(
+    app, tenant_id, processor_says
+):
+    """The operator resolved SUCCESS; the processor then says SUCCESS (the same
+    money -- no second payment) or DECLINE (the operator's SUCCESS and its
+    payment stand, and the contradiction is in the log for the operator's
+    reversal). One payment either way, the operator's, and nothing owed."""
+    from test_g24_every_processor_call_leaves_a_row import late_answer_race
+
+    reference = _issued(app, tenant_id)
+    worker, operator, _ = late_answer_race(tenant_id, reference, Outcome.SUCCESS, processor_says)
+    assert worker.late and worker.payment_id is None and worker.paid is None
+    assert operator.payment_id is not None
+    assert query(app, tenant_id, "SELECT amount_minor, processor_reference FROM payments") == [
+        (12000, "auth-op")
+    ]
+    assert query(
+        app, tenant_id, "SELECT outcome FROM charge_attempts WHERE kind = 'late'"
+    ) == [(processor_says.value,)]
+    with pytest.raises(Refused) as refused:
+        attempt_charge(app, tenant_id, _Succeeds(), reference, recorded_by="cron", now=_tick(4))
+    assert refused.value.code == REFUSAL_NOTHING_OWED
+
+
+@pytest.mark.guarantee("G31")
+def test_a_late_decline_on_a_recorded_decline_leaves_the_invoice_owed_and_the_next_charge_fresh(
+    app, tenant_id
+):
+    """Nobody said SUCCESS: no payment, the late decline is the row only, the
+    operator's decline counts one, and the next charge is a FRESH reservation
+    -- the one arm in which that is right."""
+    from test_g24_every_processor_call_leaves_a_row import late_answer_race
+
+    reference = _issued(app, tenant_id)
+    worker, operator, _ = late_answer_race(tenant_id, reference, Outcome.DECLINE, Outcome.DECLINE)
+    assert worker.late and worker.payment_id is None and operator.payment_id is None
+    assert query(app, tenant_id, "SELECT count(*) FROM payments") == [(0,)]
+    assert worker.retry.attempts == 1
+    processor = _Succeeds()
+    third = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(4))
+    assert not third.late and third.attempt_id != worker.attempt_id and processor.calls == 1
+    assert _kinds(app, tenant_id) == [
+        "attempt", "unknown", "ask", "outcome", "late", "attempt", "outcome"
+    ]
+    assert query(app, tenant_id, "SELECT count(*) FROM payments") == [(1,)]

@@ -60,12 +60,34 @@ row with no ``outcome`` row. In T1, under the lock:
 * no pending attempt -- reserve as above.
 
 A worker resuming and an operator resolving at once: the first to write the
-outcome row under the lock wins; the second is ``REFUSAL_ATTEMPT_ALREADY_RESOLVED``
--- from the check under the lock, and from the database's one-outcome-per-attempt
-index caught by name as the backstop. Per attempt the log reads ``attempt,
-[unknown, ask, unknown, ask ...], outcome``; an unknown that lands after the
-outcome -- a worker's re-ask returning after the operator resolved -- is
-recorded as the fact it is, and the outcome stands.
+outcome row under the lock wins; a second OPERATOR resolution is
+``REFUSAL_ATTEMPT_ALREADY_RESOLVED`` -- from the check under the lock, and from
+the database's one-outcome-per-attempt index caught by name as the backstop.
+Per attempt the log reads ``attempt, [unknown, ask, unknown, ask ...],
+outcome``; an unknown that lands after the outcome -- a worker's re-ask
+returning after the operator resolved -- is recorded as the fact it is, and
+the outcome stands.
+
+**A LATE PROCESSOR ANSWER IS RECORDED, AND A LATE SUCCESS IS HONOURED.** The
+second branch review ran the same race with the processor ANSWERING: the
+worker's re-ask was at the processor when the operator resolved the attempt,
+the processor then said SUCCESS, the worker's T2 was refused and rolled back,
+and nothing in the store said what the processor said -- with the operator
+having typed DECLINE, the next charge reserved a fresh key and the payer was
+charged twice. The processor's word on money outranks the operator's typed
+one. So in ``attempt_charge``'s T2 only -- never ``resolve_attempt``, whose
+second resolution stays refused -- an answer that finds the attempt already
+resolved is written as a ``late`` row naming the attempt and carrying what the
+processor said (outcome, detail, the reference when given), under the lock,
+and the call returns normally with ``ChargeOutcome.late`` set. A late SUCCESS
+whose recorded outcome is not ``success`` writes the card payment for the
+RESERVED amount in the same transaction and re-derives ``paid_at``: the money
+moved, the module never pretends it did not, and the invoice is paid so no
+fresh key is minted. A late SUCCESS whose recorded outcome IS ``success``
+writes no second payment -- that T2 wrote it. A late decline or error writes
+the row only: the operator's SUCCESS and its payment stand, and the
+contradiction is in the log for the operator's reversal. A ``late`` row is not
+an outcome row -- the fold does not count it -- and the attempt is not pending.
 
 **A CHEQUE BETWEEN T1 AND T2 DOES NOT DROP THE CARD PAYMENT.** The processor
 moved the money the reservation asked for; T2 records it for the reserved
@@ -137,6 +159,10 @@ ONE_OUTCOME_PER_ATTEMPT = "charge_attempts_one_row_per_kind_per_attempt"
 IN_FLIGHT = "in flight"
 UNKNOWN = "unknown"
 
+#: The kind of the row that records what the processor said to an ask that was
+#: at the processor when the operator resolved the attempt (migration 0003).
+LATE = "late"
+
 
 @dataclass(frozen=True)
 class ChargeOutcome:
@@ -153,6 +179,11 @@ class ChargeOutcome:
     attempt_id: UUID
     payment_id: UUID | None
     paid: PaidState | None
+    #: True when the processor's answer found the attempt already resolved by
+    #: the operator and was recorded as a ``late`` row beside that resolution;
+    #: ``payment_id`` is then set only if the late answer was a SUCCESS the
+    #: operator had not recorded.
+    late: bool = False
 
     @property
     def unknown(self) -> bool:
@@ -463,10 +494,17 @@ def _settle(
     *,
     recorded_by: str,
     now: datetime,
-) -> tuple[RetryState, UUID | None, PaidState | None]:
+    from_the_processor: bool = False,
+) -> tuple[RetryState, UUID | None, PaidState | None, bool]:
     """T2. Under the lock: the outcome row, and on success the payment for the
     RESERVED amount, in one transaction. Shared by the charge and by the
-    operator's resolution of a pending attempt."""
+    operator's resolution of a pending attempt.
+
+    ``from_the_processor`` is the charge path's: an answer that finds the
+    attempt already resolved is then a ``late`` row (``_record_late``) rather
+    than a refusal, and the last element of the result says so. The operator's
+    resolution never passes it -- a second resolution stays refused by name.
+    """
     import psycopg  # the store extra; the engine never imports this module
 
     with tenant(connection, tenant_id) as cursor:
@@ -483,10 +521,22 @@ def _settle(
             if reserved_invoice != invoice_uuid:
                 raise AttemptNotFound(f"attempt {attempt_id!r} is not on invoice {invoice_uuid!r}.")
             cursor.execute(
-                "SELECT 1 FROM charge_attempts WHERE attempt_id = %s AND kind = 'outcome'",
+                "SELECT outcome FROM charge_attempts WHERE attempt_id = %s AND kind = 'outcome'",
                 (attempt_id,),
             )
-            if cursor.fetchone() is not None:
+            recorded = cursor.fetchone()
+            if recorded is not None and from_the_processor:
+                payment_id, paid = _record_late(
+                    cursor, tenant_id, invoice_uuid, attempt_id, result,
+                    recorded_outcome=Outcome(recorded[0]), reserved=reserved,
+                    recorded_by=recorded_by, now=now,
+                )
+                retry = retry_state_from_rows(
+                    _reference_of(cursor, invoice_uuid), _load_attempt_rows(cursor, invoice_uuid)
+                )
+                connection.commit()
+                return retry, payment_id, paid, True
+            if recorded is not None:
                 raise Refused(
                     REFUSAL_ATTEMPT_ALREADY_RESOLVED,
                     f"attempt {attempt_id!r} already has an outcome recorded.",
@@ -529,7 +579,53 @@ def _settle(
                 _reference_of(cursor, invoice_uuid), _load_attempt_rows(cursor, invoice_uuid)
             )
     connection.commit()
-    return retry, payment_id, paid
+    return retry, payment_id, paid, False
+
+
+def _record_late(
+    cursor: Any,
+    tenant_id: UUID,
+    invoice_uuid: UUID,
+    attempt_id: UUID,
+    result: ChargeResult,
+    *,
+    recorded_outcome: Outcome,
+    reserved: int,
+    recorded_by: str,
+    now: datetime,
+) -> tuple[UUID | None, PaidState | None]:
+    """The processor answered an ask that was at the processor when the
+    operator resolved the attempt. Inside T2's locked transaction: the ``late``
+    row carrying what the processor said, and -- when it said SUCCESS and the
+    operator recorded something else -- the card payment for the amount
+    RESERVED, because the money moved. A late SUCCESS on a recorded success
+    writes no second payment; a late decline or error is the row only."""
+    detail = result.detail
+    if result.reference is not None:
+        detail = f"{detail} (processor reference {result.reference})"
+    guarded_insert(
+        cursor,
+        "charge_attempts",
+        {
+            "tenant_id": tenant_id,
+            "invoice_id": invoice_uuid,
+            "kind": LATE,
+            "attempt_id": attempt_id,
+            "outcome": result.outcome.value,
+            "detail": detail,
+            "occurred_at": now,
+            "recorded_by": recorded_by,
+        },
+    )
+    cursor.fetchone()
+    if result.outcome is Outcome.SUCCESS and recorded_outcome is not Outcome.SUCCESS:
+        payment_id = insert_payment(
+            cursor, tenant_id, invoice_uuid, PaymentMethod.CARD, reserved, now,
+            recorded_by=recorded_by, processor_reference=result.reference,
+            card_brand=None, card_last4=None,
+        )
+        return payment_id, rederive_paid_at(cursor, invoice_uuid, now)
+    return None, None
 
 
 def _reference_of(cursor: Any, invoice_uuid: Any) -> str:
@@ -549,7 +645,9 @@ def attempt_charge(
     """One attempt, or a refusal by name. The reservation is written before the
     processor is called; the outcome and its payment land together; an answer
     that does not arrive leaves the attempt pending and is asked again, under
-    the same key, by the next call."""
+    the same key, by the next call; an answer that arrives after the operator
+    resolved the attempt is recorded as a ``late`` row, and a late success the
+    operator did not record is paid."""
     tenant_id = as_uuid(tenant_id)
     reservation = _reserve(
         connection, tenant_id, invoice_reference, recorded_by=recorded_by, now=now
@@ -576,13 +674,13 @@ def attempt_charge(
             payment_id=None, paid=None,
         )
 
-    retry, payment_id, paid = _settle(
+    retry, payment_id, paid, late = _settle(
         connection, tenant_id, reservation.invoice_uuid, reservation.attempt_id, answer,
-        recorded_by=recorded_by, now=now,
+        recorded_by=recorded_by, now=now, from_the_processor=True,
     )
     return ChargeOutcome(
         result=answer, retry=retry, attempt_id=reservation.attempt_id,
-        payment_id=payment_id, paid=paid,
+        payment_id=payment_id, paid=paid, late=late,
     )
 
 
@@ -613,7 +711,7 @@ def resolve_attempt(
     if row is None:
         raise AttemptNotFound(f"no attempt with id {attempt_id!r}.")
     invoice_uuid = as_uuid(row[0])
-    retry, payment_id, paid = _settle(
+    retry, payment_id, paid, _ = _settle(
         connection, tenant_id, invoice_uuid, attempt_id, result,
         recorded_by=recorded_by, now=now,
     )
@@ -688,6 +786,7 @@ def record_payment_method_changed(
 
 __all__ = [
     "IN_FLIGHT",
+    "LATE",
     "ONE_OUTCOME_PER_ATTEMPT",
     "UNKNOWN",
     "AttemptNotFound",

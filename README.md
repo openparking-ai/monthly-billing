@@ -140,6 +140,10 @@ in one transaction, and a reservation with no outcome is never charged past.
 **What the module does not know is never written as an outcome**: an answer
 that did not arrive is an `unknown` row, the attempt stays pending, and the
 next charge asks again under the same idempotency key for the amount reserved.
+**A late processor answer is recorded and a late success is honoured**: an
+answer that lands after the operator resolved the attempt is a `late` row
+beside the operator's resolution, and a late success the operator did not
+record writes the card payment for the amount reserved.
 **Every money event takes the invoice's row lock first**, so two events on one
 invoice at once are serialised, and **no exception leaves the lock held**. **One
 car, one agreement per garage**, and a refusal writes nothing. **Every garage

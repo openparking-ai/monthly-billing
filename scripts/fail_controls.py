@@ -966,6 +966,32 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "in flight: the listing cannot tell the two apart and the next charge "
         "refuses instead of asking again under the same key",
     ),
+    "G24/late-row": (
+        "tests/test_g24_every_processor_call_leaves_a_row.py",
+        "charging.py",
+        source(
+            "            if recorded is not None and from_the_processor:",
+            "                payment_id, paid = _record_late(",
+        ),
+        source(
+            "            if recorded is not None and from_the_processor:",
+            "                payment_id, paid = (lambda *a, **k: (None, None))(  # PLANTED",
+        ),
+        "the processor's answer to an ask that was at the processor when the "
+        "operator resolved the attempt is DROPPED again -- the second branch L3's "
+        "finding (i): a call the processor received, followed by no row, and "
+        "nothing in the store says what the processor said under that key",
+    ),
+    "G31/late-success-honoured": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        "    if result.outcome is Outcome.SUCCESS and recorded_outcome is not Outcome.SUCCESS:",
+        "    if False:  # PLANTED: a late SUCCESS the operator did not record is not paid",
+        "a late SUCCESS the operator recorded as a decline writes its row and no "
+        "payment: the money moved at the processor, the invoice still reads owed, "
+        "and the next charge reserves a FRESH key -- the payer charged twice, one "
+        "row later than the finding that found it",
+    ),
     "G32/writes-nothing": (
         "tests/test_g32_one_car_one_agreement_per_garage.py",
         "store/records.py",
