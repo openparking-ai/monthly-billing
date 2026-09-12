@@ -60,6 +60,11 @@ REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE = "REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE"
 REFUSAL_ALREADY_REVERSED = "REFUSAL_ALREADY_REVERSED"
 REFUSAL_REVERSAL_REASON_MISMATCH = "REFUSAL_REVERSAL_REASON_MISMATCH"
 REFUSAL_CARD_FIELDS_WITHOUT_A_CARD = "REFUSAL_CARD_FIELDS_WITHOUT_A_CARD"
+REFUSAL_ATTEMPT_UNRESOLVED = "REFUSAL_ATTEMPT_UNRESOLVED"
+REFUSAL_ATTEMPT_ALREADY_RESOLVED = "REFUSAL_ATTEMPT_ALREADY_RESOLVED"
+REFUSAL_VEHICLE_ALREADY_REGISTERED = "REFUSAL_VEHICLE_ALREADY_REGISTERED"
+REFUSAL_VEHICLE_ON_TWO_AGREEMENTS = "REFUSAL_VEHICLE_ON_TWO_AGREEMENTS"
+REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL = "REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -138,6 +143,39 @@ REFUSALS: dict[str, str] = {
         "A card brand or last four digits were given on a payment that is not a "
         "card payment. Those fields describe the card a processor charged, and a "
         "cheque or an ACH debit has none."
+    ),
+    REFUSAL_ATTEMPT_UNRESOLVED: (
+        "A charge attempt on this invoice is still PENDING: its reservation was "
+        "written and the processor was asked, and no outcome has been recorded -- "
+        "the worker crashed, or the answer was lost. Money may have moved. Nothing "
+        "is charged past a pending attempt: an operator records what the processor "
+        "says (resolve-attempt), and only then may the invoice be charged again."
+    ),
+    REFUSAL_ATTEMPT_ALREADY_RESOLVED: (
+        "This attempt already has an outcome recorded. What the processor said is "
+        "written once; a second answer for the same attempt is a record somebody "
+        "assembled wrong, and it is refused rather than stored beside the first."
+    ),
+    REFUSAL_VEHICLE_ALREADY_REGISTERED: (
+        "This vehicle identity is registered to ANOTHER agreement at this garage. "
+        "One car, one agreement per garage: the registration names the other "
+        "agreement and, if that agreement is cancelled, the day it frees the "
+        "vehicle. Until then the vehicle is not added here."
+    ),
+    REFUSAL_VEHICLE_ON_TWO_AGREEMENTS: (
+        "The agreements handed to this call list the same vehicle under two "
+        "different agreement identities. The store can no longer produce that "
+        "state; a library caller handed it in. The module refuses rather than "
+        "picking one, because the two may disagree about coverage and a guess at "
+        "a barrier is a wrong answer given confidently."
+    ),
+    REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL: (
+        "This adjustment would take the invoice total below zero. A waived fee or "
+        "a credit may reduce what is owed to exactly nothing -- a fully waived "
+        "invoice -- and no further: money owed BY the garage is not a negative "
+        "invoice, it is a refund the owner records as its own decision. Computed "
+        "under the invoice lock from the committed lines; there is no database "
+        "backstop for a floor across rows, so the lock is the whole guard."
     ),
 }
 

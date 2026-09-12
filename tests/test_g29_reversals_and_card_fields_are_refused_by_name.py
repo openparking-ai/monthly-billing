@@ -34,7 +34,7 @@ from monthly_billing.payments import (
     record_payment,
     record_reversal,
 )
-from store_harness import APP_PASSWORD, DSN, needs_postgres, query, seed
+from store_harness import APP_PASSWORD, DSN, app_connection, needs_postgres, query, seed
 
 pytestmark = needs_postgres
 
@@ -70,20 +70,122 @@ def _one_payment_of_each_method(app, tenant_id, reference: str) -> dict[PaymentM
 
 
 @pytest.mark.guarantee("G29")
-def test_a_second_reversal_of_the_same_payment_is_refused_by_name(app, tenant_id):
+def test_a_second_reversal_of_the_same_payment_is_refused_by_name_before_the_database(
+    app, tenant_id
+):
+    """BEFORE the database has to: the second reversal never reaches the
+    insert. Since the constraint is also caught by name as a backstop, a
+    refusal alone would not show which layer refused -- so the inserts are
+    counted, and the control that plants the module's check away turns this
+    red by the second insert it then attempts."""
+    import monthly_billing.payments as pm
+
     reference = _issued(app, tenant_id)
     payment_id, _ = record_payment(
         app, tenant_id, reference, PaymentMethod.CHEQUE, 100, MAY_8, recorded_by="op"
     )
-    record_reversal(
-        app, tenant_id, payment_id, ReversalReason.BOUNCED_CHEQUE, MAY_8, recorded_by="op"
-    )
-    with pytest.raises(Refused) as refused:
+    inserts: list[str] = []
+    real = pm.guarded_insert
+
+    def counting(cursor, table, record):
+        inserts.append(table)
+        return real(cursor, table, record)
+
+    pm.guarded_insert = counting
+    try:
         record_reversal(
             app, tenant_id, payment_id, ReversalReason.BOUNCED_CHEQUE, MAY_8, recorded_by="op"
         )
+        with pytest.raises(Refused) as refused:
+            record_reversal(
+                app, tenant_id, payment_id, ReversalReason.BOUNCED_CHEQUE, MAY_8, recorded_by="op"
+            )
+    finally:
+        pm.guarded_insert = real
     assert refused.value.code == REFUSAL_ALREADY_REVERSED
     app.rollback()
+    assert inserts.count("payment_reversals") == 1, "the second reversal reached the database"
+    assert query(app, tenant_id, "SELECT count(*) FROM payment_reversals") == [(1,)]
+
+
+def _race_two_reversals(app, tenant_id, *, meet_before: str):
+    """Two connections reverse one payment at once. ``meet_before`` is where the
+    two rendezvous: at the lock (the ordinary path) or at the insert with the
+    lock planted away in-process (which is how the BACKSTOP is reached)."""
+    import threading
+
+    import monthly_billing.payments as pm
+
+    reference = _issued(app, tenant_id)
+    payment_id, _ = record_payment(
+        app, tenant_id, reference, PaymentMethod.CHEQUE, 12000, MAY_8, recorded_by="op"
+    )
+    arrived = {"op-1": threading.Event(), "op-2": threading.Event()}
+
+    def wait_for_the_other():
+        me = threading.current_thread().name
+        arrived[me].set()
+        arrived["op-2" if me == "op-1" else "op-1"].wait(1.5)
+
+    real_lock, real_insert = pm.lock_invoice, pm.guarded_insert
+    if meet_before == "lock":
+        def lock(cursor, invoice_uuid):
+            wait_for_the_other()
+            return real_lock(cursor, invoice_uuid)
+        pm.lock_invoice = lock
+    else:
+        pm.lock_invoice = lambda cursor, invoice_uuid: None  # the lock planted away
+        def insert(cursor, table, record):
+            if table == "payment_reversals":
+                wait_for_the_other()
+            return real_insert(cursor, table, record)
+        pm.guarded_insert = insert
+
+    results: dict[str, object] = {}
+
+    def reverse():
+        c = app_connection(DSN)
+        try:
+            record_reversal(c, tenant_id, payment_id, ReversalReason.BOUNCED_CHEQUE, MAY_8,
+                            recorded_by=threading.current_thread().name)
+            results[threading.current_thread().name] = "recorded"
+        except Exception as exc:  # noqa: BLE001 -- the shape of the failure is the finding
+            results[threading.current_thread().name] = exc
+        finally:
+            c.close()
+
+    try:
+        threads = [threading.Thread(target=reverse, name=n) for n in ("op-1", "op-2")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=20)
+    finally:
+        pm.lock_invoice, pm.guarded_insert = real_lock, real_insert
+    return results
+
+
+@pytest.mark.guarantee("G29")
+def test_two_reversals_at_once_are_one_recorded_and_one_refused_by_name(app, tenant_id):
+    """THE OUTSIDE PASS'S R4: the second reversal used to come back as a raw
+    UniqueViolation. Under the invoice lock the second waits and then sees the
+    first's row."""
+    results = _race_two_reversals(app, tenant_id, meet_before="lock")
+    outcomes = sorted(type(r).__name__ if isinstance(r, Exception) else r for r in results.values())
+    assert outcomes == ["Refused", "recorded"], results
+    refused = next(r for r in results.values() if isinstance(r, Refused))
+    assert refused.code == REFUSAL_ALREADY_REVERSED
+    assert query(app, tenant_id, "SELECT count(*) FROM payment_reversals") == [(1,)]
+
+
+@pytest.mark.guarantee("G29")
+def test_the_constraint_is_the_backstop_and_is_caught_by_name(app, tenant_id):
+    """With the lock planted away in-process, both pass the check and one hits
+    the UNIQUE -- which is caught BY ITS NAME and refused, never a driver
+    error. The control plants the catch away and this goes red."""
+    results = _race_two_reversals(app, tenant_id, meet_before="insert")
+    outcomes = sorted(type(r).__name__ if isinstance(r, Exception) else r for r in results.values())
+    assert outcomes == ["Refused", "recorded"], results
     assert query(app, tenant_id, "SELECT count(*) FROM payment_reversals") == [(1,)]
 
 

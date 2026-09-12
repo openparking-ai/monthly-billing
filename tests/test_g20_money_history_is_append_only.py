@@ -199,9 +199,11 @@ def test_a_card_shaped_processor_detail_never_reaches_charge_attempts(app, tenan
         app, tenant_id, _Leaks(), line.reference, recorded_by="cron", now=MAY_8
     )
     assert outcome.result.outcome is Outcome.ERROR and outcome.payment_id is None
-    rows = query(app, tenant_id, "SELECT outcome, detail FROM charge_attempts")
-    assert rows == [("error", RESULT_UNKNOWN_DETAIL)]
-    assert card_shaped() not in rows[0][1]
+    rows = query(
+        app, tenant_id, "SELECT kind, outcome, detail FROM charge_attempts ORDER BY created_at"
+    )
+    assert rows == [("attempt", None, ""), ("outcome", "error", RESULT_UNKNOWN_DETAIL)]
+    assert all(card_shaped() not in detail for _, _, detail in rows)
 
 
 def _uuid_that_reads_as_a_card():

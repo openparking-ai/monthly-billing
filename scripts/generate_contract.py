@@ -52,9 +52,11 @@ from monthly_billing.findings import (  # noqa: E402
     NOT_COVERED_MEANS,
     NOT_COVERED_REASONS,
     REFUSAL_ALREADY_REVERSED,
+    REFUSAL_ATTEMPT_UNRESOLVED,
     REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE,
     REFUSAL_NOTHING_OWED,
     REFUSAL_REVERSAL_REASON_MISMATCH,
+    REFUSAL_VEHICLE_ON_TWO_AGREEMENTS,
     REFUSALS,
 )
 from monthly_billing.garage import BillingDay, IdentityRule  # noqa: E402
@@ -66,6 +68,7 @@ from monthly_billing.payments import (  # noqa: E402
     PaymentMethod,
     ReversalReason,
 )
+from monthly_billing.store.postgres import events_taking_the_lock  # noqa: E402
 
 DOC = ROOT / "docs" / "CONTRACT.md"
 BEGIN = "<!-- GENERATED:{name} -->"
@@ -109,7 +112,12 @@ def block_answer_fields() -> str:
     rows.append("")
     rows.append(
         f"That is the whole answer: {len(Answer.__dataclass_fields__)} fields, none of "
-        "which is money, and none of which could express a decision about a barrier."
+        "which is money, and none of which could express a decision about a barrier. "
+        "Beside covered and not-covered there is one third result, a REFUSAL: handed two "
+        "agreement identities that list the same vehicle, the call refuses by name "
+        f"(`{REFUSAL_VEHICLE_ON_TWO_AGREEMENTS}`, exit 2 on the command line) rather "
+        "than picking one. A refusal is not an answer of no; the not-covered sentence "
+        "does not travel on it."
     )
     return "\n".join(rows)
 
@@ -232,16 +240,45 @@ def block_payment_methods() -> str:
         f"and refused by name otherwise (`{REFUSAL_REVERSAL_REASON_MISMATCH}`). What happens next "
         "is the owner's decision, recorded as an exception.",
         "",
-        "**A charge is for the balance.** The charge path asks the processor for the invoice's "
-        "total minus its unreversed payments, never the total; a balance of nothing is "
-        f"`{REFUSAL_NOTHING_OWED}` before the processor is called, so a paid invoice is never "
-        "charged again and a part-paid one is charged its remainder. Every call to the "
-        "processor leaves an attempt row: a raise is an `error` naming the exception, and a "
-        "result the instrument guard refused inside the processor's own return is an `error` "
-        "whose detail says the outcome is unknown -- a reported result is never discarded "
-        "silently.",
+        "**A charge is for the balance, and it is a reservation first.** The charge path "
+        "reads the invoice's total minus its unreversed payments under the invoice lock, "
+        "never the total; a balance of nothing is "
+        f"`{REFUSAL_NOTHING_OWED}` before the processor is called and before any row is "
+        "written, so a paid invoice is never charged again and a part-paid one is charged "
+        "its remainder. The attempt row -- the RESERVATION, carrying the amount -- is "
+        "committed BEFORE the processor is asked; the processor is handed the attempt id "
+        "as its idempotency key; the OUTCOME row and, on success, the card payment for the "
+        "reserved amount land in one transaction afterwards: a raise is an `error` naming "
+        "the exception, and a result the instrument guard refused inside the processor's "
+        "own return is an `error` whose detail says the outcome is unknown -- a reported "
+        "result is never discarded silently. A reservation with no outcome is a PENDING "
+        f"attempt and the next charge is `{REFUSAL_ATTEMPT_UNRESOLVED}` until an operator "
+        "records what the processor said (`resolve-attempt`, once). A pending attempt comes "
+        "only from the library's `attempt_charge`; nothing on the command line charges.",
     ]
     return "\n".join(lines)
+
+
+def block_serialised() -> str:
+    """Which money events take the invoice lock, READ FROM THE SOURCE. The
+    sentence has two wordings and the value decides which -- a control plants
+    the lock away from one event and requires the other wording."""
+    taken = events_taking_the_lock()
+    names = ", ".join(f"`{n}`" for n in taken)
+    missing = [n for n, ok in taken.items() if not ok]
+    if not missing:
+        verdict = (
+            f"ALL {len(taken)} of them take the invoice row lock first, read from their "
+            "source: two events on one invoice at once are serialised, and the second "
+            "derives `paid_at` from the first's committed rows."
+        )
+    else:
+        verdict = (
+            f"ONLY {len(taken) - len(missing)} of {len(taken)} take the invoice row lock; "
+            + ", ".join(f"`{n}`" for n in missing)
+            + " DOES NOT, and two of its events on one invoice at once are NOT serialised."
+        )
+    return f"The money events are {names}. {verdict}"
 
 
 def block_grants() -> str:
@@ -415,6 +452,7 @@ BLOCKS = {
     "payment-methods": block_payment_methods,
     "second-month": block_second_month,
     "grants": block_grants,
+    "serialised": block_serialised,
 }
 
 

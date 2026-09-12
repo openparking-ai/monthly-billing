@@ -468,20 +468,20 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "tests/test_g20_money_history_is_append_only.py",
         "payments.py",
         source(
-            "        guarded_insert(",
-            "            cursor,",
-            '            "payments",',
-            "            {",
+            "    guarded_insert(",
+            "        cursor,",
+            '        "payments",',
+            "        {",
         ),
         source(
-            "        (lambda cursor, table, record: cursor.execute(  # PLANTED: no chokepoint",
-            "            f\"INSERT INTO {table} ({', '.join(record)}) \"",
-            "            f\"VALUES ({', '.join(['%s'] * len(record))}) RETURNING id\",",
-            "            tuple(record.values()),",
-            "        ))(",
-            "            cursor,",
-            '            "payments",',
-            "            {",
+            "    (lambda cursor, table, record: cursor.execute(  # PLANTED: no chokepoint",
+            "        f\"INSERT INTO {table} ({', '.join(record)}) \"",
+            "        f\"VALUES ({', '.join(['%s'] * len(record))}) RETURNING id\",",
+            "        tuple(record.values()),",
+            "    ))(",
+            "        cursor,",
+            '        "payments",',
+            "        {",
         ),
         "the payment row goes to the database around the chokepoint, so a "
         "card-shaped processor reference lands in `payments` unscanned -- the new "
@@ -649,6 +649,213 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         ),
         "the second-month prose says 'still covered' whatever the store answered: "
         "the number moves, the assertion does not -- the L3's B6 and §6's rule",
+    ),
+    # -- the outside pass's fix round: each of these is a settled finding, planted back --
+    "G30": (
+        "tests/test_g30_every_money_event_takes_the_invoice_lock.py",
+        "payments.py",
+        source(
+            "        invoice_uuid = invoice_uuid_for(cursor, invoice_reference)",
+            "        lock_invoice(cursor, invoice_uuid)",
+            "        payment_uuid = insert_payment(",
+        ),
+        source(
+            "        invoice_uuid = invoice_uuid_for(cursor, invoice_reference)",
+            "        pass  # PLANTED: the payment takes no lock",
+            "        payment_uuid = insert_payment(",
+        ),
+        "record_payment stops taking the invoice lock, so a payment and a credit at "
+        "once each derive paid_at from a snapshot that cannot see the other -- the "
+        "outside pass's N1: paid 10000 of 10000 and paid_at NULL, a paid invoice "
+        "read UNPAID_PAST_GRACE at the lane. The source reader reports it too, and "
+        "the contract's sentence flips to ONLY 4 of 5",
+    ),
+    "G31/reservation-commit": (
+        "tests/test_g24_every_processor_call_leaves_a_row.py",
+        "charging.py",
+        source(
+            "        cursor.fetchone()",
+            "    connection.commit()",
+            "    return _Reservation(",
+        ),
+        source(
+            "        cursor.fetchone()",
+            "    pass  # PLANTED: the reservation is not committed before the processor",
+            "    return _Reservation(",
+        ),
+        "the reservation row is written but NOT committed before the processor is "
+        "called, so a processor can be asked with no row on our side that survives "
+        "the worker -- the outside pass's R1.2, where a crash after the processor "
+        "said yes left nothing and a restart charged again. G24's test reads the log "
+        "from another connection while the processor is being called and sees no row",
+    ),
+    "G31/atomic-outcome": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        source(
+            "        cursor.fetchone()",
+            "        payment_id = paid = None",
+            "        if result.outcome is Outcome.SUCCESS:",
+        ),
+        source(
+            "        cursor.fetchone()",
+            "        connection.commit()  # PLANTED: the outcome is committed before its payment",
+            "        cursor.execute(\"SELECT set_config('monthly_billing.tenant_id', %s, true)\",",
+            "                       (str(tenant_id),))",
+            "        lock_invoice(cursor, invoice_uuid)",
+            "        payment_id = paid = None",
+            "        if result.outcome is Outcome.SUCCESS:",
+        ),
+        "T2 is split into two transactions: the outcome row is committed on its own, "
+        "then the payment in a second -- the outside pass's R1.3 window, a SUCCESS on "
+        "record with no money beside it, and the worker dying between the two leaves "
+        "exactly that",
+    ),
+    "G31/pending": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        "        pending = _pending_attempt(cursor, invoice_uuid)",
+        "        pending = None  # PLANTED: a pending attempt is charged past",
+        "a reservation with no outcome no longer refuses the next charge, so a card "
+        "the processor may already have charged is charged again on the restart",
+    ),
+    "G22/pending-method-change": (
+        "tests/test_g22_charge_attempts_are_the_truth.py",
+        "charging.py",
+        source(
+            "    with tenant(connection, tenant_id) as cursor:",
+            "        invoice_uuid = invoice_uuid_for(cursor, invoice_reference)",
+            "        guarded_insert(",
+            "            cursor,",
+            '            "charge_attempts",',
+            "            {",
+            '                "tenant_id": tenant_id,',
+            '                "invoice_id": invoice_uuid,',
+            '                "kind": "payment_method_changed",',
+        ),
+        source(
+            "    with tenant(connection, tenant_id) as cursor:",
+            "        invoice_uuid = invoice_uuid_for(cursor, invoice_reference)",
+            "        if _pending_attempt(cursor, invoice_uuid) is not None:  # PLANTED",
+            '            raise Refused(REFUSAL_ATTEMPT_UNRESOLVED, "planted: no method change")',
+            "        guarded_insert(",
+            "            cursor,",
+            '            "charge_attempts",',
+            "            {",
+            '                "tenant_id": tenant_id,',
+            '                "invoice_id": invoice_uuid,',
+            '                "kind": "payment_method_changed",',
+        ),
+        "a payment-method change is refused while an attempt is pending, so an "
+        "operator changing a card while collection is stuck is refused for a row "
+        "that moves no money",
+    ),
+    "G22/success-resets": (
+        "tests/test_g22_charge_attempts_are_the_truth.py",
+        "payment.py",
+        "            return replace(self, last_outcome=result.outcome, last_detail=\"\")",
+        source(
+            "            return replace(  # PLANTED: a success resets the count",
+            "                self, attempts=0, last_outcome=result.outcome, last_detail=\"\"",
+            "            )",
+        ),
+        "a success resets the non-success count again -- M1's fold -- so two declines, "
+        "a success and a chargeback leave the payer three fresh attempts they did not "
+        "earn, the count the outside pass's R1.3 saw reset by a success with no payment",
+    ),
+    "G23/cheque-between": (
+        "tests/test_g23_a_charge_is_for_the_balance.py",
+        "charging.py",
+        "        if result.outcome is Outcome.SUCCESS:",
+        source(
+            "        if result.outcome is Outcome.SUCCESS and (  # PLANTED: dropped if paid",
+            "            paid_state(cursor, invoice_uuid).paid_minor",
+            "            < paid_state(cursor, invoice_uuid).total_minor",
+            "        ):",
+        ),
+        "T2 drops the card payment when the invoice was paid meanwhile -- the money "
+        "the processor moved for the reservation is recorded nowhere, silently, "
+        "instead of as an overpayment",
+    ),
+    "G29/concurrent-backstop": (
+        "tests/test_g29_reversals_and_card_fields_are_refused_by_name.py",
+        "payments.py",
+        "            if violation.diag.constraint_name != ONE_REVERSAL_PER_PAYMENT:",
+        "            if True:  # PLANTED: the backstop is not caught by name",
+        "the one-reversal-per-payment constraint comes back as a raw UniqueViolation "
+        "again when two reversals race past the check -- the outside pass's R4, an "
+        "operator handed a driver error for a state the module can name",
+    ),
+    "G32/store": (
+        "tests/test_g32_one_car_one_agreement_per_garage.py",
+        "store/records.py",
+        "            if frees_on is None or frees_on > today:",
+        "            if False:  # PLANTED: the second agreement takes the vehicle",
+        "the store no longer refuses a vehicle another agreement holds: the second "
+        "agreement takes it, silently, and the first is still covering it until its "
+        "own version says otherwise -- one car on two agreements again",
+    ),
+    "G32/pure": (
+        "tests/test_g32_one_car_one_agreement_per_garage.py",
+        "entitlement.py",
+        "    if len(identities) > 1:",
+        "    if False:  # PLANTED: two identities, and the latest version of whichever wins",
+        "the pure call picks again when handed two agreement identities for one "
+        "vehicle -- the outside pass's R2, where the highest id decided coverage "
+        "against the wrong agreement both ways",
+    ),
+    "G32/registration": (
+        "tests/test_g32_one_car_one_agreement_per_garage.py",
+        "entitlement_store.py",
+        "            if item.agreement.id == holder",
+        "            if True  # PLANTED: every agreement listing the plate, registered or not",
+        "the store-backed call goes back to scanning every agreement's vehicle list "
+        "instead of reading the registration, so a row written past the module, or "
+        "a version that has released the car, decides coverage again",
+    ),
+    "G33": (
+        "tests/test_g33_a_total_never_goes_below_zero.py",
+        "exceptions_store.py",
+        "            if owed.total_minor - amount < 0:",
+        "            if False:  # PLANTED: the total may go below zero",
+        "an adjustment past zero lands: a 15000 credit on a 12000 invoice makes the "
+        "total -3000 and paid_at is set with zero payments -- the outside pass's "
+        "Grok 10, money and not an opinion",
+    ),
+    "G34": (
+        "tests/test_g34_a_block_on_an_invoice_survives_the_payment.py",
+        "entitlement_store.py",
+        "               AND (i.paid_at IS NULL OR e.kind IN ('block', 'unblock')))",
+        "               AND i.paid_at IS NULL)  -- PLANTED: paying the invoice lifts its block",
+        "invoice-attached exceptions are read only while the invoice is unpaid "
+        "again, so a cheque lifts the owner's block with no unblock recorded -- the "
+        "outside pass's N2",
+    ),
+    "G35": (
+        "tests/test_g35_overpayment_is_a_recorded_fact.py",
+        "payments.py",
+        "        return max(0, self.paid_minor - self.total_minor)",
+        "        return 0  # PLANTED: an overpayment is a fact nowhere again",
+        "the paid state reports no overpayment whatever was paid, so a 30000 cheque "
+        "on a 12000 invoice reads PAID and the excess is recorded nowhere -- the "
+        "outside pass's Grok 9",
+    ),
+    "G36": (
+        "tests/test_g36_the_command_line_says_when_payment_state_is_now.py",
+        "cli.py",
+        "    if at < datetime.now().astimezone():",
+        "    if False:  # PLANTED: a past --at is answered as of now without saying so",
+        "the command line answers a past instant with today's payment state and says "
+        "nothing -- the outside pass's ChatGPT 5 claim, unsaid again",
+    ),
+    "G12/tenants": (
+        "tests/test_g12_rls_from_migration_0001.py",
+        "store/postgres.py",
+        "                      AND a.attname = 'tenant_id'",
+        "                      AND a.attname = 'tenant_id_planted'",
+        "the tenant-column guard looks for a column no table has, so it reports every "
+        "table but tenants as lacking one -- proving the catalogue read is a "
+        "measurement of the column and the tenants exemption is the only one",
     ),
 }
 

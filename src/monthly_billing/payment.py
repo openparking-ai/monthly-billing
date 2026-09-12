@@ -51,6 +51,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Protocol
+from uuid import UUID
 
 from .agreement import Agreement
 from .findings import (
@@ -86,6 +87,12 @@ class ChargeRequest:
     amount_minor: int
     currency: str
     invoice_reference: str
+    #: The store-backed caller's attempt id, written as a reservation BEFORE this
+    #: request is made. A real processor honours it as an idempotency key, so a
+    #: request repeated after a lost answer charges once; the stub records it. A
+    #: ``UUID`` object, never its text -- see ``store.writes.as_uuid`` for why a
+    #: uuid rendered as text can trip the instrument guard.
+    idempotency_key: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -127,8 +134,13 @@ class RetryState:
         return self.attempts >= MAX_ATTEMPTS
 
     def after_attempt(self, result: ChargeResult) -> RetryState:
+        # A success is recorded and counted toward nothing: it neither adds to
+        # the non-success count nor resets it. The reset is the caller's report
+        # of a new payment method and nothing else -- a success that reset the
+        # count was the outside pass's R1.3, where a persisted success row with
+        # no payment beside it let a restart charge again.
         if result.outcome is Outcome.SUCCESS:
-            return replace(self, attempts=0, last_outcome=result.outcome, last_detail="")
+            return replace(self, last_outcome=result.outcome, last_detail="")
         return replace(
             self,
             attempts=self.attempts + 1,
@@ -165,7 +177,7 @@ class StubProcessor:
         self.requests: list[ChargeRequest] = []
 
     def charge(self, request: ChargeRequest) -> ChargeResult:
-        self.requests.append(request)
+        self.requests.append(request)  # the idempotency key rides on the request
         return ChargeResult(
             outcome=Outcome.ERROR,
             detail=(
@@ -227,6 +239,26 @@ def charge_invoice(
     total when none is given. The request carries that amount and never the total
     by default of somebody forgetting to subtract.
     """
+    amount = invoice.total_minor if amount_minor is None else amount_minor
+    refuse_unless_chargeable(agreement, invoice, retry, amount)
+    result = result_of(
+        processor,
+        ChargeRequest(
+            payer_id=invoice.payer_id,
+            amount_minor=amount,
+            currency=invoice.currency,
+            invoice_reference=retry.invoice_reference,
+        ),
+    )
+    return result, retry.after_attempt(result)
+
+
+def refuse_unless_chargeable(
+    agreement: Agreement, invoice: Invoice, retry: RetryState, amount: int
+) -> None:
+    """The three refusals, before anything is attempted -- and, for the store-
+    backed caller, before its reservation row is written. One place, two
+    callers: ``charge_invoice`` here and ``charging.attempt_charge``'s T1."""
     if agreement.mandate is None:
         raise Refused(
             REFUSAL_NO_MANDATE,
@@ -240,21 +272,8 @@ def charge_invoice(
             f"invoice {retry.invoice_reference!r} has had {retry.attempts} attempts, "
             f"and the maximum is {MAX_ATTEMPTS}.",
         )
-
-    amount = invoice.total_minor if amount_minor is None else amount_minor
     if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
         raise Refused(
             REFUSAL_NOTHING_OWED,
             f"invoice {retry.invoice_reference!r} has {amount!r} minor units to charge.",
         )
-
-    result = result_of(
-        processor,
-        ChargeRequest(
-            payer_id=invoice.payer_id,
-            amount_minor=amount,
-            currency=invoice.currency,
-            invoice_reference=retry.invoice_reference,
-        ),
-    )
-    return result, retry.after_attempt(result)

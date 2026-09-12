@@ -44,8 +44,10 @@ CROSS_TENANT_INSERTS = {
         "payment_reversals_payment_in_tenant",
     ),
     "charge_attempts": (
-        "INSERT INTO charge_attempts (tenant_id, invoice_id, kind, outcome, occurred_at, "
-        "recorded_by) VALUES (%s, %s, 'attempt', 'decline', now(), 'raw')",
+        # The 0003 shape: a reservation names its attempt and carries the money.
+        "INSERT INTO charge_attempts (tenant_id, invoice_id, kind, attempt_id, amount_minor, "
+        "currency, occurred_at, recorded_by) "
+        "VALUES (%s, %s, 'attempt', gen_random_uuid(), 1, 'USD', now(), 'raw')",
         "SELECT id FROM invoices",
         "charge_attempts_invoice_in_tenant",
     ),

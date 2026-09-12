@@ -55,7 +55,7 @@ Stated first, so nothing here is later read as a promise:
 | **G9** | No value shaped like a payment card or a bank account survives into the store or into a log line, and NO TRACKED FILE IN THE REPOSITORY CONTAINS ONE. The guard scans every column of every row from the record's own keys; the repository sweep derives its file set from git and exempts nothing, tests and fixtures included. |
 | **G10** | An owner's exception records who made it and when, and a NOTE CAN NEVER CHANGE AN AMOUNT. The note reaches no arithmetic anywhere in the module; the amount is a separate, typed field, and a monetary exception without one is refused by name. |
 | **G11** | The vehicle list is INDEPENDENT of the spots bought. Twenty vehicles against ten spots is a legal agreement, and the module states the entitlement rather than counting what is inside. |
-| **G12** | Every table this module's migrations create carries a tenant column, ENABLE and FORCE row-level security and an isolation policy -- read from the database catalogue, never from a list of table names. |
+| **G12** | Every table this module's migrations create carries ENABLE and FORCE row-level security and an isolation policy, and every table but `tenants` carries a tenant column -- `tenants` IS the tenant and is isolated by `id = current_tenant_id()`. Read from the database catalogue, never from a list of table names. |
 | **G13** | A pause covering days in a period that has already been paid is REFUSED by name rather than credited or ignored. This module does not decide refunds; the owner records an exception with an amount. |
 | **G14** | Every fixture carries its own control asserting it holds the property it claims to represent, and those controls run as tests. A DST fixture whose zone does not shift, or two identity rules that agree, read as coverage while sampling one point on the axis that decides. |
 | **G15** | docs/CONTRACT.md is GENERATED from this registry and from the enums and refusal codes that implement it, and its prose is derived rather than fixed: a value that contradicts a published sentence changes the sentence, because generation is not verification. |
@@ -65,22 +65,40 @@ Stated first, so nothing here is later read as a promise:
 | **G19** | An invoice is paid only by unreversed payments summing to its total, and paid_at is DERIVED after each of the three events that can change that -- a payment, a reversal, an owner adjustment that moves the total. A reversal reopens the invoice from its ORIGINAL due date, never from the reversal. |
 | **G20** | Payments, reversals and charge attempts are append-only BY GRANT: the application role has no UPDATE and no DELETE on them, so money history is never edited, only added to -- and the store's instrument guard scans every row of theirs on the way in, as it does everywhere. The invoice's own lines and the owner's recorded decisions are history the same way -- no UPDATE, no DELETE -- and an invoice cannot be deleted; it keeps UPDATE for the one derived column, paid_at. |
 | **G21** | The store-backed entitlement call returns the pure function's answer and nothing else -- the same field set, no money -- with 'unpaid since' derived as the earliest unpaid due date, and it HONOURS the owner's grace extensions and blocks rather than reading the garage's base figure alone. |
-| **G22** | The charge log is the truth for retries: the retry state is rebuilt from the persisted attempts since the last persisted payment-method change, so three recorded non-success attempts refuse the fourth by name, a recorded method change allows it, and a restart forgets nothing. |
-| **G23** | A charge is for the BALANCE -- the invoice's total minus its unreversed payments, read through the same derivation that decides paid -- never the total; and a balance of nothing is refused by name BEFORE the processor is called and before any attempt is recorded, so a paid invoice is never charged again, a part-paid one is charged its remainder, and a fully waived one is not charged at all. |
-| **G24** | Every call to the processor leaves an attempt row, whatever the processor did: a result is recorded as it came, a raise is recorded as an error naming the exception, and a result the instrument guard refused inside the processor's own return is recorded as an error whose detail says the outcome is unknown -- a reported result is never discarded silently, and a row is never lost to its own message. |
+| **G22** | The charge log is the truth for retries: the retry state is rebuilt from the persisted OUTCOME rows since the last persisted payment-method change, so three recorded non-success outcomes refuse the fourth by name, a recorded method change allows it -- and is allowed while an attempt is pending, because it moves no money -- a success counts toward nothing and resets nothing, and a restart forgets nothing because nothing lives outside the rows. |
+| **G23** | A charge is for the BALANCE -- the invoice's total minus its unreversed payments, read under the invoice lock through the same derivation that decides paid -- never the total; and a balance of nothing is refused by name BEFORE the processor is called and before any row is written, so a paid invoice is never charged again, a part-paid one is charged its remainder, and a fully waived one is not charged at all. A payment that lands between the reservation and the outcome does not cancel the card payment the processor made: it is recorded for the amount reserved and the invoice reads OVERPAID, never silently. |
+| **G24** | Every call to the processor is PRECEDED by its attempt row -- the reservation, written and committed before the processor is asked, so a call the processor received always has a row on our side -- and followed by an outcome row recorded as it came: a raise as an error naming the exception, a result the instrument guard refused inside the processor's own return as an error whose detail says the outcome is unknown. A reported result is never discarded silently, and a row is never lost to its own message. |
 | **G25** | An owner's exception is read by the agreement's IDENTITY across every version of it: a block or a grace extension recorded against one version still reaches the barrier after a price change has stored the next. |
 | **G26** | An owner exception's amount is a POSITIVE number of minor units, refused by name by the module and by CHECK in the database, so no kind can be turned into its opposite by a sign -- and a refund records the decision and its amount and moves NO total: a paid period is paid. |
 | **G27** | ALREADY_ISSUED means exactly that a row for this garage, payer and period exists: a unique violation on any other constraint is reported as its own outcome, naming the constraint, and makes the run exit non-zero -- the run never says a period was invoiced when it was not. |
 | **G28** | Every money-history row points into its OWN tenant by composite key -- a payment at its invoice, a reversal at its payment, an attempt at its invoice -- so a row cannot reference another tenant's even by a raw INSERT that the policy would let past, because a foreign-key check runs past row-level security and the key does not. |
-| **G29** | A payment is reversed at most once, for a reason that fits its method, and card fields sit only on a card payment -- each refused BY NAME by the module before the database has to, so an operator is never handed a raw driver error for a state the module can name. |
+| **G29** | A payment is reversed at most once, for a reason that fits its method, and card fields sit only on a card payment -- each refused BY NAME by the module before the database has to, so an operator is never handed a raw driver error for a state the module can name. Two reversals of one payment AT ONCE are one recorded and one refused by name: the check runs under the invoice lock, and the one-reversal-per-payment constraint is caught by its name as the backstop. |
+| **G30** | Every event that changes an invoice's money -- a payment, a reversal, an owner's adjustment, both halves of a charge, the resolution of a pending attempt -- runs inside a transaction that first takes the invoice's row lock, so two events on one invoice at once are serialised and the second derives paid_at from the first's COMMITTED rows. Which events take the lock is read from the source by the contract, never typed. |
+| **G31** | A charge is a PERSISTED RESERVATION, then the processor, then an OUTCOME with its payment: the attempt row is committed BEFORE the processor is called, the outcome row and the card payment land in ONE transaction, and a reservation with no outcome -- a worker that died after the reservation, or after the processor answered -- is never charged past: the next charge is refused by name until an operator records what the processor said, once. |
+| **G32** | ONE CAR, ONE AGREEMENT PER GARAGE. A vehicle identity is registered to one agreement at a garage; a second agreement listing it is refused by name, naming the holder and, if the holder is cancelled, the day it frees the vehicle -- on which day the registration passes to the new agreement. The database's UNIQUE is the backstop for a raw insert. The coverage call picks nothing: handed two agreement identities for one vehicle, it refuses by name. |
+| **G33** | An invoice total never goes below zero: an owner's adjustment that would take it there is refused by name, computed under the invoice lock from the committed lines; exactly zero is a fully waived invoice and is allowed. There is no database backstop for a floor across rows -- the lock is the whole guard, and the contract says so. |
+| **G34** | A block the owner records against an INVOICE is lifted by an unblock the owner records, never by a payment: invoice-attached blocks and unblocks are read whatever the invoice's paid state, and a grace extension on an invoice is read only while that invoice is unpaid. |
+| **G35** | Overpayment is a RECORDED FACT and never acted on: the paid state carries by how much the unreversed payments exceed the total, the command line prints it, and no cap is put on what an operator records -- a cheque is what it is; a refund is the owner's exception and the money's return is collection's. |
+| **G36** | The store-backed coverage call answers the AGREEMENT axes at the instant asked and the PAYMENT state as of now, and the command line SAYS SO whenever the instant asked is in the past -- one line, present for a past instant and absent otherwise. |
 
-That is 29 guarantees. Every one of them has a fail control that has been proven to fire, and the count above is derived from the registry rather than typed here.
+That is 36 guarantees. Every one of them has a fail control that has been proven to fire, and the count above is derived from the registry rather than typed here.
 <!-- END:guarantees -->
 
 ## The entitlement answer
 
 One call: given a vehicle identity, a garage and an instant, is this vehicle
 covered? The answer is an ACCESS FACT and carries no money.
+
+*Description of mechanism, hand-written (§6 kind 3), not derived:* the pure
+call evaluates everything at the instant it is given. The **store-backed** call
+answers the AGREEMENT axes at that instant — not started, cancelled, paused,
+access hours — and the PAYMENT state **as of now**, as the store holds `paid_at`
+when the call is made. Asked about a past instant after a later cheque or
+reversal, it answers with today's payment state, not that day's. That is by
+design: a reversal reopens an invoice from its ORIGINAL due date because a
+cheque that bounced was never money (G19), so a historical payment answer is
+undefined here. The lane asks about the barrier's now; the command line, given
+a past `--at`, prints one line saying so (G36).
 
 <!-- GENERATED:answer-fields -->
 | field | type |
@@ -93,7 +111,7 @@ covered? The answer is an ACCESS FACT and carries no money.
 | `agreement_version` | `int | None` |
 | `unchecked` | `tuple[str, ...]` |
 
-That is the whole answer: 7 fields, none of which is money, and none of which could express a decision about a barrier.
+That is the whole answer: 7 fields, none of which is money, and none of which could express a decision about a barrier. Beside covered and not-covered there is one third result, a REFUSAL: handed two agreement identities that list the same vehicle, the call refuses by name (`REFUSAL_VEHICLE_ON_TWO_AGREEMENTS`, exit 2 on the command line) rather than picking one. A refusal is not an answer of no; the not-covered sentence does not travel on it.
 <!-- END:answer-fields -->
 
 **`unchecked` is what makes the answer honest at a barrier.** Access hours are a
@@ -136,7 +154,10 @@ guessed.
 <!-- GENERATED:refusals -->
 | code | when, and what to do about it |
 |---|---|
+| `REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL` | This adjustment would take the invoice total below zero. A waived fee or a credit may reduce what is owed to exactly nothing -- a fully waived invoice -- and no further: money owed BY the garage is not a negative invoice, it is a refund the owner records as its own decision. Computed under the invoice lock from the committed lines; there is no database backstop for a floor across rows, so the lock is the whole guard. |
 | `REFUSAL_ALREADY_REVERSED` | This payment already has a reversal recorded. A payment that did not stand cannot un-stand twice; the first reversal is the record. |
+| `REFUSAL_ATTEMPT_ALREADY_RESOLVED` | This attempt already has an outcome recorded. What the processor said is written once; a second answer for the same attempt is a record somebody assembled wrong, and it is refused rather than stored beside the first. |
+| `REFUSAL_ATTEMPT_UNRESOLVED` | A charge attempt on this invoice is still PENDING: its reservation was written and the processor was asked, and no outcome has been recorded -- the worker crashed, or the answer was lost. Money may have moved. Nothing is charged past a pending attempt: an operator records what the processor says (resolve-attempt), and only then may the invoice be charged again. |
 | `REFUSAL_CARD_FIELDS_WITHOUT_A_CARD` | A card brand or last four digits were given on a payment that is not a card payment. Those fields describe the card a processor charged, and a cheque or an ACH debit has none. |
 | `REFUSAL_CURRENCY_MISMATCH` | An invoice covers one garage and one currency. Two agreements in different currencies do not sum, and this module will not convert them: a conversion needs a rate, a date and a spread, none of which an agreement carries. |
 | `REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE` | This exception changes money and its amount is not a positive number of minor units. A waived fee, a credit and a refund each name how much; the direction is the kind's, never the sign's, so a negative amount is refused rather than read as the opposite kind. |
@@ -150,6 +171,8 @@ guessed.
 | `REFUSAL_PAUSE_OVERLAPS_A_PAID_PERIOD` | The pause covers days in a period that has already been paid. A paid period is paid, and this module does not decide refunds or credits. The owner records an exception with an amount, or moves the pause. |
 | `REFUSAL_RETRIES_EXHAUSTED` | This invoice has reached its maximum charge attempts. The count resets when the caller reports that the payer changed payment method -- this module holds no payment method and cannot observe that for itself. |
 | `REFUSAL_REVERSAL_REASON_MISMATCH` | The reversal's reason does not fit the payment's method: a cheque bounces, an ACH debit is returned, a card payment is charged back or reversed by the processor. A reason from the wrong column is a record somebody assembled wrong, and it is refused rather than stored. |
+| `REFUSAL_VEHICLE_ALREADY_REGISTERED` | This vehicle identity is registered to ANOTHER agreement at this garage. One car, one agreement per garage: the registration names the other agreement and, if that agreement is cancelled, the day it frees the vehicle. Until then the vehicle is not added here. |
+| `REFUSAL_VEHICLE_ON_TWO_AGREEMENTS` | The agreements handed to this call list the same vehicle under two different agreement identities. The store can no longer produce that state; a library caller handed it in. The module refuses rather than picking one, because the two may disagree about coverage and a guess at a barrier is a wrong answer given confidently. |
 <!-- END:refusals -->
 
 ## The options a garage states
@@ -290,8 +313,35 @@ against one version still holds after a price change stores the next.
 
 A payment has at most one reversal (a second is `REFUSAL_ALREADY_REVERSED`), and there are 4 reasons it can carry, each fitting the payment's method and refused by name otherwise (`REFUSAL_REVERSAL_REASON_MISMATCH`). What happens next is the owner's decision, recorded as an exception.
 
-**A charge is for the balance.** The charge path asks the processor for the invoice's total minus its unreversed payments, never the total; a balance of nothing is `REFUSAL_NOTHING_OWED` before the processor is called, so a paid invoice is never charged again and a part-paid one is charged its remainder. Every call to the processor leaves an attempt row: a raise is an `error` naming the exception, and a result the instrument guard refused inside the processor's own return is an `error` whose detail says the outcome is unknown -- a reported result is never discarded silently.
+**A charge is for the balance, and it is a reservation first.** The charge path reads the invoice's total minus its unreversed payments under the invoice lock, never the total; a balance of nothing is `REFUSAL_NOTHING_OWED` before the processor is called and before any row is written, so a paid invoice is never charged again and a part-paid one is charged its remainder. The attempt row -- the RESERVATION, carrying the amount -- is committed BEFORE the processor is asked; the processor is handed the attempt id as its idempotency key; the OUTCOME row and, on success, the card payment for the reserved amount land in one transaction afterwards: a raise is an `error` naming the exception, and a result the instrument guard refused inside the processor's own return is an `error` whose detail says the outcome is unknown -- a reported result is never discarded silently. A reservation with no outcome is a PENDING attempt and the next charge is `REFUSAL_ATTEMPT_UNRESOLVED` until an operator records what the processor said (`resolve-attempt`, once). A pending attempt comes only from the library's `attempt_charge`; nothing on the command line charges.
 <!-- END:payment-methods -->
+
+**Every money event is serialised on the invoice row.** The sentence below is
+derived from the source — which events take `lock_invoice` first — not typed:
+
+<!-- GENERATED:serialised -->
+The money events are `record_payment`, `record_reversal`, `record_invoice_exception`, `attempt_charge`, `resolve_attempt`. ALL 5 of them take the invoice row lock first, read from their source: two events on one invoice at once are serialised, and the second derives `paid_at` from the first's committed rows.
+<!-- END:serialised -->
+
+**Overpayment is a recorded fact and is never acted on by this module.** An
+operator's cheque is what it is; nothing caps it. The paid state carries
+`overpaid_minor` — by how much the unreversed payments exceed the total — and
+the command line prints `PAID …, overpaid by N minor`. A refund is the owner's
+exception; the money's return is collection's.
+
+**An invoice total never goes below zero.** A waived fee or a credit that would
+take the total below zero is refused by name (`REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL`),
+computed under the invoice lock from the committed lines; exactly zero is a fully
+waived invoice. ⚠ There is **no database backstop** for this: a floor across rows
+is not a CHECK, so the lock is the whole guard, and a raw insert as the
+application role can still take a total negative.
+
+**One car, one agreement per garage.** A vehicle identity is registered to one
+agreement at a garage (`vehicle_registrations`, migration 0003). A second
+agreement listing it is refused by name (`REFUSAL_VEHICLE_ALREADY_REGISTERED`),
+naming the holder and, if the holder is cancelled, the day it frees the vehicle;
+on that day the registration passes to the new agreement. The UNIQUE is the
+backstop for a raw insert.
 
 Money history is **append-only by grant**, and the invoice's own lines and the
 owner's recorded decisions are history the same way. What the application role
@@ -315,13 +365,15 @@ may do to each table, read from the catalogue of a database migrated from
 | `payment_reversals` | INSERT, SELECT |
 | `payments` | INSERT, SELECT |
 | `tenants` | DELETE, INSERT, SELECT, UPDATE |
+| `vehicle_registrations` | DELETE, INSERT, SELECT, UPDATE |
 
-14 tables. 5 are append-only -- `charge_attempts`, `invoice_lines`, `owner_exceptions`, `payment_reversals`, `payments` -- and `invoices` keeps UPDATE and loses DELETE: `paid_at` is derived by the application after every payment, reversal and adjustment, and that is the one column it writes. The rest carry the DML the application needs to store documents.
+15 tables. 5 are append-only -- `charge_attempts`, `invoice_lines`, `owner_exceptions`, `payment_reversals`, `payments` -- and `invoices` keeps UPDATE and loses DELETE: `paid_at` is derived by the application after every payment, reversal and adjustment, and that is the one column it writes. The rest carry the DML the application needs to store documents.
 <!-- END:grants -->
 
 The charge log is the truth for retries -- the retry state is rebuilt from the
-persisted attempts since the last persisted payment-method change, so nothing
-is forgotten on a restart.
+persisted OUTCOME rows since the last persisted payment-method change, so nothing
+is forgotten on a restart; a reservation with no outcome is pending and is never
+charged past, and a payment-method change is allowed while one is pending.
 
 ### The second month
 
@@ -365,10 +417,12 @@ money lives with the processor, in the module that talks to one.
 
 ## Row-level security
 
-Every table these migrations create carries a tenant column, `ENABLE` and `FORCE`
-row-level security and an isolation policy, from migration 0001. The coverage
-check reads the database catalogue rather than a list of table names, because a
-check that walked a list could not notice a table added without protection.
+Every table these migrations create carries `ENABLE` and `FORCE` row-level
+security and an isolation policy, and every table but `tenants` carries a tenant
+column — `tenants` IS the tenant, and its policy is `id = current_tenant_id()`.
+The coverage check reads the database catalogue rather than a list of table
+names, because a check that walked a list could not notice a table added without
+protection.
 
 The application connects as a role created `NOSUPERUSER NOBYPASSRLS`. A superuser
 bypasses row-level security unconditionally — `FORCE` does not stop one — so the

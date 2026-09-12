@@ -19,6 +19,16 @@ is not covered is an ordinary transient stay that something else prices. That
 sentence travels on every not-covered answer, from one place, because seven
 copies of it would drift and the drifted one would be read at a barrier.
 
+**ONE CAR, ONE AGREEMENT PER GARAGE -- AND WHERE THAT DOES NOT HOLD, REFUSE.**
+His ruling. The store registers a vehicle identity to one agreement per garage
+and refuses a second; so the agreements this call is handed should list a
+vehicle under ONE agreement identity, at whatever versions. Among versions of
+one identity the latest wins. If a library caller hands in two different
+identities listing the same vehicle, this call REFUSES by name
+(``REFUSAL_VEHICLE_ON_TWO_AGREEMENTS``) rather than picking one: the two may
+disagree about coverage, and a pick is a wrong answer given confidently. The
+refusal is a first-class third result beside covered and not-covered.
+
 **THE ANSWER SAYS WHAT IT COULD NOT CHECK.** Access hours are a condition on a
 STAY -- entry no earlier than, exit no later than -- and at the moment a car
 arrives, the exit half is unknowable. An answer that quietly reported "covered"
@@ -51,7 +61,9 @@ from .findings import (
     NOT_COVERED_PAUSED,
     NOT_COVERED_REASONS,
     NOT_COVERED_UNPAID_PAST_GRACE,
+    REFUSAL_VEHICLE_ON_TWO_AGREEMENTS,
 )
+from .findings import Refused as _Refused  # not exported: this module decides no exit
 from .garage import Garage
 from .localday import day_of, zone
 
@@ -133,10 +145,15 @@ def is_covered(
     if not mine:
         return _not_covered(NOT_COVERED_NO_AGREEMENT)
 
-    # The most recent version wins. Two live versions of one agreement is a
-    # store-level error, but choosing the highest here is deterministic and
-    # traceable -- the answer cites the version it used.
-    agreement = max(mine, key=lambda a: (a.id, a.version))
+    identities = sorted({a.id for a in mine})
+    if len(identities) > 1:
+        raise _Refused(
+            REFUSAL_VEHICLE_ON_TWO_AGREEMENTS,
+            f"vehicle {vehicle_identity!r} at garage {garage.id!r} is listed by "
+            f"agreements {', '.join(repr(i) for i in identities)}.",
+        )
+    # One identity; among its versions the latest wins, and the answer cites it.
+    agreement = max(mine, key=lambda a: a.version)
 
     cited = {
         "agreement_id": agreement.id,

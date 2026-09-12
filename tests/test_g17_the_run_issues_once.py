@@ -126,7 +126,10 @@ def test_one_payers_refusal_does_not_stop_the_others(app, tenant_id):
 
     fine = simple_agreement(start_day=date(2026, 1, 5))
     seeded = seed(app, tenant_id, GARAGE, (fine,))
-    broken = simple_agreement(id="ag-broken", payer_id="payer-broken", start_day=date(2026, 1, 5))
+    broken = simple_agreement(
+        id="ag-broken", payer_id="payer-broken", start_day=date(2026, 1, 5),
+        vehicles=("BRK-001",),  # one car, one agreement per garage
+    )
     with tenant(app, tenant_id) as cursor:
         payer = store_payer(cursor, tenant_id, "payer-broken", "Broken")
         agreement_uuid = store_agreement(

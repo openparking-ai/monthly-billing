@@ -38,7 +38,7 @@ from .exceptions_by_owner import (
     is_blocked,
 )
 from .store.postgres import tenant
-from .store.records import StoredAgreement, load_agreements_at_garage, load_garage
+from .store.records import load_agreements_at_garage, load_garage, registration_for
 from .store.writes import as_uuid
 
 
@@ -55,19 +55,34 @@ def covered_from_store(
     *,
     stay_entered_at: datetime | None = None,
 ) -> Answer:
-    """Is this vehicle covered at this garage right now, per the store."""
+    """Is this vehicle covered at this garage right now, per the store.
+
+    **WHAT ``at`` DECIDES, AND WHAT IT DOES NOT -- a description of mechanism.**
+    The AGREEMENT axes are answered at ``at``: not started, cancelled, paused,
+    access hours. The PAYMENT state is read as of NOW -- ``paid_at`` as the
+    store holds it when the call is made. Asking about a past instant after a
+    later cheque or reversal therefore answers with today's payment state, not
+    that day's. This is by design and not an oversight: a reversal reopens an
+    invoice from its ORIGINAL due date because a cheque that bounced was never
+    money (G19), so a historical payment answer is undefined here. The lane asks
+    about the barrier's now; the command line, given a past ``--at``, says so.
+    """
     tenant_id = as_uuid(tenant_id)
     with tenant(connection, tenant_id) as cursor:
         stored = load_garage(cursor, garage_id)
         if stored is None:
             raise GarageNotFound(f"no garage with id {garage_id!r} in the store.")
         garage = stored.garage
-        agreements = load_agreements_at_garage(cursor, stored.uuid)
-
+        # WHICH agreement a vehicle belongs to is the REGISTRATION, the garage-wide
+        # fact 0003 keeps (one car, one agreement per garage) -- not a scan of every
+        # agreement's vehicle list, which would still find the plate on a version
+        # that has since released it or on a row written past the module.
+        holder = registration_for(cursor, stored.uuid, garage.normalise_identity(vehicle_identity))
         mine = [
             item
-            for item in agreements
-            if any(garage.identities_match(v, vehicle_identity) for v in item.agreement.vehicles)
+            for item in load_agreements_at_garage(cursor, stored.uuid)
+            if item.agreement.id == holder
+            and any(garage.identities_match(v, vehicle_identity) for v in item.agreement.vehicles)
         ]
         if not mine:
             connection.rollback()
@@ -75,8 +90,7 @@ def covered_from_store(
                 garage=garage, agreements=(), vehicle_identity=vehicle_identity, at=at,
                 stay_entered_at=stay_entered_at,
             )
-
-        chosen: StoredAgreement = max(mine, key=lambda i: (i.agreement.id, i.agreement.version))
+        (chosen,) = mine  # one identity, and the loader already gave its latest version
         unpaid_since = _earliest_unpaid_due_at(cursor, chosen.payer_uuid, stored.uuid)
         exceptions = _exceptions_for(cursor, chosen.agreement.id, chosen.payer_uuid, stored.uuid)
     connection.rollback()
@@ -117,6 +131,10 @@ def _exceptions_for(
     reason. A control plants the read back onto one version's row and requires
     red.
     """
+    # A block or an unblock on an invoice is read whatever the invoice's paid
+    # state: a block the owner recorded is lifted by an unblock the owner
+    # records, never by a cheque. A grace extension on an invoice is read only
+    # while that invoice is unpaid -- it has no meaning on a paid one.
     cursor.execute(
         """
         SELECT e.id, a.external_id, i.reference, e.kind, e.recorded_by, e.recorded_at,
@@ -125,7 +143,8 @@ def _exceptions_for(
         LEFT JOIN agreements a ON a.id = e.agreement_id
         LEFT JOIN invoices i ON i.id = e.invoice_id
         WHERE a.external_id = %s
-           OR (i.payer_id = %s AND i.garage_id = %s AND i.paid_at IS NULL)
+           OR (i.payer_id = %s AND i.garage_id = %s
+               AND (i.paid_at IS NULL OR e.kind IN ('block', 'unblock')))
         ORDER BY e.recorded_at
         """,
         (agreement_external_id, payer_uuid, garage_uuid),

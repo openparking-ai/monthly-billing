@@ -8,6 +8,18 @@ because the line moves the total; see payments.py for the three events. A refund
 is recorded and lands nothing; see ``record_invoice_exception``.
 
 The note is stored and reaches no arithmetic. The amount is a typed column.
+
+**A TOTAL NEVER GOES BELOW ZERO.** An adjustment that would take the invoice
+total below zero is refused by name, computed under the invoice lock from the
+committed lines; exactly zero is allowed -- that is a fully waived invoice, and
+it reads as paid with no payment, which is what waiving means. There is NO
+database backstop for this: a floor across rows is not a CHECK, so the lock is
+the whole guard and a raw insert as the application role can still take a total
+negative. Said here and in the contract rather than implied.
+
+**AN INVOICE EXCEPTION RUNS UNDER THE INVOICE LOCK**, monetary or not, so the
+adjustment line and the derivation that follows it land against committed rows
+and never beside a payment being recorded at the same instant.
 """
 
 from __future__ import annotations
@@ -16,9 +28,10 @@ from typing import Any
 from uuid import UUID
 
 from .exceptions_by_owner import LANDS_A_LINE, ExceptionKind, OwnerException
+from .findings import REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL, Refused
 from .invoice import LineKind
-from .payments import PaidState, invoice_uuid_for, rederive_paid_at
-from .store.postgres import tenant
+from .payments import PaidState, invoice_uuid_for, paid_state, rederive_paid_at
+from .store.postgres import lock_invoice, tenant
 from .store.writes import as_uuid, guarded_insert
 
 
@@ -73,6 +86,19 @@ def record_invoice_exception(
     tenant_id = as_uuid(tenant_id)
     with tenant(connection, tenant_id) as cursor:
         invoice_uuid = invoice_uuid_for(cursor, exception.invoice_reference)
+        lock_invoice(cursor, invoice_uuid)
+        moves_the_total = exception.kind in LANDS_A_LINE
+        if moves_the_total:
+            owed = paid_state(cursor, invoice_uuid)
+            amount = int(exception.amount_minor or 0)
+            if owed.total_minor - amount < 0:
+                connection.rollback()
+                raise Refused(
+                    REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL,
+                    f"exception {exception.id!r} would adjust "
+                    f"{exception.invoice_reference!r} by {amount} against a total of "
+                    f"{owed.total_minor}.",
+                )
         guarded_insert(
             cursor,
             "owner_exceptions",

@@ -1,9 +1,11 @@
 """G22 -- the charge log is the truth for retries.
 
-Three persisted non-success attempts since the last persisted method change
-refuse the fourth by name; a persisted method change allows it; and the state
-is REBUILT from rows, so a fresh caller (a restart) sees the same count as the
-one that made the attempts.
+Three persisted non-success OUTCOMES since the last persisted method change
+refuse the fourth by name; a persisted method change allows it -- and is
+allowed while an attempt is pending; a success counts toward nothing and resets
+nothing; and the state is REBUILT from rows, so a fresh caller (a restart) sees
+the same count as the one that made the attempts. Every attempt is two rows
+since 0003: the reservation (`attempt`, outcome NULL) and the `outcome`.
 
 The control plants a rebuild that ignores the ``payment_method_changed`` rows
 and requires the fourth-attempt-after-a-change test to go red -- the reset
@@ -69,8 +71,13 @@ def test_three_persisted_declines_refuse_the_fourth_by_name(app, tenant_id):
     with pytest.raises(Refused) as refused:
         attempt_charge(app, tenant_id, _Declines(), reference, recorded_by="cron", now=_tick(9))
     assert refused.value.code == "REFUSAL_RETRIES_EXHAUSTED"
-    rows = query(app, tenant_id, "SELECT kind, outcome FROM charge_attempts ORDER BY occurred_at")
-    assert rows == [("attempt", "decline")] * MAX_ATTEMPTS, "the refusal wrote no fourth row"
+    rows = query(
+        app, tenant_id,
+        "SELECT kind, outcome FROM charge_attempts ORDER BY occurred_at, created_at",
+    )
+    assert rows == [("attempt", None), ("outcome", "decline")] * MAX_ATTEMPTS, (
+        "the refusal wrote a fourth reservation"
+    )
 
 
 @pytest.mark.guarantee("G22")
@@ -86,8 +93,12 @@ def test_a_persisted_method_change_allows_the_fourth(app, tenant_id):
         app, tenant_id, _Declines(), reference, recorded_by="cron", now=_tick(6)
     )
     assert fourth.retry.attempts == 1
-    rows = query(app, tenant_id, "SELECT kind FROM charge_attempts ORDER BY occurred_at")
-    assert [r[0] for r in rows] == ["attempt"] * 3 + ["payment_method_changed", "attempt"]
+    rows = query(
+        app, tenant_id, "SELECT kind FROM charge_attempts ORDER BY occurred_at, created_at"
+    )
+    assert [r[0] for r in rows] == (
+        ["attempt", "outcome"] * 3 + ["payment_method_changed", "attempt", "outcome"]
+    )
 
 
 @pytest.mark.guarantee("G22")
@@ -120,9 +131,9 @@ def test_a_success_records_the_card_payment_and_pays_the_invoice(app, tenant_id)
     assert query(
         app, tenant_id, "SELECT method, amount_minor, processor_reference FROM payments"
     ) == [(PaymentMethod.CARD.value, 12000, "auth-77")]
-    assert query(app, tenant_id, "SELECT kind, outcome FROM charge_attempts") == [
-        ("attempt", "success")
-    ]
+    assert query(
+        app, tenant_id, "SELECT kind, outcome FROM charge_attempts ORDER BY created_at"
+    ) == [("attempt", None), ("outcome", "success")]
 
 
 @pytest.mark.guarantee("G22")
@@ -133,7 +144,59 @@ def test_the_stub_processor_moves_no_money_and_its_attempt_is_still_recorded(app
     )
     assert outcome.result.outcome is Outcome.ERROR and outcome.payment_id is None
     assert query(app, tenant_id, "SELECT count(*) FROM payments") == [(0,)]
-    assert query(app, tenant_id, "SELECT outcome FROM charge_attempts") == [("error",)]
+    assert query(
+        app, tenant_id, "SELECT outcome FROM charge_attempts WHERE kind = 'outcome'"
+    ) == [("error",)]
+
+
+@pytest.mark.guarantee("G22")
+def test_a_success_counts_toward_nothing_and_resets_nothing(app, tenant_id):
+    """Two declines, a success, the cheque behind it bounces -- the count is
+    still two, not zero: the reset is the caller's report of a new method and
+    nothing else. The outside pass's R1.3 was a persisted success resetting the
+    count with no payment beside it."""
+    from monthly_billing.payments import ReversalReason, record_reversal
+
+    reference = _issued(app, tenant_id)
+    for n in range(2):
+        attempt_charge(app, tenant_id, _Declines(), reference, recorded_by="cron", now=_tick(n))
+    won = attempt_charge(app, tenant_id, _Succeeds(), reference, recorded_by="cron", now=_tick(2))
+    assert won.retry.attempts == 2, "a success reset (or counted toward) the non-success count"
+    record_reversal(
+        app, tenant_id, won.payment_id, ReversalReason.CHARGEBACK, _tick(3), recorded_by="op"
+    )
+    third = attempt_charge(app, tenant_id, _Declines(), reference, recorded_by="cron", now=_tick(4))
+    assert third.retry.attempts == 3 and third.retry.exhausted
+    with pytest.raises(Refused) as refused:
+        attempt_charge(app, tenant_id, _Declines(), reference, recorded_by="cron", now=_tick(5))
+    assert refused.value.code == "REFUSAL_RETRIES_EXHAUSTED"
+
+
+@pytest.mark.guarantee("G22")
+def test_a_method_change_is_allowed_while_an_attempt_is_pending(app, tenant_id):
+    """It moves no money, and the operator changing a card while collection is
+    stuck must not be refused. The pending attempt still blocks the CHARGE."""
+    import monthly_billing.charging as ch
+    from monthly_billing.findings import REFUSAL_ATTEMPT_UNRESOLVED
+
+    reference = _issued(app, tenant_id)
+    real = ch.result_of
+    ch.result_of = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("worker died"))
+    try:
+        with pytest.raises(RuntimeError):
+            attempt_charge(app, tenant_id, _Declines(), reference, recorded_by="cron", now=_tick(1))
+    finally:
+        ch.result_of = real
+    assert query(app, tenant_id, "SELECT kind FROM charge_attempts") == [("attempt",)]
+    state = record_payment_method_changed(
+        app, tenant_id, reference, recorded_by="portal", now=_tick(2)
+    )
+    assert state.attempts == 0
+    assert query(app, tenant_id, "SELECT count(*) FROM charge_attempts "
+                 "WHERE kind = 'payment_method_changed'") == [(1,)]
+    with pytest.raises(Refused) as refused:
+        attempt_charge(app, tenant_id, _Declines(), reference, recorded_by="cron", now=_tick(3))
+    assert refused.value.code == REFUSAL_ATTEMPT_UNRESOLVED
 
 
 @pytest.mark.guarantee("G22")

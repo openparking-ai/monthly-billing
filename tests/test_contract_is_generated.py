@@ -275,6 +275,22 @@ def test_the_second_month_prose_changes_when_the_store_answers_the_other_way():
 
 
 @pytest.mark.guarantee("G15")
+def test_the_serialised_sentence_changes_when_a_money_event_drops_the_lock():
+    """The lock sentence has two wordings and the SOURCE decides which. Plant
+    the reader to report one event without the lock and require the other
+    wording -- non-numeric text differing, values masked (§6)."""
+    real = gen.events_taking_the_lock
+    before = gen.block_serialised()
+    gen.events_taking_the_lock = lambda: {**real(), "record_payment": False}
+    try:
+        after = gen.block_serialised()
+    finally:
+        gen.events_taking_the_lock = real
+    assert "ALL" in before and "DOES NOT" not in before
+    assert "ONLY" in after and "`record_payment` DOES NOT" in after
+
+
+@pytest.mark.guarantee("G15")
 def test_the_options_block_follows_the_enums():
     """PLANT-free derivation check: every member of every enum is listed.
 

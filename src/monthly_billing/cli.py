@@ -21,6 +21,13 @@ Against the store (the `store` extra, `MONTHLY_BILLING_DSN`, `--tenant`):
         --reversed-at 2026-05-12T10:00:00-06:00 --recorded-by operator
     monthly-billing covered-in-store --tenant T --garage G --vehicle ABC123 \\
         --at 2026-05-07T09:00:00-06:00
+    monthly-billing resolve-attempt --tenant T --attempt ID --outcome success \\
+        --at 2026-05-07T09:05:00-06:00 --recorded-by operator [--reference AUTH]
+
+A pending attempt comes only from the library's ``attempt_charge`` -- the
+platform, as an ordinary client, charges; nothing on this command line does.
+``resolve-attempt`` is how an operator records what the processor said when
+the worker that asked did not live to record it.
 
 Nothing here wakes itself up. The run is a command the operator's platform
 calls on the billing day, and the platform is an ordinary client of it.
@@ -180,25 +187,69 @@ def _record_reversal(args: argparse.Namespace) -> int:
 
 def _paid_line(state) -> str:
     if state.paid:
-        return f"  invoice PAID at {state.paid_at.isoformat()}"
+        line = f"  invoice PAID at {state.paid_at.isoformat()}"
+        if state.overpaid_minor:
+            line += f", overpaid by {state.overpaid_minor} minor"
+        return line
     return (
         f"  invoice UNPAID: {state.paid_minor} of {state.total_minor} minor received "
         "(unpaid from its original due date)"
     )
 
 
+#: Printed when the lane's question is asked about a PAST instant. The agreement
+#: axes are answered at that instant; the payment state is the store's now.
+PAYMENT_STATE_IS_NOW = (
+    "  NOTE: --at is in the past; the payment state is as of now, not that instant"
+)
+
+
 def _covered_in_store(args: argparse.Namespace) -> int:
     from .entitlement_store import covered_from_store
 
+    at = datetime.fromisoformat(args.at)
     answer = covered_from_store(
         _connection(args),
         args.tenant,
         args.garage,
         args.vehicle,
-        datetime.fromisoformat(args.at),
+        at,
         stay_entered_at=datetime.fromisoformat(args.entered_at) if args.entered_at else None,
     )
-    return _print_answer(answer)
+    code = _print_answer(answer)
+    if at < datetime.now().astimezone():
+        print(PAYMENT_STATE_IS_NOW)
+    return code
+
+
+def _resolve_attempt(args: argparse.Namespace) -> int:
+    from .charging import resolve_attempt
+    from .payment import ChargeResult, Outcome
+
+    outcome = resolve_attempt(
+        _connection(args),
+        args.tenant,
+        args.attempt,
+        ChargeResult(
+            outcome=Outcome(args.outcome),
+            detail=args.detail or f"recorded by {args.recorded_by}",
+            reference=args.reference,
+        ),
+        recorded_by=args.recorded_by,
+        now=datetime.fromisoformat(args.at),
+    )
+    print(f"attempt {args.attempt} resolved: {outcome.result.outcome.value}")
+    if outcome.paid is not None:
+        print(f"payment {outcome.payment_id} recorded")
+        print(_paid_line(outcome.paid))
+    return 0
+
+
+def _outcomes():
+    """The outcome enum's values and nothing else -- the CLI accepts no other spelling."""
+    from .payment import Outcome
+
+    return list(Outcome)
 
 
 def _store_arguments(parser: argparse.ArgumentParser) -> None:
@@ -263,6 +314,18 @@ def main(argv: list[str] | None = None) -> int:
     in_store.add_argument("--at", required=True, help="ISO instant with an offset")
     in_store.add_argument("--entered-at", help="the stay's entry instant, when known")
     in_store.set_defaults(run=_covered_in_store)
+
+    resolve = sub.add_parser(
+        "resolve-attempt", help="record what the processor said about a PENDING attempt"
+    )
+    _store_arguments(resolve)
+    resolve.add_argument("--attempt", required=True, help="the attempt id (uuid)")
+    resolve.add_argument("--outcome", required=True, choices=[o.value for o in _outcomes()])
+    resolve.add_argument("--at", required=True, help="ISO instant with an offset")
+    resolve.add_argument("--recorded-by", required=True)
+    resolve.add_argument("--reference", help="the processor's reference for a success")
+    resolve.add_argument("--detail", help="what the processor said, for a person")
+    resolve.set_defaults(run=_resolve_attempt)
 
     args = parser.parse_args(argv)
     try:
