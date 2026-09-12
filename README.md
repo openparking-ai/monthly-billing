@@ -109,8 +109,9 @@ Python 3.11 or newer.
 
 ## The store
 
-Row-level security from migration 0001: every table carries a tenant column,
-`ENABLE`, `FORCE` and an isolation policy. The application connects as a role
+Row-level security from migration 0001: every table carries `ENABLE`, `FORCE`
+and an isolation policy, and every table but `tenants` carries a tenant column
+(`tenants` IS the tenant, isolated by `id = current_tenant_id()`). The application connects as a role
 created `NOSUPERUSER NOBYPASSRLS`, and the isolation tests assert they are
 connected as a role that COULD be stopped before they assert that it was — a
 superuser bypasses row-level security unconditionally, and `FORCE` does not stop
@@ -119,6 +120,7 @@ one.
 ```
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0001_tenants_agreements_and_rls.sql
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0002_billing_run_payments_and_reversals.sql
+psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0003_invoice_lock_attempt_reservation_and_registrations.sql
 MONTHLY_BILLING_APP_PASSWORD=... python scripts/ensure-app-role.py "$DSN"
 ```
 
@@ -130,8 +132,22 @@ that is re-derived after a payment, a reversal, or an owner's adjustment. A
 reversal reopens the invoice from its ORIGINAL due date. **Payments, reversals
 and charge attempts are append-only by grant** — the application role has no
 `UPDATE` and no `DELETE` on them — and the charge log is the truth for retries:
-three recorded non-success attempts refuse the fourth by name, a recorded
-payment-method change allows it, and a restart forgets nothing.
+three recorded non-success outcomes refuse the fourth by name, a recorded
+payment-method change allows it, and a restart forgets nothing because nothing
+lives outside the rows. **A charge is a reservation first**: the attempt row is
+committed before the processor is called, the outcome and its card payment land
+in one transaction, and a reservation with no outcome is never charged past.
+**What the module does not know is never written as an outcome**: an answer
+that did not arrive is an `unknown` row, the attempt stays pending, and the
+next charge asks again under the same idempotency key for the amount reserved.
+**A late processor answer is recorded and a late success is honoured**: an
+answer that lands after the operator resolved the attempt is a `late` row
+beside the operator's resolution, and a late success the operator did not
+record writes the card payment for the amount reserved.
+**Every money event takes the invoice's row lock first**, so two events on one
+invoice at once are serialised, and **no exception leaves the lock held**. **One
+car, one agreement per garage**, and a refusal writes nothing. **Every garage
+reference is a composite tenant key.**
 
 ## What is not here
 

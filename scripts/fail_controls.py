@@ -468,20 +468,20 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "tests/test_g20_money_history_is_append_only.py",
         "payments.py",
         source(
-            "        guarded_insert(",
-            "            cursor,",
-            '            "payments",',
-            "            {",
+            "    guarded_insert(",
+            "        cursor,",
+            '        "payments",',
+            "        {",
         ),
         source(
-            "        (lambda cursor, table, record: cursor.execute(  # PLANTED: no chokepoint",
-            "            f\"INSERT INTO {table} ({', '.join(record)}) \"",
-            "            f\"VALUES ({', '.join(['%s'] * len(record))}) RETURNING id\",",
-            "            tuple(record.values()),",
-            "        ))(",
-            "            cursor,",
-            '            "payments",',
-            "            {",
+            "    (lambda cursor, table, record: cursor.execute(  # PLANTED: no chokepoint",
+            "        f\"INSERT INTO {table} ({', '.join(record)}) \"",
+            "        f\"VALUES ({', '.join(['%s'] * len(record))}) RETURNING id\",",
+            "        tuple(record.values()),",
+            "    ))(",
+            "        cursor,",
+            '        "payments",',
+            "        {",
         ),
         "the payment row goes to the database around the chokepoint, so a "
         "card-shaped processor reference lands in `payments` unscanned -- the new "
@@ -649,6 +649,428 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         ),
         "the second-month prose says 'still covered' whatever the store answered: "
         "the number moves, the assertion does not -- the L3's B6 and §6's rule",
+    ),
+    # -- the outside pass's fix round: each of these is a settled finding, planted back --
+    "G30": (
+        "tests/test_g30_every_money_event_takes_the_invoice_lock.py",
+        "store/postgres.py",
+        '    cursor.execute("SELECT id FROM invoices WHERE id = %s FOR UPDATE", (invoice_uuid,))',
+        '    cursor.execute("SELECT id FROM invoices WHERE id = %s", (invoice_uuid,))  # PLANTED',
+        "the lock ITSELF is gone -- lock_invoice reads the row and locks nothing -- so "
+        "a payment and a credit at once each derive paid_at from a snapshot that "
+        "cannot see the other: the outside pass's N1, paid 10000 of 10000 and paid_at "
+        "NULL, a paid invoice read UNPAID_PAST_GRACE at the lane. THIS is the plant "
+        "that turns the concurrency test red; the branch L3 showed that the previous "
+        "plant (the lock off record_payment alone) left it green 5/5, because the "
+        "payment insert's foreign-key KEY SHARE on the invoice row still serialised "
+        "against the credit's FOR UPDATE -- that plant proved the source reader, not "
+        "the serialisation, and it is G30/source now",
+    ),
+    "G30/source": (
+        "tests/test_g30_every_money_event_takes_the_invoice_lock.py",
+        "payments.py",
+        source(
+            "        invoice_uuid = invoice_uuid_for(cursor, invoice_reference)",
+            "        with locked_invoice(connection, cursor, invoice_uuid):",
+            "            payment_uuid = insert_payment(",
+        ),
+        source(
+            "        invoice_uuid = invoice_uuid_for(cursor, invoice_reference)",
+            '        with __import__("contextlib").nullcontext():  # PLANTED: no lock here',
+            "            payment_uuid = insert_payment(",
+        ),
+        "record_payment stops entering the locked block, so the SOURCE READER reports "
+        "one of the five money events without the lock and the contract's derived "
+        "sentence flips to ONLY 4 of 5 -- the AST tests go red. The concurrency test "
+        "stays green under this plant by itself (the foreign key's KEY SHARE still "
+        "serialises the two sides), which is why it is not the control for the "
+        "serialisation sentence -- G30 above is",
+    ),
+    "G31/reservation-commit": (
+        "tests/test_g24_every_processor_call_leaves_a_row.py",
+        "charging.py",
+        source(
+            "    connection.commit()",
+            "    return reservation",
+        ),
+        source(
+            "    pass  # PLANTED: the reservation is not committed before the processor",
+            "    return reservation",
+        ),
+        "the reservation row is written but NOT committed before the processor is "
+        "called, so a processor can be asked with no row on our side that survives "
+        "the worker -- the outside pass's R1.2, where a crash after the processor "
+        "said yes left nothing and a restart charged again. G24's test reads the log "
+        "from another connection while the processor is being called and sees no row",
+    ),
+    "G31/atomic-outcome": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        source(
+            "            cursor.fetchone()",
+            "            payment_id = paid = None",
+            "            if result.outcome is Outcome.SUCCESS:",
+        ),
+        source(
+            "            cursor.fetchone()",
+            "            connection.commit()  # PLANTED: outcome committed before its payment",
+            '            pg = __import__("monthly_billing.store.postgres", fromlist=["x"])',
+            "            pg.set_tenant(cursor, tenant_id)",
+            "            pg.lock_invoice(cursor, invoice_uuid)",
+            "            payment_id = paid = None",
+            "            if result.outcome is Outcome.SUCCESS:",
+        ),
+        "T2 is split into two transactions: the outcome row is committed on its own, "
+        "then the payment in a second -- the outside pass's R1.3 window, a SUCCESS on "
+        "record with no money beside it, and the worker dying between the two leaves "
+        "exactly that",
+    ),
+    "G31/pending": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        "            pending = _pending_attempt(cursor, invoice_uuid)",
+        "            pending = None  # PLANTED: a pending attempt is charged past",
+        "a reservation with no outcome no longer refuses the next charge, so a card "
+        "the processor may already have charged is charged again on the restart",
+    ),
+    "G22/pending-method-change": (
+        "tests/test_g22_charge_attempts_are_the_truth.py",
+        "charging.py",
+        source(
+            "        with locked_invoice(connection, cursor, invoice_uuid):",
+            "            guarded_insert(",
+            "                cursor,",
+            '                "charge_attempts",',
+            "                {",
+            '                    "tenant_id": tenant_id,',
+            '                    "invoice_id": invoice_uuid,',
+            '                    "kind": "payment_method_changed",',
+        ),
+        source(
+            "        with locked_invoice(connection, cursor, invoice_uuid):",
+            "            if _pending_attempt(cursor, invoice_uuid) is not None:  # PLANTED",
+            '                raise Refused(REFUSAL_ATTEMPT_UNRESOLVED, "planted")',
+            "            guarded_insert(",
+            "                cursor,",
+            '                "charge_attempts",',
+            "                {",
+            '                    "tenant_id": tenant_id,',
+            '                    "invoice_id": invoice_uuid,',
+            '                    "kind": "payment_method_changed",',
+        ),
+        "a payment-method change is refused while an attempt is pending, so an "
+        "operator changing a card while collection is stuck is refused for a row "
+        "that moves no money",
+    ),
+    "G22/success-resets": (
+        "tests/test_g22_charge_attempts_are_the_truth.py",
+        "payment.py",
+        "            return replace(self, last_outcome=result.outcome, last_detail=\"\")",
+        source(
+            "            return replace(  # PLANTED: a success resets the count",
+            "                self, attempts=0, last_outcome=result.outcome, last_detail=\"\"",
+            "            )",
+        ),
+        "a success resets the non-success count again -- M1's fold -- so two declines, "
+        "a success and a chargeback leave the payer three fresh attempts they did not "
+        "earn, the count the outside pass's R1.3 saw reset by a success with no payment",
+    ),
+    "G23/cheque-between": (
+        "tests/test_g23_a_charge_is_for_the_balance.py",
+        "charging.py",
+        "        if result.outcome is Outcome.SUCCESS:",
+        source(
+            "        if result.outcome is Outcome.SUCCESS and (  # PLANTED: dropped if paid",
+            "            paid_state(cursor, invoice_uuid).paid_minor",
+            "            < paid_state(cursor, invoice_uuid).total_minor",
+            "        ):",
+        ),
+        "T2 drops the card payment when the invoice was paid meanwhile -- the money "
+        "the processor moved for the reservation is recorded nowhere, silently, "
+        "instead of as an overpayment",
+    ),
+    "G29/concurrent-backstop": (
+        "tests/test_g29_reversals_and_card_fields_are_refused_by_name.py",
+        "payments.py",
+        "            if violation.diag.constraint_name != ONE_REVERSAL_PER_PAYMENT:",
+        "            if True:  # PLANTED: the backstop is not caught by name",
+        "the one-reversal-per-payment constraint comes back as a raw UniqueViolation "
+        "again when two reversals race past the check -- the outside pass's R4, an "
+        "operator handed a driver error for a state the module can name",
+    ),
+    "G32/store": (
+        "tests/test_g32_one_car_one_agreement_per_garage.py",
+        "store/records.py",
+        "        if frees_on is None or frees_on > today:",
+        "        if False:  # PLANTED: the second agreement takes the vehicle",
+        "the store no longer refuses a vehicle another agreement holds: the second "
+        "agreement takes it, silently, and the first is still covering it until its "
+        "own version says otherwise -- one car on two agreements again",
+    ),
+    "G32/pure": (
+        "tests/test_g32_one_car_one_agreement_per_garage.py",
+        "entitlement.py",
+        "    if len(identities) > 1:",
+        "    if False:  # PLANTED: two identities, and the latest version of whichever wins",
+        "the pure call picks again when handed two agreement identities for one "
+        "vehicle -- the outside pass's R2, where the highest id decided coverage "
+        "against the wrong agreement both ways",
+    ),
+    "G32/registration": (
+        "tests/test_g32_one_car_one_agreement_per_garage.py",
+        "entitlement_store.py",
+        "            if item.agreement.id == holder",
+        "            if True  # PLANTED: every agreement listing the plate, registered or not",
+        "the store-backed call goes back to scanning every agreement's vehicle list "
+        "instead of reading the registration, so a row written past the module, or "
+        "a version that has released the car, decides coverage again",
+    ),
+    "G33": (
+        "tests/test_g33_a_total_never_goes_below_zero.py",
+        "exceptions_store.py",
+        "            if owed.total_minor - amount < 0:",
+        "            if False:  # PLANTED: the total may go below zero",
+        "an adjustment past zero lands: a 15000 credit on a 12000 invoice makes the "
+        "total -3000 and paid_at is set with zero payments -- the outside pass's "
+        "Grok 10, money and not an opinion",
+    ),
+    "G34": (
+        "tests/test_g34_a_block_on_an_invoice_survives_the_payment.py",
+        "entitlement_store.py",
+        "               AND (i.paid_at IS NULL OR e.kind IN ('block', 'unblock')))",
+        "               AND i.paid_at IS NULL)  -- PLANTED: paying the invoice lifts its block",
+        "invoice-attached exceptions are read only while the invoice is unpaid "
+        "again, so a cheque lifts the owner's block with no unblock recorded -- the "
+        "outside pass's N2",
+    ),
+    "G35": (
+        "tests/test_g35_overpayment_is_a_recorded_fact.py",
+        "payments.py",
+        "        return max(0, self.paid_minor - self.total_minor)",
+        "        return 0  # PLANTED: an overpayment is a fact nowhere again",
+        "the paid state reports no overpayment whatever was paid, so a 30000 cheque "
+        "on a 12000 invoice reads PAID and the excess is recorded nowhere -- the "
+        "outside pass's Grok 9",
+    ),
+    "G36": (
+        "tests/test_g36_the_command_line_says_when_payment_state_is_now.py",
+        "cli.py",
+        "    if at < datetime.now().astimezone():",
+        "    if False:  # PLANTED: a past --at is answered as of now without saying so",
+        "the command line answers a past instant with today's payment state and says "
+        "nothing -- the outside pass's ChatGPT 5 claim, unsaid again",
+    ),
+    # -- the outside pass's SECOND fix round: each of these is a settled finding, planted back --
+    "G31/unknown-is-not-an-outcome": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        source(
+            "    if isinstance(answer, UnknownAnswer):",
+            "        retry = _record_unknown(",
+        ),
+        source(
+            "    if isinstance(answer, UnknownAnswer):  # PLANTED: an unknown becomes an error",
+            "        answer = ChargeResult(outcome=Outcome.ERROR, detail=answer.detail)",
+            "    if isinstance(answer, UnknownAnswer):",
+            "        retry = _record_unknown(",
+        ),
+        "an answer the module never received is written as a resolved `error` "
+        "outcome again: the attempt stops being pending and the next charge reserves "
+        "a FRESH key and asks again -- the branch L3's Blocker 1, a processor that "
+        "charged and then raised, charged twice",
+    ),
+    "G31/resume-reuses-the-key": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        source(
+            "                reservation = _Reservation(",
+            "                    pending.attempt_id, invoice_uuid, invoice, pending.amount_minor,",
+        ),
+        source(
+            "                reservation = _Reservation(  # PLANTED: a fresh key on the re-ask",
+            "                    uuid4(), invoice_uuid, invoice, pending.amount_minor,",
+        ),
+        "the re-ask of a pending attempt goes to the processor under a NEW "
+        "idempotency key, so a processor that honours keys sees a second charge -- "
+        "the same double charge, one row later",
+    ),
+    "G24/ask-row": (
+        "tests/test_g24_every_processor_call_leaves_a_row.py",
+        "charging.py",
+        source(
+            "                _log_row(",
+            '                    cursor, tenant_id, invoice_uuid, "ask", pending.attempt_id,',
+        ),
+        source(
+            "                (lambda *a, **k: None)(  # PLANTED: the re-ask leaves no row",
+            '                    cursor, tenant_id, invoice_uuid, "ask", pending.attempt_id,',
+        ),
+        "a re-ask is sent with no `ask` row committed before it, so a call the "
+        "processor received has no row on our side saying it was made -- the shape "
+        "G24 exists to forbid, back on the second ask",
+    ),
+    "G22/fold-at-reservation": (
+        "tests/test_g22_charge_attempts_are_the_truth.py",
+        "charging.py",
+        source(
+            "                if attempt_id not in reserved_since_change:",
+            "                    continue  # reserved under the method the change retired",
+        ),
+        source(
+            "                if False:  # PLANTED: an outcome counts where it sits",
+            "                    continue  # reserved under the method the change retired",
+        ),
+        "an outcome counts toward whichever method is current when it is RECORDED, "
+        "not when it was reserved -- the branch L3's finding (d): a decline asked of "
+        "the old card, resolved after the operator changed it, counts against the "
+        "new card",
+    ),
+    "G22/log-order": (
+        "tests/test_g22_charge_attempts_are_the_truth.py",
+        "charging.py",
+        '        "ORDER BY sequence",',
+        '        "ORDER BY occurred_at, created_at",  # PLANTED: the typed instant decides',
+        "the fold walks the log in the order of the instants callers typed instead "
+        "of the order it was recorded, so a worker whose clock is behind the "
+        "operator's has its decline reset by a method change recorded BEFORE it "
+        "asked -- the count depends on a --at somebody typed",
+    ),
+    "G31/index-by-name": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        "                if violation.diag.constraint_name != ONE_OUTCOME_PER_ATTEMPT:",
+        "                if True:  # PLANTED: the index is not caught by name",
+        "the one-outcome-per-attempt index comes back as a raw UniqueViolation when "
+        "it is reached -- the branch L3's finding (b), a resolver handed a driver "
+        "error for a state the module can name",
+    ),
+    "G31/refusal-names-the-id": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        source(
+            '                    f"{pending.attempt_id} whose request may be in flight; "',
+        ),
+        source(
+            '                    "whose request may be in flight; "  # PLANTED: no id',
+        ),
+        "the refusal stops naming the attempt id -- the branch L3's finding (a): "
+        "the operator is told to resolve an attempt whose id the refusal does not "
+        "carry",
+    ),
+    "G31/pending-state": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        '            state=UNKNOWN if last_kind == "unknown" else IN_FLIGHT,',
+        "            state=IN_FLIGHT,  # PLANTED: unknown and in-flight read the same",
+        "a pending attempt the module has said it does not know about reads as "
+        "in flight: the listing cannot tell the two apart and the next charge "
+        "refuses instead of asking again under the same key",
+    ),
+    "G24/late-row": (
+        "tests/test_g24_every_processor_call_leaves_a_row.py",
+        "charging.py",
+        source(
+            "            if recorded is not None and from_the_processor:",
+            "                payment_id, paid = _record_late(",
+        ),
+        source(
+            "            if recorded is not None and from_the_processor:",
+            "                payment_id, paid = (lambda *a, **k: (None, None))(  # PLANTED",
+        ),
+        "the processor's answer to an ask that was at the processor when the "
+        "operator resolved the attempt is DROPPED again -- the second branch L3's "
+        "finding (i): a call the processor received, followed by no row, and "
+        "nothing in the store says what the processor said under that key",
+    ),
+    "G31/late-success-honoured": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        "    if result.outcome is Outcome.SUCCESS and recorded_outcome is not Outcome.SUCCESS:",
+        "    if False:  # PLANTED: a late SUCCESS the operator did not record is not paid",
+        "a late SUCCESS the operator recorded as a decline writes its row and no "
+        "payment: the money moved at the processor, the invoice still reads owed, "
+        "and the next charge reserves a FRESH key -- the payer charged twice, one "
+        "row later than the finding that found it",
+    ),
+    "G32/writes-nothing": (
+        "tests/test_g32_one_car_one_agreement_per_garage.py",
+        "store/records.py",
+        source(
+            "    held = _held_elsewhere(cursor, garage, garage_uuid, agreement, listed, today)",
+            "    # A version that drops a vehicle releases it -- AFTER every refusal.",
+        ),
+        source(
+            "    cursor.execute(  # PLANTED: the release DELETE runs before the refusals",
+            '        "DELETE FROM vehicle_registrations WHERE garage_id = %s "',
+            '        "AND agreement_external_id = %s AND NOT (identity_normalised = ANY(%s))",',
+            "        (garage_uuid, agreement.id, sorted(listed)),",
+            "    )",
+            "    held = _held_elsewhere(cursor, garage, garage_uuid, agreement, listed, today)",
+            "    # A version that drops a vehicle releases it -- AFTER every refusal.",
+        ),
+        "the release DELETE runs before the refusal check again -- the branch L3's "
+        "Blocker 2: a version that drops one car and is refused on another leaves "
+        "the dropped car's registration deleted in the caller's open transaction, "
+        "and a caller that commits after the refusal strands a covered car at the "
+        "lane",
+    ),
+    "G37": (
+        "tests/test_g37_every_garage_reference_is_a_composite_tenant_key.py",
+        "migrations/0003_invoice_lock_attempt_reservation_and_registrations.sql",
+        source(
+            "ALTER TABLE agreements",
+            "  ADD CONSTRAINT agreements_garage_in_tenant",
+            "  FOREIGN KEY (tenant_id, garage_id)",
+            "  REFERENCES garages (tenant_id, id) ON DELETE RESTRICT;",
+        ),
+        "-- PLANTED: agreements keeps only 0001's bare garage reference",
+        "agreements points at a garage by id alone again, so a tenant-A row can name "
+        "tenant B's garage by a raw insert -- the branch L3's A1.2 / ChatGPT 14 on "
+        "0001's table. The catalogue read finds the bare reference, and the raw "
+        "insert is accepted",
+    ),
+    "G37/registrations": (
+        "tests/test_g37_every_garage_reference_is_a_composite_tenant_key.py",
+        "migrations/0003_invoice_lock_attempt_reservation_and_registrations.sql",
+        source(
+            "  CONSTRAINT vehicle_registrations_garage_in_tenant",
+            "    FOREIGN KEY (tenant_id, garage_id)",
+            "    REFERENCES garages (tenant_id, id) ON DELETE CASCADE",
+        ),
+        source(
+            "  CONSTRAINT vehicle_registrations_garage_in_tenant",
+            "    FOREIGN KEY (garage_id)",
+            "    REFERENCES garages (id) ON DELETE CASCADE  -- PLANTED: no tenant in the key",
+        ),
+        "the registrations table's garage key loses its tenant half -- the shape of "
+        "the first cut of this table, which the branch L3 showed accepting a "
+        "tenant-A row at tenant B's garage",
+    ),
+    "G38": (
+        "tests/test_g38_no_exception_leaves_the_invoice_lock_held.py",
+        "store/postgres.py",
+        source(
+            "    except BaseException:",
+            "        connection.rollback()",
+            "        raise",
+        ),
+        source(
+            "    except BaseException:",
+            "        raise  # PLANTED: the lock is left held on the caller's connection",
+        ),
+        "the manager re-raises without rolling back, so every refusal and every "
+        "guard raise inside a locked block leaves the invoice lock held on the "
+        "caller's connection -- the branch L3's Blocker 3, a cheque on a second "
+        "connection waiting for as long as the first caller idles",
+    ),
+    "G12/tenants": (
+        "tests/test_g12_rls_from_migration_0001.py",
+        "store/postgres.py",
+        "                      AND a.attname = 'tenant_id'",
+        "                      AND a.attname = 'tenant_id_planted'",
+        "the tenant-column guard looks for a column no table has, so it reports every "
+        "table but tenants as lacking one -- proving the catalogue read is a "
+        "measurement of the column and the tenants exemption is the only one",
     ),
 }
 

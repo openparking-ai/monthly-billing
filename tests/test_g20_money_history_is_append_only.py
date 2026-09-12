@@ -190,18 +190,21 @@ def test_a_card_shaped_processor_detail_never_reaches_charge_attempts(app, tenan
             # ChargeResult refuses at construction; the store would refuse after.
             return ChargeResult(outcome=Outcome.DECLINE, detail=f"declined {card_shaped()}")
 
-    from monthly_billing.payment import RESULT_UNKNOWN_DETAIL
+    from monthly_billing.payment import RESULT_UNKNOWN_DETAIL, Unknown
 
     # The guard fires inside the processor's own return, so the module never
-    # receives that result: the attempt is recorded as an ERROR whose detail says
-    # the outcome is unknown, and the card-shaped text is in no row.
+    # receives that result: the ask is recorded as an UNKNOWN row whose detail
+    # says the outcome is unknown, the attempt stays pending, and the
+    # card-shaped text is in no row.
     outcome = attempt_charge(
         app, tenant_id, _Leaks(), line.reference, recorded_by="cron", now=MAY_8
     )
-    assert outcome.result.outcome is Outcome.ERROR and outcome.payment_id is None
-    rows = query(app, tenant_id, "SELECT outcome, detail FROM charge_attempts")
-    assert rows == [("error", RESULT_UNKNOWN_DETAIL)]
-    assert card_shaped() not in rows[0][1]
+    assert outcome.result.outcome is Unknown.UNKNOWN and outcome.payment_id is None
+    rows = query(
+        app, tenant_id, "SELECT kind, outcome, detail FROM charge_attempts ORDER BY sequence"
+    )
+    assert rows == [("attempt", None, ""), ("unknown", None, RESULT_UNKNOWN_DETAIL)]
+    assert all(card_shaped() not in detail for _, _, detail in rows)
 
 
 def _uuid_that_reads_as_a_card():

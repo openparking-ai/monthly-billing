@@ -5,6 +5,11 @@ the processor for the TOTAL and read neither ``paid_at`` nor the unreversed sum,
 and a SUCCESS reset the retry count so the second call was allowed. These tests
 are that probe, the other way round. The control plants the total back in place
 of the balance and requires red.
+
+The outside pass added the cheque-between-reservation-and-outcome case (R1.1b):
+the card payment the processor made is recorded for the amount RESERVED and the
+invoice reads OVERPAID -- never dropped. Its control plants T2 to drop the
+payment when the balance has moved and requires red.
 """
 
 from __future__ import annotations
@@ -63,8 +68,8 @@ def test_a_paid_invoice_is_never_charged_again(app, tenant_id):
     assert refused.value.code == REFUSAL_NOTHING_OWED
     assert processor.amounts == [12000], "the processor was called for the paid invoice"
     assert query(app, tenant_id, "SELECT count(*) FROM payments") == [(1,)]
-    assert query(app, tenant_id, "SELECT count(*) FROM charge_attempts") == [(1,)], (
-        "the refusal wrote an attempt row, but nothing was attempted"
+    assert query(app, tenant_id, "SELECT count(*) FROM charge_attempts") == [(2,)], (
+        "the refusal wrote a row, but nothing was attempted (two rows are one attempt)"
     )
 
 
@@ -105,16 +110,51 @@ def test_a_fully_waived_invoice_is_not_charged_at_all(app, tenant_id):
 
 
 @pytest.mark.guarantee("G23")
-def test_a_success_still_resets_the_count_and_that_now_has_no_path(app, tenant_id):
-    """M1's fold resets the count on a SUCCESS. After G23 a SUCCESS means the
-    invoice is paid, and a paid invoice is refused before the count is consulted
-    -- so the divergence the L3 named (F3) cannot be reached from the store."""
+def test_a_paid_invoice_is_refused_before_the_count_is_consulted(app, tenant_id):
+    """After a SUCCESS the invoice is paid, and a paid invoice is refused before
+    the retry count is consulted; the success itself resets nothing (G22)."""
     reference = _issued(app, tenant_id)
     attempt_charge(app, tenant_id, _Succeeds(), reference, recorded_by="cron", now=_tick(1))
     with pytest.raises(Refused) as refused:
         attempt_charge(app, tenant_id, _Succeeds(), reference, recorded_by="cron", now=_tick(2))
     assert refused.value.code == REFUSAL_NOTHING_OWED
-    assert query(app, tenant_id, "SELECT outcome FROM charge_attempts") == [("success",)]
+    assert query(
+        app, tenant_id, "SELECT outcome FROM charge_attempts WHERE kind = 'outcome'"
+    ) == [("success",)]
+
+
+@pytest.mark.guarantee("G23")
+def test_a_cheque_between_the_reservation_and_the_outcome_leaves_the_invoice_overpaid(
+    app, tenant_id
+):
+    """THE OUTSIDE PASS'S R1.1b. The processor moved the money the reservation
+    asked for; the card payment is recorded for the RESERVED amount and the
+    invoice reads overpaid by exactly the cheque. Never silently, never dropped."""
+    from store_harness import DSN, app_connection
+
+    reference = _issued(app, tenant_id)
+
+    class _ChequeLandsMeanwhile(_Succeeds):
+        def charge(self, request):
+            other = app_connection(DSN)
+            try:
+                record_payment(
+                    other, tenant_id, reference, PaymentMethod.CHEQUE, request.amount_minor,
+                    _tick(1), recorded_by="front-desk",
+                )
+            finally:
+                other.close()
+            return super().charge(request)
+
+    outcome = attempt_charge(
+        app, tenant_id, _ChequeLandsMeanwhile(), reference, recorded_by="cron", now=_tick(1)
+    )
+    assert outcome.result.outcome is Outcome.SUCCESS and outcome.payment_id is not None
+    assert outcome.paid is not None and outcome.paid.paid
+    assert outcome.paid.paid_minor == 24000 and outcome.paid.total_minor == 12000
+    assert outcome.paid.overpaid_minor == 12000
+    rows = query(app, tenant_id, "SELECT method, amount_minor FROM payments ORDER BY method")
+    assert rows == [(PaymentMethod.CARD.value, 12000), (PaymentMethod.CHEQUE.value, 12000)]
 
 
 @pytest.mark.guarantee("G23")

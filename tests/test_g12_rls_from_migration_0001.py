@@ -43,17 +43,12 @@ def migrated():
     Applied here rather than by a script CI runs separately, so that the schema
     under test is the schema in `migrations/` and not whatever a fixture built.
     """
-    from monthly_billing.store.postgres import connect
+    from store_harness import migrate
 
-    owner = connect(DSN)
-    owner.autocommit = True
-    with owner.cursor() as cursor:
-        cursor.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-        cursor.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
-        for path in sorted(MIGRATIONS.glob("*.sql")):
-            cursor.execute(path.read_text())
-        # Give the app role a login, as scripts/ensure-app-role.py would.
-        cursor.execute("ALTER ROLE monthly_billing_app LOGIN PASSWORD 'test-only-password'")
+    # store_harness.migrate is the same drop-and-rebuild from ``migrations/``,
+    # and it gives the app role its login as scripts/ensure-app-role.py would.
+    # It also holds the cluster-wide migration lock: the role is cluster-global.
+    owner = migrate(DSN)
     yield owner
     owner.close()
 
@@ -217,10 +212,12 @@ def test_a_migration_that_refuses_leaves_the_prior_schema_and_a_usable_connectio
             )
             return cursor.fetchall()
 
+    from store_harness import cluster_lock
+
     owner = connect(DSN)
     owner.autocommit = True
     try:
-        with owner.cursor() as cursor:
+        with cluster_lock(DSN), owner.cursor() as cursor:
             cursor.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
             cursor.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
             cursor.execute((MIGRATIONS / "0001_tenants_agreements_and_rls.sql").read_text())
