@@ -12,6 +12,21 @@ $ monthly-billing covered --garage garage.json --agreement agreement.json \
       --vehicle ABC-123 --at 2026-04-01T09:00:00-06:00
 ```
 
+And, against the store, the cycle: issue the period, record what was paid,
+answer the lane from what is actually owed.
+
+```
+$ monthly-billing run --tenant T --garage garage-downtown --period-containing 2026-05-01
+$ monthly-billing record-payment --tenant T --invoice garage-downtown/2026-04-30/payer-acme \
+      --method cheque --amount-minor 14500 --received-at 2026-05-08T10:00:00-06:00 \
+      --reference "cheque 1043" --recorded-by operator
+$ monthly-billing covered-in-store --tenant T --garage garage-downtown \
+      --vehicle ABC-123 --at 2026-05-09T09:00:00-06:00
+```
+
+Nothing wakes itself up: the run is a command the operator's platform calls on
+the billing day, and the platform is an ordinary client of it.
+
 ## The lane never learns anything about money
 
 It asks whether a vehicle is covered and gets **covered** or **not covered** with
@@ -102,9 +117,21 @@ superuser bypasses row-level security unconditionally, and `FORCE` does not stop
 one.
 
 ```
-psql "$DSN" -f migrations/0001_tenants_agreements_and_rls.sql
+psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0001_tenants_agreements_and_rls.sql
+psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0002_billing_run_payments_and_reversals.sql
 MONTHLY_BILLING_APP_PASSWORD=... python scripts/ensure-app-role.py "$DSN"
 ```
+
+**The billing run is idempotent by constraint.** The database holds one invoice
+per tenant, garage, payer and period; a second run of the same period issues
+nothing, re-prices nothing, and says so per payer. **Paid is derived, never set
+by hand**: an invoice is paid when its unreversed payments reach its total, and
+that is re-derived after a payment, a reversal, or an owner's adjustment. A
+reversal reopens the invoice from its ORIGINAL due date. **Payments, reversals
+and charge attempts are append-only by grant** — the application role has no
+`UPDATE` and no `DELETE` on them — and the charge log is the truth for retries:
+three recorded non-success attempts refuse the fourth by name, a recorded
+payment-method change allows it, and a restart forgets nothing.
 
 ## What is not here
 

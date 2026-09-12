@@ -253,6 +253,24 @@ jobs:
   docs:
     name: docs
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # The second-month example in the contract is PRODUCED BY RUNNING THE
+        # STORE -- the billing run, the unpaid answer, the cheque -- so the
+        # generator needs a database. Without one it refuses rather than
+        # rendering a block a machine with no database could not have produced.
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: monthly_billing_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
         with: { persist-credentials: false }
@@ -264,9 +282,13 @@ jobs:
       - name: Every published figure AND SENTENCE is still the generated one
         # docs/CONTRACT.md's marked blocks are DERIVED -- the guarantees from the
         # test registry, the refusal codes from findings.py, the options from the
-        # enums that implement them, and the worked example by running the module
-        # and printing what it returned. A number or a sentence edited by hand
-        # turns this red.
+        # enums that implement them, and the worked examples by running the
+        # module and the store and printing what they returned. A number or a
+        # sentence edited by hand turns this red.
+        env:
+          MONTHLY_BILLING_TEST_DSN: >-
+            host=localhost port=5432 dbname=monthly_billing_test
+            user=postgres password=postgres
         run: |
           python scripts/generate_contract.py --check
           git diff --exit-code docs/CONTRACT.md
@@ -276,4 +298,16 @@ jobs:
         # prove the generator DERIVES anything -- a template whose prose is fixed
         # everywhere except the holes agrees with itself perfectly. These tests
         # plant values that contradict the prose and require the prose to change.
-        run: pytest tests/test_contract_is_generated.py -q
+        # With the DSN: the second-month plants run the store, and without it
+        # they skipped here -- measured: "12 passed, 4 skipped" -- while only the
+        # test job proved them. A guarantee test that can skip is not a guarantee.
+        env:
+          MONTHLY_BILLING_TEST_DSN: >-
+            host=localhost port=5432 dbname=monthly_billing_test
+            user=postgres password=postgres
+        run: |
+          set -o pipefail
+          pytest tests/test_contract_is_generated.py -q | tee "$RUNNER_TEMP/docs.txt"
+          if grep -q 'skipped' "$RUNNER_TEMP/docs.txt"; then
+            echo "a contract plant skipped, so the derivation is unproven:"; exit 1
+          fi

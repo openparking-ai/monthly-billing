@@ -21,12 +21,16 @@ from __future__ import annotations
 
 from .writes import (
     InstrumentRefusedAtTheStore,
+    as_uuid,
     guarded_insert,
+    guarded_update,
     refuse_instrument_in_record,
 )
 
 __all__ = [
     "InstrumentRefusedAtTheStore",
+    "as_uuid",
     "guarded_insert",
+    "guarded_update",
     "refuse_instrument_in_record",
 ]

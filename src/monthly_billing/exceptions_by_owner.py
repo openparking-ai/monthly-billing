@@ -32,7 +32,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-from .findings import REFUSAL_EXCEPTION_HAS_NO_AMOUNT, Refused
+from .findings import (
+    REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE,
+    REFUSAL_EXCEPTION_HAS_NO_AMOUNT,
+    Refused,
+)
 from .money import as_minor
 from .sensitive import refuse_instrument_like
 
@@ -52,11 +56,25 @@ class ExceptionKind(Enum):
     UNBLOCK = "unblock"
 
 
-#: The kinds that change what somebody pays. Every one of them requires an
-#: amount in minor units; the rest refuse one.
-MONETARY_KINDS: frozenset[ExceptionKind] = frozenset(
+#: The kinds that carry money. Every one of them REQUIRES an amount in minor
+#: units, a POSITIVE one -- the direction is the kind's, never the sign's -- and
+#: the rest refuse one.
+NEEDS_AN_AMOUNT: frozenset[ExceptionKind] = frozenset(
     {ExceptionKind.WAIVE_FEE, ExceptionKind.CREDIT, ExceptionKind.REFUND}
 )
+
+#: The kinds that change what is OWED on an invoice, and so land an adjustment
+#: line that lowers its total. A refund is NOT one: the invoice was paid and stays
+#: paid -- a paid period is paid -- and the money going back is a movement, which
+#: is a collection record when collection exists, never a billing line. The
+#: contract derives the refund sentence from these two sets, not from prose.
+LANDS_A_LINE: frozenset[ExceptionKind] = frozenset(
+    {ExceptionKind.WAIVE_FEE, ExceptionKind.CREDIT}
+)
+
+#: The older name for NEEDS_AN_AMOUNT, kept because ``changes_money`` and the
+#: contract read it. One set, two names; never a third copy.
+MONETARY_KINDS = NEEDS_AN_AMOUNT
 
 
 @dataclass(frozen=True)
@@ -114,6 +132,12 @@ class OwnerException:
                     "amount_minor.",
                 )
             as_minor(self.amount_minor, f"exception[{self.id}].amount_minor")
+            if self.amount_minor <= 0:
+                raise Refused(
+                    REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE,
+                    f"exception {self.id!r} is a {self.kind.value} with "
+                    f"amount_minor={self.amount_minor!r}.",
+                )
         elif self.amount_minor is not None:
             raise ValueError(
                 f"exception {self.id!r} is a {self.kind.value}, which does not move "

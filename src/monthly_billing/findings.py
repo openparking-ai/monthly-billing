@@ -53,9 +53,13 @@ REFUSAL_NO_PAYMENT_GRACE = "REFUSAL_NO_PAYMENT_GRACE"
 REFUSAL_NO_IDENTITY_RULE = "REFUSAL_NO_IDENTITY_RULE"
 REFUSAL_CURRENCY_MISMATCH = "REFUSAL_CURRENCY_MISMATCH"
 REFUSAL_GARAGE_MISMATCH = "REFUSAL_GARAGE_MISMATCH"
-REFUSAL_PERIOD_NOT_STARTED = "REFUSAL_PERIOD_NOT_STARTED"
 REFUSAL_EXCEPTION_HAS_NO_AMOUNT = "REFUSAL_EXCEPTION_HAS_NO_AMOUNT"
 REFUSAL_RETRIES_EXHAUSTED = "REFUSAL_RETRIES_EXHAUSTED"
+REFUSAL_NOTHING_OWED = "REFUSAL_NOTHING_OWED"
+REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE = "REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE"
+REFUSAL_ALREADY_REVERSED = "REFUSAL_ALREADY_REVERSED"
+REFUSAL_REVERSAL_REASON_MISMATCH = "REFUSAL_REVERSAL_REASON_MISMATCH"
+REFUSAL_CARD_FIELDS_WITHOUT_A_CARD = "REFUSAL_CARD_FIELDS_WITHOUT_A_CARD"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -98,10 +102,6 @@ REFUSALS: dict[str, str] = {
         "garage per account is the stated shape; answering across garages would "
         "require rules for an entitlement this agreement does not describe."
     ),
-    REFUSAL_PERIOD_NOT_STARTED: (
-        "The agreement has not started, so there is no period to bill. Its start "
-        "date is in the future relative to the instant asked about."
-    ),
     REFUSAL_EXCEPTION_HAS_NO_AMOUNT: (
         "This exception changes money and carries no amount. A note explains; an "
         "amount changes what somebody pays. They are different fields and the "
@@ -111,6 +111,33 @@ REFUSALS: dict[str, str] = {
         "This invoice has reached its maximum charge attempts. The count resets "
         "when the caller reports that the payer changed payment method -- this "
         "module holds no payment method and cannot observe that for itself."
+    ),
+    REFUSAL_NOTHING_OWED: (
+        "Nothing is owed on this invoice: its unreversed payments already reach "
+        "its total, so there is no balance to charge. The processor is not called "
+        "and no attempt is recorded, because nothing was attempted. A charge is "
+        "always for the balance, never for the total."
+    ),
+    REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE: (
+        "This exception changes money and its amount is not a positive number of "
+        "minor units. A waived fee, a credit and a refund each name how much; the "
+        "direction is the kind's, never the sign's, so a negative amount is refused "
+        "rather than read as the opposite kind."
+    ),
+    REFUSAL_ALREADY_REVERSED: (
+        "This payment already has a reversal recorded. A payment that did not "
+        "stand cannot un-stand twice; the first reversal is the record."
+    ),
+    REFUSAL_REVERSAL_REASON_MISMATCH: (
+        "The reversal's reason does not fit the payment's method: a cheque bounces, "
+        "an ACH debit is returned, a card payment is charged back or reversed by "
+        "the processor. A reason from the wrong column is a record somebody "
+        "assembled wrong, and it is refused rather than stored."
+    ),
+    REFUSAL_CARD_FIELDS_WITHOUT_A_CARD: (
+        "A card brand or last four digits were given on a payment that is not a "
+        "card payment. Those fields describe the card a processor charged, and a "
+        "cheque or an ACH debit has none."
     ),
 }
 

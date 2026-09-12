@@ -10,14 +10,29 @@ nothing.
     monthly-billing covered --garage G.json --agreement A.json \\
         --vehicle ABC123 --at 2026-04-01T09:00:00-06:00
     monthly-billing check-agreement --agreement A.json
+
+Against the store (the `store` extra, `MONTHLY_BILLING_DSN`, `--tenant`):
+
+    monthly-billing run --tenant T --garage G --period-containing 2026-05-01
+    monthly-billing record-payment --tenant T --invoice REF --method cheque \\
+        --amount-minor 12000 --received-at 2026-05-08T10:00:00-06:00 \\
+        --reference "cheque 1043" --recorded-by operator
+    monthly-billing record-reversal --tenant T --payment ID --reason bounced_cheque \\
+        --reversed-at 2026-05-12T10:00:00-06:00 --recorded-by operator
+    monthly-billing covered-in-store --tenant T --garage G --vehicle ABC123 \\
+        --at 2026-05-07T09:00:00-06:00
+
+Nothing here wakes itself up. The run is a command the operator's platform
+calls on the billing day, and the platform is an ordinary client of it.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
-from datetime import datetime
+from datetime import date, datetime
 
 from .agreement import InvalidAgreement, load_agreement_file
 from .currency import UnpriceableCurrency
@@ -68,18 +83,10 @@ def _covered(args: argparse.Namespace) -> int:
         at=datetime.fromisoformat(args.at),
         stay_entered_at=datetime.fromisoformat(args.entered_at) if args.entered_at else None,
     )
-    print("COVERED" if answer.covered else "NOT COVERED")
-    print(f"  {answer.reason}")
-    if answer.entitlement is not None:
-        print(f"  entitlement: {answer.entitlement} vehicles at once")
-    if answer.agreement_id:
-        print(f"  under agreement {answer.agreement_id} version {answer.agreement_version}")
-    if answer.unchecked:
-        print(f"  NOT YET EVALUATED: {', '.join(answer.unchecked)}")
     # A not-covered answer exits non-zero, so a shell script can branch on it
     # without parsing prose. It is not an error -- it is an answer -- and the
     # difference is that a refusal exits 2 and prints its code.
-    return 0 if answer.covered else 1
+    return _print_answer(answer)
 
 
 def _check_agreement(args: argparse.Namespace) -> int:
@@ -89,6 +96,114 @@ def _check_agreement(args: argparse.Namespace) -> int:
     print(f"  starts {agreement.start_day}, status {agreement.status.value}")
     print(f"  mandate: {'present' if agreement.mandate else 'ABSENT — cannot be charged'}")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Against the store
+# ---------------------------------------------------------------------------
+
+
+def _connection(args: argparse.Namespace):
+    from .store.postgres import connect
+
+    dsn = args.dsn or os.environ.get("MONTHLY_BILLING_DSN")
+    if not dsn:
+        raise SystemExit("a store command needs --dsn or MONTHLY_BILLING_DSN.")
+    connection = connect(dsn)
+    connection.autocommit = False
+    return connection
+
+
+def _print_answer(answer) -> int:
+    print("COVERED" if answer.covered else "NOT COVERED")
+    print(f"  {answer.reason}")
+    if answer.entitlement is not None:
+        print(f"  entitlement: {answer.entitlement} vehicles at once")
+    if answer.agreement_id:
+        print(f"  under agreement {answer.agreement_id} version {answer.agreement_version}")
+    if answer.unchecked:
+        print(f"  NOT YET EVALUATED: {', '.join(answer.unchecked)}")
+    return 0 if answer.covered else 1
+
+
+def _run(args: argparse.Namespace) -> int:
+    from .billing_run import run_billing
+
+    report = run_billing(
+        _connection(args),
+        args.tenant,
+        args.garage,
+        date.fromisoformat(args.period_containing),
+        now=datetime.fromisoformat(args.now) if args.now else datetime.now().astimezone(),
+    )
+    print(report.rendered())
+    # Per payer, and non-zero if ANY payer was refused. Already-issued is an
+    # answer and exits zero; the operator can run it twice without a shell
+    # script deciding that was an error.
+    return 1 if report.refused else 0
+
+
+def _record_payment(args: argparse.Namespace) -> int:
+    from .payments import PaymentMethod, record_payment
+
+    payment_id, state = record_payment(
+        _connection(args),
+        args.tenant,
+        args.invoice,
+        PaymentMethod(args.method),
+        args.amount_minor,
+        datetime.fromisoformat(args.received_at),
+        recorded_by=args.recorded_by,
+        processor_reference=args.reference,
+    )
+    print(f"payment {payment_id} recorded")
+    print(_paid_line(state))
+    return 0
+
+
+def _record_reversal(args: argparse.Namespace) -> int:
+    from .payments import ReversalReason, record_reversal
+
+    state = record_reversal(
+        _connection(args),
+        args.tenant,
+        args.payment,
+        ReversalReason(args.reason),
+        datetime.fromisoformat(args.reversed_at),
+        recorded_by=args.recorded_by,
+        note=args.note or "",
+    )
+    print(f"reversal recorded against payment {args.payment}")
+    print(_paid_line(state))
+    return 0
+
+
+def _paid_line(state) -> str:
+    if state.paid:
+        return f"  invoice PAID at {state.paid_at.isoformat()}"
+    return (
+        f"  invoice UNPAID: {state.paid_minor} of {state.total_minor} minor received "
+        "(unpaid from its original due date)"
+    )
+
+
+def _covered_in_store(args: argparse.Namespace) -> int:
+    from .entitlement_store import covered_from_store
+
+    answer = covered_from_store(
+        _connection(args),
+        args.tenant,
+        args.garage,
+        args.vehicle,
+        datetime.fromisoformat(args.at),
+        stay_entered_at=datetime.fromisoformat(args.entered_at) if args.entered_at else None,
+    )
+    return _print_answer(answer)
+
+
+def _store_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--tenant", required=True, help="the tenant id (uuid)")
+    parser.add_argument("--dsn", help="or MONTHLY_BILLING_DSN")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -112,6 +227,43 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--agreement", required=True)
     check.set_defaults(run=_check_agreement)
 
+    run = sub.add_parser("run", help="issue one period's invoices to every payer at a garage")
+    _store_arguments(run)
+    run.add_argument("--garage", required=True, help="the garage id")
+    run.add_argument("--period-containing", required=True, help="a day inside the period")
+    run.add_argument("--now", help="the issue instant (ISO with offset); default: now")
+    run.set_defaults(run=_run)
+
+    payment = sub.add_parser("record-payment", help="a cheque or ACH payment received")
+    _store_arguments(payment)
+    payment.add_argument("--invoice", required=True, help="the invoice reference")
+    payment.add_argument("--method", required=True, choices=["cheque", "ach"])
+    payment.add_argument("--amount-minor", required=True, type=int)
+    payment.add_argument("--received-at", required=True, help="ISO instant with an offset")
+    payment.add_argument("--reference", help="the cheque number or the ACH trace")
+    payment.add_argument("--recorded-by", required=True)
+    payment.set_defaults(run=_record_payment)
+
+    reversal = sub.add_parser("record-reversal", help="a payment that did not stand")
+    _store_arguments(reversal)
+    reversal.add_argument("--payment", required=True, help="the payment id")
+    reversal.add_argument(
+        "--reason", required=True,
+        choices=["bounced_cheque", "ach_returned", "chargeback", "processor_reversed"],
+    )
+    reversal.add_argument("--reversed-at", required=True, help="ISO instant with an offset")
+    reversal.add_argument("--recorded-by", required=True)
+    reversal.add_argument("--note")
+    reversal.set_defaults(run=_record_reversal)
+
+    in_store = sub.add_parser("covered-in-store", help="the lane's question, from the store")
+    _store_arguments(in_store)
+    in_store.add_argument("--garage", required=True, help="the garage id")
+    in_store.add_argument("--vehicle", required=True)
+    in_store.add_argument("--at", required=True, help="ISO instant with an offset")
+    in_store.add_argument("--entered-at", help="the stay's entry instant, when known")
+    in_store.set_defaults(run=_covered_in_store)
+
     args = parser.parse_args(argv)
     try:
         return args.run(args)
@@ -123,6 +275,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except InstrumentLike as bad:
         print(f"REFUSED — {bad}", file=sys.stderr)
+        return 2
+    except LookupError as missing:
+        # A garage, invoice or payment id that names nothing in the store.
+        print(f"NOT FOUND — {missing}", file=sys.stderr)
         return 2
 
 
