@@ -6,8 +6,17 @@ agreement, not covered against a paid one. Now the store registers a vehicle
 identity to ONE agreement per garage and refuses a second by name, the pure
 call refuses two identities by name, and the pick is gone.
 
+A refusal WRITES NOTHING: every listed identity is checked before the release
+DELETE and before any insert or update. The branch L3 ran the other order --
+the DELETE first -- and a version that dropped one car and was refused on
+another left the dropped car's registration deleted in the caller's open
+transaction; a caller that committed after the refusal then had a stored
+agreement covering a car the lane called NO_AGREEMENT.
+
 Controls: the store's refusal planted away (the second agreement is accepted);
-the pure call's refusal planted away (it picks again).
+the pure call's refusal planted away (it picks again); the registration read
+planted away; the DELETE moved back in front of the refusal (the transaction
+after a refusal is no longer what it was).
 """
 
 from __future__ import annotations
@@ -238,3 +247,119 @@ def test_a_vehicle_with_no_registration_is_on_no_agreement(app, tenant_id):
     app.commit()
     answer = covered_from_store(app, tenant_id, GARAGE.id, PLATE, DAY)
     assert not answer.covered and answer.reason_code == "NO_AGREEMENT"
+
+
+def _regs_in_transaction(cursor):
+    cursor.execute(
+        "SELECT identity_normalised, agreement_external_id FROM vehicle_registrations ORDER BY 1"
+    )
+    return cursor.fetchall()
+
+
+@pytest.mark.guarantee("G32")
+def test_a_refusal_writes_nothing_so_a_caller_that_commits_after_it_has_committed_nothing(
+    app, tenant_id
+):
+    """THE BRANCH L3'S R4.4 (ii): ag-A lists CARA1 and CARA2; ag-B holds CARB1.
+    A version 2 of ag-A that DROPS CARA2 and ADDS CARB1 is refused (CARB1 is
+    ag-B's) -- and inside the still-open transaction every registration is as
+    it was, so a caller that commits after catching the refusal changes nothing
+    and the lane still answers CARA2 covered by ag-A v1."""
+    garage, payers = _garage_and_payers(app, tenant_id)
+    a1 = simple_agreement(id="ag-A", payer_id="payer-a", vehicles=("CARA1", "CARA2"),
+                          start_day=date(2026, 1, 5))
+    b1 = simple_agreement(id="ag-B", payer_id="payer-z", vehicles=("CARB1",),
+                          start_day=date(2026, 1, 5))
+    _store(app, tenant_id, garage, payers, a1)
+    _store(app, tenant_id, garage, payers, b1)
+    before = [("cara1", "ag-A"), ("cara2", "ag-A"), ("carb1", "ag-B")]
+    assert registrations_at_garage_as_app(app, tenant_id, garage) == before
+    v2 = simple_agreement(id="ag-A", version=2, payer_id="payer-a", vehicles=("CARA1", "CARB1"),
+                          start_day=date(2026, 1, 5))
+    with tenant(app, tenant_id) as cursor:
+        with pytest.raises(Refused) as refused:
+            store_agreement(cursor, tenant_id, GARAGE, garage, payers["payer-a"], v2, now=DAY)
+        assert refused.value.code == REFUSAL_VEHICLE_ALREADY_REGISTERED
+        assert _regs_in_transaction(cursor) == before, (
+            "the refusal left the dropped car's registration deleted in the open transaction"
+        )
+        cursor.execute("SELECT max(version) FROM agreements WHERE external_id = 'ag-A'")
+        assert cursor.fetchone() == (1,)
+    app.commit()  # the caller that treats Refused as a per-agreement outcome and goes on
+    assert registrations_at_garage_as_app(app, tenant_id, garage) == before
+    assert query(
+        app, tenant_id, "SELECT max(version) FROM agreements WHERE external_id = 'ag-A'"
+    ) == [(1,)]
+    answer = covered_from_store(app, tenant_id, GARAGE.id, "CARA2", DAY)
+    assert answer.covered and answer.agreement_id == "ag-A" and answer.agreement_version == 1
+    # The control on the instrument: the same v2 with the added car FREE is
+    # stored, and then CARA2 really is on no agreement.
+    free = simple_agreement(id="ag-A", version=2, payer_id="payer-a", vehicles=("CARA1", "CARA3"),
+                            start_day=date(2026, 1, 5))
+    _store(app, tenant_id, garage, payers, free)
+    assert registrations_at_garage_as_app(app, tenant_id, garage) == [
+        ("cara1", "ag-A"), ("cara3", "ag-A"), ("carb1", "ag-B"),
+    ]
+    assert not covered_from_store(app, tenant_id, GARAGE.id, "CARA2", DAY).covered
+
+
+@pytest.mark.guarantee("G32")
+def test_two_registrations_racing_write_nothing_for_the_loser_and_it_rolls_back(app, tenant_id):
+    """The race arm: both SELECTs find no holder (rendezvous at the insert), the
+    second insert hits the UNIQUE, and the module names it -- with the loser's
+    transaction aborted by the constraint. Nothing of the loser's is written;
+    the caller rolls back; nothing more is promised about that transaction."""
+    import threading
+
+    import monthly_billing.store.records as rec
+    from store_harness import DSN, app_connection
+
+    garage, payers = _garage_and_payers(app, tenant_id)
+    go = threading.Barrier(2, timeout=5)
+    real = rec.guarded_insert
+
+    def rendezvous_at_the_insert(cursor, table, record):
+        if table == "vehicle_registrations" and record["identity_normalised"] == "shared1":
+            try:
+                go.wait()
+            except threading.BrokenBarrierError:
+                pass
+        return real(cursor, table, record)
+
+    results: dict[str, object] = {}
+
+    def register(name, agreement):
+        c = app_connection(DSN)
+        try:
+            with tenant(c, tenant_id) as cursor:
+                store_agreement(cursor, tenant_id, GARAGE, garage, payers[agreement.payer_id],
+                                agreement, now=DAY)
+            c.commit()
+            results[name] = "accepted"
+        except Refused as refusal:
+            results[name] = (refusal.code, c.info.transaction_status.name)
+            c.rollback()
+        except Exception as exc:  # noqa: BLE001 -- the shape of the failure is the finding
+            results[name] = exc
+        finally:
+            c.close()
+
+    rec.guarded_insert = rendezvous_at_the_insert
+    try:
+        pairs = (("A", A), ("Z", Z))
+        threads = [threading.Thread(target=register, args=(n, ag)) for n, ag in pairs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=20)
+    finally:
+        rec.guarded_insert = real
+    accepted = [n for n, r in results.items() if r == "accepted"]
+    refused = [(n, r) for n, r in results.items() if isinstance(r, tuple)]
+    assert len(accepted) == 1 and len(refused) == 1, results
+    (loser, (code, status)) = refused[0]
+    assert code == REFUSAL_VEHICLE_ALREADY_REGISTERED
+    assert status == "INERROR", "the constraint aborted the loser's transaction; it rolls back"
+    winner = "ag-A" if accepted == ["A"] else "ag-Z"
+    assert query(app, tenant_id, "SELECT external_id FROM agreements") == [(winner,)]
+    assert all(a == winner for _, a in registrations_at_garage_as_app(app, tenant_id, garage))

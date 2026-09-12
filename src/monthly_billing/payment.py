@@ -35,20 +35,28 @@ gets the total. An amount of zero or less is ``REFUSAL_NOTHING_OWED`` before the
 processor is called: a paid invoice is never charged again, a part-paid one is
 charged its remainder, and a fully waived one is not charged at all.
 
-**A PROCESSOR'S RESULT IS NEVER DISCARDED SILENTLY.** The processor call is the
-one thing here this module does not control. If it raises, the outcome is ERROR
-with the exception named in the detail; if what it returned could not even be
-received -- a result carrying an instrument-shaped reference is refused by the
-guard inside the processor's own return -- the outcome is ERROR and the detail
-says UNKNOWN, because money may have moved and this module cannot know. A row is
-written for every one of those by the store-backed caller; a message that would
-itself trip the guard is replaced by the fixed word ``withheld`` rather than
-losing the row to its own text.
+**WHAT THE MODULE DOES NOT KNOW IS NEVER WRITTEN AS AN OUTCOME.** The
+processor call is the one thing here this module does not control, and there
+are three things the module can know after making it: a result -- success,
+decline, error, as the processor said -- or NOTHING. Nothing is when the
+processor raised (before or after the request left; the module cannot tell
+which) or when its answer could not be received (the instrument guard refused
+what it returned). That second kind is ``UnknownAnswer``, and it is
+deliberately NOT a ``ChargeResult``: an unknown is never an outcome row, never
+counts toward the three attempts, and never resolves the reservation the
+store-backed caller holds -- the second outside round showed that writing it as
+an ``error`` let the next charge ask again under a fresh key, and a processor
+that had in fact charged then charged twice. ``ask_processor`` is the wrapper
+that tells the two apart; a message that would itself trip the guard is
+replaced by the fixed word ``withheld`` rather than losing the row to its own
+text. M1's pure ``charge_invoice`` keeps ``result_of``, which folds an unknown
+into ERROR: it holds no reservation and collects no money, so there is nothing
+there for an unknown to be charged past.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Protocol
 from uuid import UUID
@@ -68,9 +76,22 @@ MAX_ATTEMPTS = 3
 
 
 class Outcome(Enum):
+    """What a processor SAID. Three values, and nothing else is one: an
+    answer the module never received is ``Unknown``, a different type, so it
+    cannot be written where an outcome goes."""
+
     SUCCESS = "success"
     DECLINE = "decline"
     ERROR = "error"
+
+
+class Unknown(Enum):
+    """The one value an answer the module did not receive carries. Not a
+    member of ``Outcome`` on purpose: ``Outcome("unknown")`` raises, the log's
+    CHECK refuses it in the outcome column, and the command line's
+    ``--outcome`` does not offer it."""
+
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -109,6 +130,25 @@ class ChargeResult:
         refuse_instrument_like(self.detail, "charge_result.detail")
         if self.reference is not None:
             refuse_instrument_like(self.reference, "charge_result.reference")
+
+
+@dataclass(frozen=True)
+class UnknownAnswer:
+    """The processor was asked and the module does not know what it did.
+
+    Not a result and not an outcome. ``detail`` is what the module saw -- the
+    exception's text, ``RESULT_UNKNOWN_DETAIL``, or ``DETAIL_WITHHELD`` --
+    scanned by the instrument guard because it lands in a log row. The
+    store-backed caller writes it as an ``unknown`` row, leaves the attempt
+    PENDING, and the next charge asks the processor again under the SAME
+    idempotency key rather than reserving a fresh one.
+    """
+
+    detail: str
+    outcome: Unknown = field(default=Unknown.UNKNOWN, init=False)
+
+    def __post_init__(self) -> None:
+        refuse_instrument_like(self.detail, "unknown_answer.detail")
 
 
 @dataclass(frozen=True)
@@ -200,23 +240,43 @@ RESULT_UNKNOWN_DETAIL = (
 DETAIL_WITHHELD = "withheld"
 
 
-def result_of(processor: PaymentProcessor, request: ChargeRequest) -> ChargeResult:
-    """Call the processor and ALWAYS come back with a result.
+def ask_processor(
+    processor: PaymentProcessor, request: ChargeRequest
+) -> ChargeResult | UnknownAnswer:
+    """Call the processor and come back with what the module KNOWS: its
+    result, or an ``UnknownAnswer`` saying what the module saw instead.
 
-    A raise becomes ERROR naming the exception; a result the guard refused inside
-    the processor's own return becomes ERROR saying unknown. See the module
-    docstring: a reported result is never discarded silently.
+    A raise -- any exception, before or after the request left -- is unknown
+    naming the exception; a result the guard refused inside the processor's own
+    return is unknown with the fixed sentence. Neither is ever a result. See
+    the module docstring.
     """
     try:
         return processor.charge(request)
     except InstrumentLike:
-        return ChargeResult(outcome=Outcome.ERROR, detail=RESULT_UNKNOWN_DETAIL)
+        return UnknownAnswer(RESULT_UNKNOWN_DETAIL)
     except Exception as exc:  # noqa: BLE001 -- the processor is the one thing not ours
         detail = f"{type(exc).__name__}: {exc}"
         try:
-            return ChargeResult(outcome=Outcome.ERROR, detail=detail)
+            return UnknownAnswer(detail)
         except InstrumentLike:
-            return ChargeResult(outcome=Outcome.ERROR, detail=DETAIL_WITHHELD)
+            return UnknownAnswer(DETAIL_WITHHELD)
+
+
+def result_of(processor: PaymentProcessor, request: ChargeRequest) -> ChargeResult:
+    """Call the processor and ALWAYS come back with a result -- M1's pure
+    path, for ``charge_invoice`` only.
+
+    An unknown answer is folded into ERROR here, and only here, because this
+    path holds no reservation and writes no row: there is no attempt to leave
+    pending and no key to reuse, so ERROR naming what happened is the most a
+    caller with no store can be told. The store-backed charge uses
+    ``ask_processor`` and never this.
+    """
+    answer = ask_processor(processor, request)
+    if isinstance(answer, UnknownAnswer):
+        return ChargeResult(outcome=Outcome.ERROR, detail=answer.detail)
+    return answer
 
 
 def charge_invoice(
@@ -234,6 +294,12 @@ def charge_invoice(
     processor that has already been called cannot be un-called, and "we tried it
     anyway and then complained" is how a customer gets charged on an agreement
     nobody agreed to, or twice for one month.
+
+    This is the pure path and not where money is collected: it holds no
+    reservation, so an answer the module did not receive comes back as ERROR
+    (``result_of``) rather than as a pending attempt to be asked again. The
+    store-backed ``charging.attempt_charge`` is the one that reserves, and it
+    keeps an unknown unknown.
 
     ``amount_minor`` is what is charged: the caller's balance, or the invoice
     total when none is given. The request carries that amount and never the total

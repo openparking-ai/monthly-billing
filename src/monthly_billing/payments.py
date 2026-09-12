@@ -27,12 +27,16 @@ ABOUT IT.** The owner records an exception with an amount, or does not. Money
 received is a payment; a decision is an exception; they are different rows and
 never one.
 
-**EVERY EVENT HERE RUNS UNDER THE INVOICE LOCK.** ``record_payment`` and
-``record_reversal`` take ``lock_invoice`` first, inside their own transaction,
-and derive ``paid_at`` before they commit -- so two events on one invoice at
-once are serialised and the second derives from the first's committed rows.
-The outside pass showed a payment and a credit at once leaving ``paid_at`` NULL
-on a paid invoice; the lock is what closes it. ``record_reversal``'s
+**EVERY EVENT HERE RUNS UNDER THE INVOICE LOCK, AND NO EXCEPTION LEAVES IT
+HELD.** ``record_payment`` and ``record_reversal`` enter ``locked_invoice``
+first, inside their own transaction, and derive ``paid_at`` before they commit
+-- so two events on one invoice at once are serialised and the second derives
+from the first's committed rows. The outside pass showed a payment and a
+credit at once leaving ``paid_at`` NULL on a paid invoice; the lock is what
+closes it. Its second round showed ``record_reversal`` refusing under the lock
+with no rollback, so the lock stayed on the caller's connection and every
+other money event on the invoice waited on it; the manager rolls back on any
+raise, so a refusal hands the lock back with the refusal. ``record_reversal``'s
 check-then-insert is serialised the same way, and the UNIQUE it would hit is
 caught BY NAME as the backstop, so two reversals racing are one recorded and
 one refused by name -- never a driver error.
@@ -70,7 +74,7 @@ from .findings import (
     REFUSAL_REVERSAL_REASON_MISMATCH,
     Refused,
 )
-from .store.postgres import lock_invoice, tenant
+from .store.postgres import locked_invoice, tenant
 from .store.writes import as_uuid, guarded_insert, guarded_update
 
 
@@ -237,13 +241,13 @@ def record_payment(
     refuse_unless_a_payment(invoice_reference, method, amount_minor, card_brand, card_last4)
     with tenant(connection, tenant_id) as cursor:
         invoice_uuid = invoice_uuid_for(cursor, invoice_reference)
-        lock_invoice(cursor, invoice_uuid)
-        payment_uuid = insert_payment(
-            cursor, tenant_id, invoice_uuid, method, amount_minor, received_at,
-            recorded_by=recorded_by, processor_reference=processor_reference,
-            card_brand=card_brand, card_last4=card_last4,
-        )
-        state = rederive_paid_at(cursor, invoice_uuid, received_at)
+        with locked_invoice(connection, cursor, invoice_uuid):
+            payment_uuid = insert_payment(
+                cursor, tenant_id, invoice_uuid, method, amount_minor, received_at,
+                recorded_by=recorded_by, processor_reference=processor_reference,
+                card_brand=card_brand, card_last4=card_last4,
+            )
+            state = rederive_paid_at(cursor, invoice_uuid, received_at)
     connection.commit()
     return payment_uuid, state
 
@@ -339,46 +343,47 @@ def record_reversal(
         invoice_uuid, method = as_uuid(row[0]), PaymentMethod(row[1])
         # The lock BEFORE the check, so two reversals of one payment at once are
         # one recorded and one refused by name -- the second waits here and then
-        # sees the first's committed row.
-        lock_invoice(cursor, invoice_uuid)
-        if reason not in REASONS_FOR_METHOD[method]:
-            raise Refused(
-                REFUSAL_REVERSAL_REASON_MISMATCH,
-                f"payment {payment_id!r} is a {method.value} payment and the reason given "
-                f"is {reason.value!r}.",
+        # sees the first's committed row. Either refusal below raises out of
+        # the manager, which rolls back: the lock goes with the refusal.
+        with locked_invoice(connection, cursor, invoice_uuid):
+            if reason not in REASONS_FOR_METHOD[method]:
+                raise Refused(
+                    REFUSAL_REVERSAL_REASON_MISMATCH,
+                    f"payment {payment_id!r} is a {method.value} payment and the reason "
+                    f"given is {reason.value!r}.",
+                )
+            cursor.execute(
+                "SELECT 1 FROM payment_reversals WHERE payment_id = %s", (payment_id,)
             )
-        cursor.execute(
-            "SELECT 1 FROM payment_reversals WHERE payment_id = %s", (payment_id,)
-        )
-        if cursor.fetchone() is not None:
-            raise Refused(
-                REFUSAL_ALREADY_REVERSED,
-                f"payment {payment_id!r} already has a reversal recorded.",
-            )
-        try:
-            guarded_insert(
-                cursor,
-                "payment_reversals",
-                {
-                    "tenant_id": tenant_id,
-                    "payment_id": payment_id,
-                    "reason": reason.value,
-                    "reversed_at": reversed_at,
-                    "recorded_by": recorded_by,
-                    "note": note,
-                },
-            )
-        except psycopg.errors.UniqueViolation as violation:
-            # The backstop, read BY CONSTRAINT NAME: only the one-reversal-per-
-            # payment key means "already reversed". Anything else is what it is.
-            if violation.diag.constraint_name != ONE_REVERSAL_PER_PAYMENT:
-                raise
-            connection.rollback()
-            raise Refused(
-                REFUSAL_ALREADY_REVERSED,
-                f"payment {payment_id!r} already has a reversal recorded.",
-            ) from None
-        cursor.fetchone()
-        state = rederive_paid_at(cursor, invoice_uuid, reversed_at)
+            if cursor.fetchone() is not None:
+                raise Refused(
+                    REFUSAL_ALREADY_REVERSED,
+                    f"payment {payment_id!r} already has a reversal recorded.",
+                )
+            try:
+                guarded_insert(
+                    cursor,
+                    "payment_reversals",
+                    {
+                        "tenant_id": tenant_id,
+                        "payment_id": payment_id,
+                        "reason": reason.value,
+                        "reversed_at": reversed_at,
+                        "recorded_by": recorded_by,
+                        "note": note,
+                    },
+                )
+            except psycopg.errors.UniqueViolation as violation:
+                # The backstop, read BY CONSTRAINT NAME: only the one-reversal-
+                # per-payment key means "already reversed". Anything else is
+                # what it is.
+                if violation.diag.constraint_name != ONE_REVERSAL_PER_PAYMENT:
+                    raise
+                raise Refused(
+                    REFUSAL_ALREADY_REVERSED,
+                    f"payment {payment_id!r} already has a reversal recorded.",
+                ) from None
+            cursor.fetchone()
+            state = rederive_paid_at(cursor, invoice_uuid, reversed_at)
     connection.commit()
     return state

@@ -4,6 +4,14 @@
     python scripts/generate_contract.py            # write the document
     python scripts/generate_contract.py --check    # fail if it would change
 
+**WHAT ``--check`` WRITES.** Nothing to the document: it renders in memory and
+compares (measured: the file's hash is identical before and after a ``--check``
+that exits 1 under a plant). It DOES write the database named by
+``MONTHLY_BILLING_TEST_DSN`` -- the second-month block and the grant table are
+produced by dropping and rebuilding that schema -- so point it at a database the
+harness may destroy, never a shared one. CI's independent check is
+``git diff --exit-code docs/CONTRACT.md`` after a plain run.
+
 **THE SECOND-MONTH EXAMPLE RUNS AGAINST A DATABASE.** The billing run, the
 unpaid answer and the cheque are store-backed, so the block that shows them is
 produced by running them -- against ``MONTHLY_BILLING_TEST_DSN``, whose schema
@@ -52,6 +60,7 @@ from monthly_billing.findings import (  # noqa: E402
     NOT_COVERED_MEANS,
     NOT_COVERED_REASONS,
     REFUSAL_ALREADY_REVERSED,
+    REFUSAL_ATTEMPT_ALREADY_RESOLVED,
     REFUSAL_ATTEMPT_UNRESOLVED,
     REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE,
     REFUSAL_NOTHING_OWED,
@@ -114,10 +123,11 @@ def block_answer_fields() -> str:
         f"That is the whole answer: {len(Answer.__dataclass_fields__)} fields, none of "
         "which is money, and none of which could express a decision about a barrier. "
         "Beside covered and not-covered there is one third result, a REFUSAL: handed two "
-        "agreement identities that list the same vehicle, the call refuses by name "
-        f"(`{REFUSAL_VEHICLE_ON_TWO_AGREEMENTS}`, exit 2 on the command line) rather "
-        "than picking one. A refusal is not an answer of no; the not-covered sentence "
-        "does not travel on it."
+        "agreement identities that list the same vehicle, the pure call refuses by name "
+        f"(`{REFUSAL_VEHICLE_ON_TWO_AGREEMENTS}`) rather than picking one. A refusal is "
+        "not an answer of no; the not-covered sentence does not travel on it. The store "
+        "can no longer produce that state and the command line takes one agreement "
+        "document, so this result reaches a library caller only."
     )
     return "\n".join(rows)
 
@@ -248,13 +258,30 @@ def block_payment_methods() -> str:
         "its remainder. The attempt row -- the RESERVATION, carrying the amount -- is "
         "committed BEFORE the processor is asked; the processor is handed the attempt id "
         "as its idempotency key; the OUTCOME row and, on success, the card payment for the "
-        "reserved amount land in one transaction afterwards: a raise is an `error` naming "
-        "the exception, and a result the instrument guard refused inside the processor's "
-        "own return is an `error` whose detail says the outcome is unknown -- a reported "
-        "result is never discarded silently. A reservation with no outcome is a PENDING "
-        f"attempt and the next charge is `{REFUSAL_ATTEMPT_UNRESOLVED}` until an operator "
-        "records what the processor said (`resolve-attempt`, once). A pending attempt comes "
-        "only from the library's `attempt_charge`; nothing on the command line charges.",
+        "reserved amount land in one transaction afterwards.",
+        "",
+        "**What the module does not know is never written as an outcome.** Three things "
+        "the module can know after asking the processor: a result -- `success`, `decline` "
+        "or `error`, as the processor said -- or NOTHING: the processor raised (before or "
+        "after the request left; the module cannot tell which), or its answer could not "
+        "be received (the instrument guard refused what it returned). Nothing is an "
+        "`unknown` row saying what the module saw -- never an outcome, never counted "
+        "toward the three attempts -- and the attempt stays PENDING. A pending attempt is "
+        "never charged past: while its request may be in flight (its last row is the "
+        "reservation or an `ask`) the next charge is "
+        f"`{REFUSAL_ATTEMPT_UNRESOLVED}`, naming the attempt id, and `pending-attempts` "
+        "lists it; when the module has said it does not know (its last row is `unknown`) "
+        "the next charge writes an `ask` row and asks the processor again under the SAME "
+        "idempotency key for the amount RESERVED -- not a new charge, so nothing new is "
+        "reserved and the refusals are not re-run. There is no cap on re-asks: a processor "
+        "that never answers grows the `unknown` log for as long as the scheduler calls, "
+        "and one key is one charge at most -- a real processor honours the idempotency "
+        "key, so a repeated request charges once. An operator records what the processor "
+        "said once (`resolve-attempt`); a second answer for the same attempt is "
+        f"`{REFUSAL_ATTEMPT_ALREADY_RESOLVED}`, from the check under the lock and from "
+        "the database's one-outcome-per-attempt index caught by its name. A pending "
+        "attempt comes only from the library's `attempt_charge`; nothing on the command "
+        "line charges.",
     ]
     return "\n".join(lines)
 
@@ -272,6 +299,7 @@ def block_serialised() -> str:
             "source: two events on one invoice at once are serialised, and the second "
             "derives `paid_at` from the first's committed rows."
         )
+        verdict += _one_place()
     else:
         verdict = (
             f"ONLY {len(taken) - len(missing)} of {len(taken)} take the invoice row lock; "
@@ -279,6 +307,27 @@ def block_serialised() -> str:
             + " DOES NOT, and two of its events on one invoice at once are NOT serialised."
         )
     return f"The money events are {names}. {verdict}"
+
+
+def _one_place() -> str:
+    """Where the lock is taken, read from the source of every module: one site
+    means every money event's lock comes with the manager's rollback, so no
+    exception leaves it held. A second direct site changes this sentence."""
+    from monthly_billing.store.postgres import direct_lock_call_sites
+
+    sites = direct_lock_call_sites()
+    names = ", ".join(f"`{m.rsplit('.', 1)[1]}.{f}`" for m, f in sites)
+    if sites == (("monthly_billing.store.postgres", "locked_invoice"),):
+        return (
+            " The lock is taken in ONE place, `locked_invoice`, which rolls the "
+            "transaction back if anything raises inside the block -- a refusal, the "
+            "instrument guard, a driver error -- so no exception leaves the lock held on "
+            "the caller's connection."
+        )
+    return (
+        f" The lock is taken DIRECTLY in {len(sites)} places -- {names} -- so a raise at "
+        "one of them can leave the lock held on the caller's connection."
+    )
 
 
 def block_grants() -> str:

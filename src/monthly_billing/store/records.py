@@ -23,6 +23,17 @@ effective day -- they are still covered until then -- and the next registration
 on or after that day replaces the row. The UNIQUE in 0003 is the backstop for a
 raw insert and for two registrations racing, caught by name.
 
+**A REFUSAL WRITES NOTHING.** Every listed identity is checked and the first
+one another agreement holds raises BEFORE the release ``DELETE`` and before
+any insert or update -- the order every other write in this module has. The
+second outside round ran the other order: a version that dropped one car and
+was refused on another left the dropped car's registration deleted in the
+caller's open transaction, and a caller that committed after catching the
+refusal had a stored agreement covering a car the lane called NO_AGREEMENT.
+Now a refusal leaves the transaction exactly as it found it. Two registrations
+racing are different: the second's transaction is aborted by the UNIQUE before
+the refusal names it, nothing is written, and the caller rolls back.
+
 **THE STORE'S IDS AND THE ENGINE'S IDS ARE DIFFERENT THINGS.** The engine
 compares opaque strings -- a garage id, a payer id, an agreement id -- and never
 parses them. The store keys rows by uuid and carries those strings as
@@ -208,6 +219,9 @@ def register_vehicles(
     that agreement is cancelled and its effective day has passed, in which case
     the row is replaced in this same transaction. Identities the previous
     version listed and this one does not are released.
+
+    Every refusal first, then the release, then the writes: a refusal writes
+    nothing, so a caller that catches it and commits has committed nothing.
     """
     import psycopg  # the store extra; the engine never imports this module
 
@@ -217,38 +231,31 @@ def register_vehicles(
     today = day_of(at, tz)
     listed = {garage.normalise_identity(v) for v in agreement.vehicles}
 
-    # A version that drops a vehicle releases it.
+    held = _held_elsewhere(cursor, garage, garage_uuid, agreement, listed, today)
+    # A version that drops a vehicle releases it -- AFTER every refusal.
     cursor.execute(
         "DELETE FROM vehicle_registrations WHERE garage_id = %s AND agreement_external_id = %s "
         "AND NOT (identity_normalised = ANY(%s))",
         (garage_uuid, agreement.id, sorted(listed)),
     )
     for identity in sorted(listed):
-        cursor.execute(
-            "SELECT id, agreement_external_id FROM vehicle_registrations "
-            "WHERE garage_id = %s AND identity_normalised = %s",
-            (garage_uuid, identity),
-        )
-        row = cursor.fetchone()
-        if row is not None and row[1] == agreement.id:
-            continue
-        if row is not None:
-            holder = row[1]
-            frees_on = _released_on(cursor, garage_uuid, holder)
-            if frees_on is None or frees_on > today:
-                raise Refused(
-                    REFUSAL_VEHICLE_ALREADY_REGISTERED,
-                    f"vehicle {identity!r} at garage {garage.id!r} is registered to "
-                    f"agreement {holder!r}"
-                    + (f", which frees it on {frees_on}." if frees_on else ", which is active."),
-                )
+        if identity in held:
+            # The holder is cancelled and its day has come: the row passes to
+            # this agreement, in this transaction.
             guarded_update(
                 cursor,
                 "vehicle_registrations",
                 {"agreement_external_id": agreement.id, "registered_at": at},
-                {"id": as_uuid(row[0])},
+                {"id": held[identity]},
             )
             continue
+        cursor.execute(
+            "SELECT 1 FROM vehicle_registrations "
+            "WHERE garage_id = %s AND identity_normalised = %s AND agreement_external_id = %s",
+            (garage_uuid, identity, agreement.id),
+        )
+        if cursor.fetchone() is not None:
+            continue  # already this agreement's
         try:
             guarded_insert(
                 cursor,
@@ -272,6 +279,41 @@ def register_vehicles(
                 f"vehicle {identity!r} at garage {garage.id!r} was registered to another "
                 "agreement at the same instant.",
             ) from None
+
+
+def _held_elsewhere(
+    cursor: Any,
+    garage: Garage,
+    garage_uuid: UUID,
+    agreement: Agreement,
+    listed: set[str],
+    today: date,
+) -> dict[str, UUID]:
+    """The refusals, all of them, before a row changes. Walks every listed
+    identity; the first one another agreement still holds raises by name.
+    Returns the rows another agreement HAS released (cancelled, effective day
+    reached), by identity, for the caller to take over."""
+    released: dict[str, UUID] = {}
+    for identity in sorted(listed):
+        cursor.execute(
+            "SELECT id, agreement_external_id FROM vehicle_registrations "
+            "WHERE garage_id = %s AND identity_normalised = %s",
+            (garage_uuid, identity),
+        )
+        row = cursor.fetchone()
+        if row is None or row[1] == agreement.id:
+            continue
+        holder = row[1]
+        frees_on = _released_on(cursor, garage_uuid, holder)
+        if frees_on is None or frees_on > today:
+            raise Refused(
+                REFUSAL_VEHICLE_ALREADY_REGISTERED,
+                f"vehicle {identity!r} at garage {garage.id!r} is registered to "
+                f"agreement {holder!r}"
+                + (f", which frees it on {frees_on}." if frees_on else ", which is active."),
+            )
+        released[identity] = as_uuid(row[0])
+    return released
 
 
 def _released_on(cursor: Any, garage_uuid: Any, agreement_external_id: str) -> date | None:

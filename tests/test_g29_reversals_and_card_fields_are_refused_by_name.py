@@ -115,6 +115,7 @@ def _race_two_reversals(app, tenant_id, *, meet_before: str):
     import threading
 
     import monthly_billing.payments as pm
+    import monthly_billing.store.postgres as pg
 
     reference = _issued(app, tenant_id)
     payment_id, _ = record_payment(
@@ -127,14 +128,16 @@ def _race_two_reversals(app, tenant_id, *, meet_before: str):
         arrived[me].set()
         arrived["op-2" if me == "op-1" else "op-1"].wait(1.5)
 
-    real_lock, real_insert = pm.lock_invoice, pm.guarded_insert
+    # The lock is taken in ONE place -- ``locked_invoice`` in store.postgres --
+    # so that is where the rendezvous, or the plant, goes.
+    real_lock, real_insert = pg.lock_invoice, pm.guarded_insert
     if meet_before == "lock":
         def lock(cursor, invoice_uuid):
             wait_for_the_other()
             return real_lock(cursor, invoice_uuid)
-        pm.lock_invoice = lock
+        pg.lock_invoice = lock
     else:
-        pm.lock_invoice = lambda cursor, invoice_uuid: None  # the lock planted away
+        pg.lock_invoice = lambda cursor, invoice_uuid: None  # the lock planted away
         def insert(cursor, table, record):
             if table == "payment_reversals":
                 wait_for_the_other()
@@ -161,7 +164,7 @@ def _race_two_reversals(app, tenant_id, *, meet_before: str):
         for t in threads:
             t.join(timeout=20)
     finally:
-        pm.lock_invoice, pm.guarded_insert = real_lock, real_insert
+        pg.lock_invoice, pm.guarded_insert = real_lock, real_insert
     return results
 
 

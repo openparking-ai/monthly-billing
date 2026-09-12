@@ -144,12 +144,15 @@ GUARANTEES: dict[str, str] = {
         "and blocks rather than reading the garage's base figure alone."
     ),
     "G22": (
-        "The charge log is the truth for retries: the retry state is rebuilt from the "
-        "persisted OUTCOME rows since the last persisted payment-method change, so "
-        "three recorded non-success outcomes refuse the fourth by name, a recorded "
-        "method change allows it -- and is allowed while an attempt is pending, "
-        "because it moves no money -- a success counts toward nothing and resets "
-        "nothing, and a restart forgets nothing because nothing lives outside the rows."
+        "The charge log is the truth for retries, in the order it was RECORDED: the "
+        "retry state is rebuilt from the persisted OUTCOME rows walked by the sequence "
+        "the database assigned under the invoice lock -- never by the instant a caller "
+        "typed -- and an outcome counts toward the payment method that was current "
+        "when its RESERVATION was made. Three recorded non-success outcomes refuse the "
+        "fourth by name; a recorded method change allows it -- and is allowed while an "
+        "attempt is pending, because it moves no money; a success counts toward nothing "
+        "and resets nothing; an unknown counts as nothing; and a restart forgets nothing "
+        "because nothing lives outside the rows."
     ),
     "G23": (
         "A charge is for the BALANCE -- the invoice's total minus its unreversed "
@@ -163,13 +166,14 @@ GUARANTEES: dict[str, str] = {
         "OVERPAID, never silently."
     ),
     "G24": (
-        "Every call to the processor is PRECEDED by its attempt row -- the "
-        "reservation, written and committed before the processor is asked, so a call "
-        "the processor received always has a row on our side -- and followed by an "
-        "outcome row recorded as it came: a raise as an error naming the exception, a "
-        "result the instrument guard refused inside the processor's own return as an "
-        "error whose detail says the outcome is unknown. A reported result is never "
-        "discarded silently, and a row is never lost to its own message."
+        "Every call to the processor is PRECEDED by its row -- the reservation for the "
+        "first ask, an `ask` row for every re-ask, each written and committed before the "
+        "processor is asked, so a call the processor received always has a row on our "
+        "side -- and FOLLOWED by a row recorded as it came: what the processor said as an "
+        "`outcome` row, and what the module did not receive -- a raise, before or after "
+        "the request left, or a return the instrument guard refused -- as an `unknown` "
+        "row saying what the module saw, never as an outcome. A row is never lost to its "
+        "own message."
     ),
     "G25": (
         "An owner's exception is read by the agreement's IDENTITY across every version "
@@ -210,23 +214,35 @@ GUARANTEES: dict[str, str] = {
         "attempt -- runs inside a transaction that first takes the invoice's row "
         "lock, so two events on one invoice at once are serialised and the second "
         "derives paid_at from the first's COMMITTED rows. Which events take the lock "
-        "is read from the source by the contract, never typed."
+        "is read from the source by the contract, never typed -- and the control that "
+        "proves the serialisation removes the lock itself, not one caller's."
     ),
     "G31": (
         "A charge is a PERSISTED RESERVATION, then the processor, then an OUTCOME "
         "with its payment: the attempt row is committed BEFORE the processor is "
-        "called, the outcome row and the card payment land in ONE transaction, and a "
-        "reservation with no outcome -- a worker that died after the reservation, or "
-        "after the processor answered -- is never charged past: the next charge is "
-        "refused by name until an operator records what the processor said, once."
+        "called, and the outcome row and the card payment land in ONE transaction. "
+        "What the module does not know is never written as an outcome: an answer that "
+        "did not arrive -- a raise, or a return the instrument guard refused -- is an "
+        "`unknown` row and the attempt stays PENDING. A pending attempt is never "
+        "charged past: while its request may be in flight the next charge is refused "
+        "by name, naming the attempt id, and `pending-attempts` lists it; when the "
+        "module has said it does not know, the next charge asks the processor again "
+        "under the SAME idempotency key for the amount RESERVED, with no cap on "
+        "re-asks -- one key is one charge at most. An operator records what the "
+        "processor said once (`resolve-attempt`): a second answer is refused by name, "
+        "from the check under the lock and from the one-outcome-per-attempt index "
+        "caught by its name."
     ),
     "G32": (
         "ONE CAR, ONE AGREEMENT PER GARAGE. A vehicle identity is registered to one "
         "agreement at a garage; a second agreement listing it is refused by name, "
         "naming the holder and, if the holder is cancelled, the day it frees the "
-        "vehicle -- on which day the registration passes to the new agreement. The "
-        "database's UNIQUE is the backstop for a raw insert. The coverage call picks "
-        "nothing: handed two agreement identities for one vehicle, it refuses by name."
+        "vehicle -- on which day the registration passes to the new agreement. A "
+        "REFUSAL WRITES NOTHING: every listed identity is checked before the release "
+        "and before any row changes, so the caller's transaction is as it was. The "
+        "database's UNIQUE is the backstop for a raw insert and for two registrations "
+        "racing. The coverage call picks nothing: handed two agreement identities for "
+        "one vehicle, it refuses by name."
     ),
     "G33": (
         "An invoice total never goes below zero: an owner's adjustment that would "
@@ -252,6 +268,22 @@ GUARANTEES: dict[str, str] = {
         "asked and the PAYMENT state as of now, and the command line SAYS SO whenever "
         "the instant asked is in the past -- one line, present for a past instant "
         "and absent otherwise."
+    ),
+    "G37": (
+        "Every garage reference is half of a COMPOSITE TENANT KEY: every column named "
+        "garage_id in the schema carries a foreign key (tenant_id, garage_id) at "
+        "garages (tenant_id, id), so a row cannot name another tenant's garage even by "
+        "a raw INSERT that the policy would let past -- a foreign-key check runs past "
+        "row-level security and the key does not. Read from the catalogue, never from "
+        "a list of table names."
+    ),
+    "G38": (
+        "No exception leaves the invoice lock held: every money event takes the lock "
+        "through ONE context manager that rolls the transaction back on any raise -- a "
+        "refusal, the instrument guard, a driver error -- so the caller's connection is "
+        "idle and unlocked when the exception reaches it, and a money event on another "
+        "connection is recorded at once. The lock is taken in exactly one place, read "
+        "from the source."
     ),
 }
 

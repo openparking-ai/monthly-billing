@@ -19,7 +19,9 @@ negative. Said here and in the contract rather than implied.
 
 **AN INVOICE EXCEPTION RUNS UNDER THE INVOICE LOCK**, monetary or not, so the
 adjustment line and the derivation that follows it land against committed rows
-and never beside a payment being recorded at the same instant.
+and never beside a payment being recorded at the same instant -- through
+``locked_invoice``, so the refusal above, or the instrument guard, hands the
+lock back with the exception it raised.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from .exceptions_by_owner import LANDS_A_LINE, ExceptionKind, OwnerException
 from .findings import REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL, Refused
 from .invoice import LineKind
 from .payments import PaidState, invoice_uuid_for, paid_state, rederive_paid_at
-from .store.postgres import lock_invoice, tenant
+from .store.postgres import locked_invoice, tenant
 from .store.writes import as_uuid, guarded_insert
 
 
@@ -86,59 +88,58 @@ def record_invoice_exception(
     tenant_id = as_uuid(tenant_id)
     with tenant(connection, tenant_id) as cursor:
         invoice_uuid = invoice_uuid_for(cursor, exception.invoice_reference)
-        lock_invoice(cursor, invoice_uuid)
-        moves_the_total = exception.kind in LANDS_A_LINE
-        if moves_the_total:
-            owed = paid_state(cursor, invoice_uuid)
-            amount = int(exception.amount_minor or 0)
-            if owed.total_minor - amount < 0:
-                connection.rollback()
-                raise Refused(
-                    REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL,
-                    f"exception {exception.id!r} would adjust "
-                    f"{exception.invoice_reference!r} by {amount} against a total of "
-                    f"{owed.total_minor}.",
-                )
-        guarded_insert(
-            cursor,
-            "owner_exceptions",
-            {
-                "tenant_id": tenant_id,
-                "invoice_id": invoice_uuid,
-                "kind": exception.kind.value,
-                "recorded_by": exception.recorded_by,
-                "recorded_at": exception.recorded_at,
-                "note": exception.note,
-                "amount_minor": exception.amount_minor,
-                "extra_grace_days": exception.extra_grace_days,
-            },
-        )
-        (exception_uuid,) = cursor.fetchone()
-        if exception.kind in LANDS_A_LINE:
-            cursor.execute(
-                "SELECT agreement_id, agreement_version, period_start_day, period_end_day "
-                "FROM invoice_lines WHERE invoice_id = %s ORDER BY created_at LIMIT 1",
-                (invoice_uuid,),
-            )
-            agreement_uuid, version, start_day, end_day = cursor.fetchone()
+        with locked_invoice(connection, cursor, invoice_uuid):
+            moves_the_total = exception.kind in LANDS_A_LINE
+            if moves_the_total:
+                owed = paid_state(cursor, invoice_uuid)
+                amount = int(exception.amount_minor or 0)
+                if owed.total_minor - amount < 0:
+                    raise Refused(
+                        REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL,
+                        f"exception {exception.id!r} would adjust "
+                        f"{exception.invoice_reference!r} by {amount} against a total of "
+                        f"{owed.total_minor}.",
+                    )
             guarded_insert(
                 cursor,
-                "invoice_lines",
+                "owner_exceptions",
                 {
                     "tenant_id": tenant_id,
                     "invoice_id": invoice_uuid,
-                    "kind": LineKind.EXCEPTION_ADJUSTMENT.value,
-                    "label": _adjustment_label(exception),
-                    "amount_minor": -int(exception.amount_minor or 0),
-                    "agreement_id": agreement_uuid,
-                    "agreement_version": version,
-                    "period_start_day": start_day,
-                    "period_end_day": end_day,
-                    "exception_id": exception_uuid,
+                    "kind": exception.kind.value,
+                    "recorded_by": exception.recorded_by,
+                    "recorded_at": exception.recorded_at,
+                    "note": exception.note,
+                    "amount_minor": exception.amount_minor,
+                    "extra_grace_days": exception.extra_grace_days,
                 },
             )
-            cursor.fetchone()
-        state = rederive_paid_at(cursor, invoice_uuid, exception.recorded_at)
+            (exception_uuid,) = cursor.fetchone()
+            if exception.kind in LANDS_A_LINE:
+                cursor.execute(
+                    "SELECT agreement_id, agreement_version, period_start_day, period_end_day "
+                    "FROM invoice_lines WHERE invoice_id = %s ORDER BY created_at LIMIT 1",
+                    (invoice_uuid,),
+                )
+                agreement_uuid, version, start_day, end_day = cursor.fetchone()
+                guarded_insert(
+                    cursor,
+                    "invoice_lines",
+                    {
+                        "tenant_id": tenant_id,
+                        "invoice_id": invoice_uuid,
+                        "kind": LineKind.EXCEPTION_ADJUSTMENT.value,
+                        "label": _adjustment_label(exception),
+                        "amount_minor": -int(exception.amount_minor or 0),
+                        "agreement_id": agreement_uuid,
+                        "agreement_version": version,
+                        "period_start_day": start_day,
+                        "period_end_day": end_day,
+                        "exception_id": exception_uuid,
+                    },
+                )
+                cursor.fetchone()
+            state = rederive_paid_at(cursor, invoice_uuid, exception.recorded_at)
     connection.commit()
     return state
 

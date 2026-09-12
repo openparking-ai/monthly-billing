@@ -291,6 +291,26 @@ def test_the_serialised_sentence_changes_when_a_money_event_drops_the_lock():
 
 
 @pytest.mark.guarantee("G15")
+def test_the_one_place_sentence_changes_when_the_lock_is_taken_directly_elsewhere():
+    """The serialised block's second sentence is derived from where
+    ``lock_invoice`` is called. Plant the reader to report a second direct site
+    and require the other wording."""
+    import monthly_billing.store.postgres as pg
+
+    real = pg.direct_lock_call_sites
+    before = gen.block_serialised()
+    pg.direct_lock_call_sites = lambda: (
+        *real(), ("monthly_billing.payments", "record_payment"),
+    )
+    try:
+        after = gen.block_serialised()
+    finally:
+        pg.direct_lock_call_sites = real
+    assert "ONE place" in before and "DIRECTLY" not in before
+    assert "DIRECTLY in 2 places" in after and "`payments.record_payment`" in after
+
+
+@pytest.mark.guarantee("G15")
 def test_the_options_block_follows_the_enums():
     """PLANT-free derivation check: every member of every enum is listed.
 

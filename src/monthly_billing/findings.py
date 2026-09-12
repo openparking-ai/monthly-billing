@@ -145,11 +145,15 @@ REFUSALS: dict[str, str] = {
         "cheque or an ACH debit has none."
     ),
     REFUSAL_ATTEMPT_UNRESOLVED: (
-        "A charge attempt on this invoice is still PENDING: its reservation was "
-        "written and the processor was asked, and no outcome has been recorded -- "
-        "the worker crashed, or the answer was lost. Money may have moved. Nothing "
-        "is charged past a pending attempt: an operator records what the processor "
-        "says (resolve-attempt), and only then may the invoice be charged again."
+        "A charge attempt on this invoice is still PENDING and its request may be "
+        "IN FLIGHT: its reservation was written and the processor was asked, and "
+        "neither an outcome nor an answer has been recorded -- the worker died with "
+        "the request, or is still waiting. Money may have moved. Nothing is charged "
+        "past a pending attempt, and nothing asks again while a request may be in "
+        "flight: the refusal names the attempt id, pending-attempts lists it, and an "
+        "operator records what the processor says (resolve-attempt). A pending "
+        "attempt whose last word is UNKNOWN is different: the next charge asks the "
+        "processor again under the same key, and is not refused."
     ),
     REFUSAL_ATTEMPT_ALREADY_RESOLVED: (
         "This attempt already has an outcome recorded. What the processor said is "

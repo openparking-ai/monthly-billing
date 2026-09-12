@@ -137,8 +137,13 @@ payment-method change allows it, and a restart forgets nothing because nothing
 lives outside the rows. **A charge is a reservation first**: the attempt row is
 committed before the processor is called, the outcome and its card payment land
 in one transaction, and a reservation with no outcome is never charged past.
+**What the module does not know is never written as an outcome**: an answer
+that did not arrive is an `unknown` row, the attempt stays pending, and the
+next charge asks again under the same idempotency key for the amount reserved.
 **Every money event takes the invoice's row lock first**, so two events on one
-invoice at once are serialised. **One car, one agreement per garage.**
+invoice at once are serialised, and **no exception leaves the lock held**. **One
+car, one agreement per garage**, and a refusal writes nothing. **Every garage
+reference is a composite tenant key.**
 
 ## What is not here
 

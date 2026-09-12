@@ -21,13 +21,17 @@ Against the store (the `store` extra, `MONTHLY_BILLING_DSN`, `--tenant`):
         --reversed-at 2026-05-12T10:00:00-06:00 --recorded-by operator
     monthly-billing covered-in-store --tenant T --garage G --vehicle ABC123 \\
         --at 2026-05-07T09:00:00-06:00
+    monthly-billing pending-attempts --tenant T --invoice REF
     monthly-billing resolve-attempt --tenant T --attempt ID --outcome success \\
         --at 2026-05-07T09:05:00-06:00 --recorded-by operator [--reference AUTH]
 
 A pending attempt comes only from the library's ``attempt_charge`` -- the
 platform, as an ordinary client, charges; nothing on this command line does.
-``resolve-attempt`` is how an operator records what the processor said when
-the worker that asked did not live to record it.
+``pending-attempts`` lists each one with the id ``resolve-attempt`` takes, what
+was reserved, whether its request may be in flight or the module has said it
+does not know, and what it saw last. ``resolve-attempt`` is how an operator
+records what the processor said when the worker that asked did not live to
+record it.
 
 Nothing here wakes itself up. The run is a command the operator's platform
 calls on the billing day, and the platform is an ordinary client of it.
@@ -245,6 +249,25 @@ def _resolve_attempt(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pending_attempts(args: argparse.Namespace) -> int:
+    from .charging import list_pending_attempts
+
+    pending = list_pending_attempts(_connection(args), args.tenant, args.invoice)
+    if not pending:
+        print(f"invoice {args.invoice}: no pending attempts")
+        return 0
+    print(f"invoice {args.invoice}: {len(pending)} pending attempt(s)")
+    for p in pending:
+        line = (
+            f"  attempt {p.attempt_id}: {p.amount_minor} {p.currency} reserved, {p.state}, "
+            f"asked again {p.asks} time(s)"
+        )
+        if p.last_detail:
+            line += f", last: {p.last_detail}"
+        print(line)
+    return 0
+
+
 def _outcomes():
     """The outcome enum's values and nothing else -- the CLI accepts no other spelling."""
     from .payment import Outcome
@@ -314,6 +337,13 @@ def main(argv: list[str] | None = None) -> int:
     in_store.add_argument("--at", required=True, help="ISO instant with an offset")
     in_store.add_argument("--entered-at", help="the stay's entry instant, when known")
     in_store.set_defaults(run=_covered_in_store)
+
+    pending = sub.add_parser(
+        "pending-attempts", help="list the PENDING attempts on an invoice, with their ids"
+    )
+    _store_arguments(pending)
+    pending.add_argument("--invoice", required=True, help="the invoice reference")
+    pending.set_defaults(run=_pending_attempts)
 
     resolve = sub.add_parser(
         "resolve-attempt", help="record what the processor said about a PENDING attempt"

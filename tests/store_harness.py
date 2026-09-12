@@ -12,11 +12,26 @@ ships; the application connects as the NOSUPERUSER NOBYPASSRLS role.
 returns the uuids it created so a test can address its own rows and nothing
 else's; the tenant policy stops it reading anything else anyway, and G12 proves
 that.
+
+**ONE MIGRATION AT A TIME IN THE CLUSTER.** The migrations ``CREATE`` or
+``ALTER`` the application ROLE, and a role is cluster-global: two databases
+migrating at once in one cluster collide on it (``tuple concurrently
+updated``), which cost the branch L3 four probe re-runs. So ``migrate`` runs
+under a cluster-wide advisory lock. An advisory lock is PER DATABASE in
+PostgreSQL -- ``pg_locks`` tags it with the database oid, measured: two
+sessions on two databases both take key 42 -- so "cluster-wide" means taking
+it on ONE shared database of the cluster (``postgres``, else ``template1``),
+through a second connection held for the length of the migration. Test harness
+only; the migration files are not changed for it. If neither shared database
+accepts the connection the lock is taken on the target database and a warning
+says the serialisation is then per-database only.
 """
 
 from __future__ import annotations
 
 import os
+import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -34,11 +49,49 @@ DSN = os.environ.get("MONTHLY_BILLING_TEST_DSN")
 APP_PASSWORD = "test-only-password"
 
 
+#: One key, one meaning: "a migration of this module is running in this cluster".
+MIGRATION_LOCK_KEY = 0x6D6F6E7468  # 'month', as a bigint
+
+
+@contextmanager
+def cluster_lock(dsn: str):
+    """Hold a cluster-wide advisory lock for the block. See the module docstring
+    for why it is taken on a SHARED database and not on ``dsn``'s own."""
+    import psycopg
+    from psycopg import conninfo
+
+    params = conninfo.conninfo_to_dict(dsn)
+    holder = None
+    for shared in ("postgres", "template1"):
+        try:
+            holder = connect(conninfo.make_conninfo(**{**params, "dbname": shared}))
+            break
+        except psycopg.OperationalError:
+            continue
+    if holder is None:
+        print(
+            "store_harness.cluster_lock: no shared database accepted the connection; the "
+            "migration lock is taken on the target database and serialises that database "
+            "only.",
+            file=sys.stderr,
+        )
+        holder = connect(dsn)
+    holder.autocommit = True
+    with holder.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_lock(%s)", (MIGRATION_LOCK_KEY,))
+        try:
+            yield
+        finally:
+            cursor.execute("SELECT pg_advisory_unlock(%s)", (MIGRATION_LOCK_KEY,))
+    holder.close()
+
+
 def migrate(dsn: str) -> Any:
-    """Drop and rebuild the schema from ``migrations/`` as the owner."""
+    """Drop and rebuild the schema from ``migrations/`` as the owner -- one
+    migration at a time in the cluster."""
     owner = connect(dsn)
     owner.autocommit = True
-    with owner.cursor() as cursor:
+    with cluster_lock(dsn), owner.cursor() as cursor:
         cursor.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
         cursor.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
         for path in sorted(MIGRATIONS.glob("*.sql")):

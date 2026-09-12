@@ -1,5 +1,7 @@
 """G31 -- a charge is a persisted RESERVATION, then the processor, then an
-OUTCOME with its payment; a reservation with no outcome is never charged past.
+OUTCOME with its payment; a reservation with no outcome is never charged past
+-- it is REFUSED while its request may be in flight, and RESUMED under the
+same key when the module has said it does not know.
 
 The outside pass killed the old charge path at two points: after the processor
 said yes and before any row (nothing recorded, a restart charged again), and
@@ -7,11 +9,22 @@ after a committed SUCCESS row and before its payment (the success reset the
 count, a restart charged again). Here the same two deaths are a raise planted
 into the process at the same two points -- after the reservation, and after the
 processor -- and the restart is a second call. Both read: a pending attempt,
-refused by name until an operator resolves it, once.
+refused by name naming the attempt id, until an operator resolves it, once.
+
+The second outside round added the third window: a processor that charges and
+then raises, or answers a SUCCESS the guard refuses, was settled as `error` and
+the next charge asked again under a FRESH key. Now that answer is UNKNOWN, the
+attempt stays pending, and the next call asks again with the SAME key for the
+amount RESERVED -- once with no answer (a second unknown, still pending), once
+with an answer (the outcome, one payment of the reserved amount).
 
 Controls: the reservation's commit planted away (G24's test sees no row from
 the processor); T2 split into two transactions (the outcome row survives a
-crash before the payment -- the atomicity test here goes red).
+crash before the payment -- the atomicity test here goes red); a pending
+attempt charged past; an unknown settled as an error outcome; a resume that
+mints a fresh key; the one-outcome-per-attempt index not caught by name; the
+refusal without the attempt id; the listing that cannot tell in-flight from
+unknown.
 """
 
 from __future__ import annotations
@@ -25,8 +38,11 @@ import monthly_billing.charging as ch
 from fixtures import month_end_garage, simple_agreement
 from monthly_billing.billing_run import run_billing
 from monthly_billing.charging import (
+    IN_FLIGHT,
+    UNKNOWN,
     AttemptNotFound,
     attempt_charge,
+    list_pending_attempts,
     pending_attempts,
     resolve_attempt,
 )
@@ -100,7 +116,7 @@ def test_a_death_after_the_reservation_leaves_a_pending_attempt_that_refuses_the
     app, tenant_id
 ):
     reference = _issued(app, tenant_id)
-    _charge_and_die(tenant_id, _Succeeds(), reference, "result_of", _tick(1))
+    _charge_and_die(tenant_id, _Succeeds(), reference, "ask_processor", _tick(1))
     rows = query(app, tenant_id, "SELECT kind, outcome, amount_minor FROM charge_attempts")
     assert rows == [("attempt", None, 12000)], "the reservation was not committed on its own"
     (pending,) = pending_attempts(app, tenant_id, reference)
@@ -109,8 +125,13 @@ def test_a_death_after_the_reservation_leaves_a_pending_attempt_that_refuses_the
     with pytest.raises(Refused) as refused:
         attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(2))
     assert refused.value.code == REFUSAL_ATTEMPT_UNRESOLVED
+    assert str(pending) in refused.value.detail, "the refusal does not name the attempt id"
     assert processor.calls == 0, "the restart called the processor past a pending attempt"
     assert query(app, tenant_id, "SELECT count(*) FROM charge_attempts") == [(1,)]
+    (listed,) = list_pending_attempts(app, tenant_id, reference)
+    assert (listed.attempt_id, listed.amount_minor, listed.currency, listed.state, listed.asks) == (
+        pending, 12000, "USD", IN_FLIGHT, 0
+    )
 
     # The operator records what the processor said: it declined. The invoice
     # may be charged again, and the decline counted toward the three.
@@ -216,3 +237,253 @@ def test_the_command_line_resolves_a_pending_attempt_and_accepts_only_the_enums_
         main([*argv[:5], "--outcome", "declined", *argv[7:]])
     assert stopped.value.code == 2
     assert "invalid choice: 'declined'" in capsys.readouterr().err
+
+
+class _ChargesThenLosesTheAnswer:
+    """The R3.0 shape: the money moves (the call is recorded with its key) and
+    the answer never arrives. Optionally answers on the n-th call."""
+
+    def __init__(self, answers_on: int | None = None) -> None:
+        self.calls: list = []
+        self.answers_on = answers_on
+
+    def charge(self, request):
+        self.calls.append((request.amount_minor, request.idempotency_key))
+        if self.answers_on is not None and len(self.calls) >= self.answers_on:
+            return ChargeResult(outcome=Outcome.SUCCESS, detail="approved", reference="auth-late")
+        raise TimeoutError("read timed out waiting for the processor's answer")
+
+
+def _kinds(app, tenant_id):
+    rows = query(app, tenant_id, "SELECT kind FROM charge_attempts ORDER BY sequence")
+    return [k for (k,) in rows]
+
+
+@pytest.mark.guarantee("G31")
+def test_an_unknown_answer_leaves_the_attempt_pending_and_the_next_call_asks_again_under_one_key(
+    app, tenant_id
+):
+    """THE BRANCH L3'S R3.0, arm 1: the processor raises on every call. Two
+    calls are two asks of ONE attempt under ONE key: `[attempt, unknown, ask,
+    unknown]`, pending 1, no payment, no fresh reservation."""
+    reference = _issued(app, tenant_id)
+    processor = _ChargesThenLosesTheAnswer()
+    first = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(1))
+    assert first.unknown and first.payment_id is None
+    assert _kinds(app, tenant_id) == ["attempt", "unknown"]
+    assert pending_attempts(app, tenant_id, reference) == (first.attempt_id,)
+    (listed,) = list_pending_attempts(app, tenant_id, reference)
+    assert listed.state == UNKNOWN and listed.asks == 0
+    assert listed.last_detail.startswith("TimeoutError")
+
+    second = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(2))
+    assert second.unknown and second.attempt_id == first.attempt_id
+    assert _kinds(app, tenant_id) == ["attempt", "unknown", "ask", "unknown"]
+    assert len(pending_attempts(app, tenant_id, reference)) == 1
+    assert [a for a, _ in processor.calls] == [12000, 12000]
+    assert {k for _, k in processor.calls} == {first.attempt_id}, "the re-ask minted a fresh key"
+    assert query(app, tenant_id, "SELECT count(*) FROM payments") == [(0,)]
+    (listed,) = list_pending_attempts(app, tenant_id, reference)
+    assert listed.state == UNKNOWN and listed.asks == 1
+
+
+@pytest.mark.guarantee("G31")
+def test_a_re_ask_that_is_answered_settles_the_one_attempt_with_one_payment(app, tenant_id):
+    """Arm 2: the processor answers on the re-ask. `[attempt, unknown, ask,
+    outcome success]`, ONE payment of 12000 -- the reserved amount -- paid_at
+    set, and the next call has nothing to charge."""
+    reference = _issued(app, tenant_id)
+    processor = _ChargesThenLosesTheAnswer(answers_on=2)
+    first = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(1))
+    assert first.unknown
+    second = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(2))
+    assert not second.unknown and second.result.outcome is Outcome.SUCCESS
+    assert second.attempt_id == first.attempt_id and second.paid is not None and second.paid.paid
+    assert query(app, tenant_id, "SELECT kind, outcome FROM charge_attempts ORDER BY sequence") == [
+        ("attempt", None), ("unknown", None), ("ask", None), ("outcome", "success"),
+    ]
+    assert query(
+        app, tenant_id, "SELECT method, amount_minor, processor_reference FROM payments"
+    ) == [(PaymentMethod.CARD.value, 12000, "auth-late")]
+    assert {k for _, k in processor.calls} == {first.attempt_id}
+    assert pending_attempts(app, tenant_id, reference) == ()
+    with pytest.raises(Refused) as refused:
+        attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(3))
+    assert refused.value.code == REFUSAL_NOTHING_OWED
+    assert len(processor.calls) == 2
+
+
+@pytest.mark.guarantee("G31")
+def test_a_re_ask_is_for_the_reserved_amount_whatever_was_paid_meanwhile(app, tenant_id):
+    """A method change, and a cheque, between the unknown and the re-ask: the
+    re-ask is not a new charge. It carries the RESERVED amount under the same
+    key, the three refusals are not re-run, and the success is recorded for
+    the reserved amount -- the invoice then reads overpaid, never silently."""
+    from monthly_billing.charging import record_payment_method_changed
+    from monthly_billing.payments import record_payment
+
+    reference = _issued(app, tenant_id)
+    processor = _ChargesThenLosesTheAnswer(answers_on=2)
+    first = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(1))
+    record_payment_method_changed(app, tenant_id, reference, recorded_by="portal", now=_tick(2))
+    record_payment(
+        app, tenant_id, reference, PaymentMethod.CHEQUE, 12000, _tick(3), recorded_by="op"
+    )
+    second = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(4))
+    assert second.attempt_id == first.attempt_id
+    assert [a for a, _ in processor.calls] == [12000, 12000], "the re-ask re-read the balance"
+    assert second.paid is not None and second.paid.overpaid_minor == 12000
+
+
+@pytest.mark.guarantee("G31")
+def test_a_control_processor_that_answers_cleanly_first_time_is_two_rows_and_nothing_owed(
+    app, tenant_id
+):
+    """The control on the arms above: a clean SUCCESS is `[attempt, outcome]`
+    and the next call is REFUSAL_NOTHING_OWED with the processor not called."""
+    reference = _issued(app, tenant_id)
+    processor = _Succeeds()
+    attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(1))
+    assert _kinds(app, tenant_id) == ["attempt", "outcome"]
+    with pytest.raises(Refused) as refused:
+        attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(2))
+    assert refused.value.code == REFUSAL_NOTHING_OWED and processor.calls == 1
+
+
+@pytest.mark.guarantee("G31")
+def test_an_unknown_tailed_attempt_can_be_resolved_by_the_operator_and_then_asks_no_more(
+    app, tenant_id
+):
+    """THE BRANCH L3'S R3.0b: the guard refuses the processor's reference on
+    every ask, the log grows `unknown, ask, unknown`, pending stays 1 -- and
+    the operator's resolve-attempt with a clean reference is the way out: one
+    payment of the reserved amount, and the next charge is nothing owed."""
+    from monthly_billing.sensitive import luhn_ok
+
+    body = "4" + "1" * 14
+    card = next(body + c for c in "0123456789" if luhn_ok(body + c))
+
+    class _SucceedsCardShaped:
+        def __init__(self) -> None:
+            self.calls: list = []
+
+        def charge(self, request):
+            self.calls.append(request.idempotency_key)
+            return ChargeResult(outcome=Outcome.SUCCESS, detail="approved", reference=card)
+
+    reference = _issued(app, tenant_id)
+    processor = _SucceedsCardShaped()
+    first = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(1))
+    second = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(2))
+    assert first.unknown and second.unknown and first.attempt_id == second.attempt_id
+    assert _kinds(app, tenant_id) == ["attempt", "unknown", "ask", "unknown"]
+    assert len(set(processor.calls)) == 1 and len(processor.calls) == 2
+    assert len(pending_attempts(app, tenant_id, reference)) == 1
+    resolved = resolve_attempt(
+        app, tenant_id, first.attempt_id,
+        ChargeResult(outcome=Outcome.SUCCESS, detail="reconciled", reference="auth-op"),
+        recorded_by="operator", now=_tick(3),
+    )
+    assert resolved.paid is not None and resolved.paid.paid
+    assert query(app, tenant_id, "SELECT amount_minor, processor_reference FROM payments") == [
+        (12000, "auth-op")
+    ]
+    assert pending_attempts(app, tenant_id, reference) == ()
+    with pytest.raises(Refused) as refused:
+        attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(4))
+    assert refused.value.code == REFUSAL_NOTHING_OWED and len(processor.calls) == 2
+
+
+@pytest.mark.guarantee("G31")
+def test_the_one_outcome_per_attempt_index_is_caught_by_name_when_reached(app, tenant_id):
+    """THE BRANCH L3'S R3.2b CONTROL: two resolvers of one attempt with the
+    lock bypassed in-process and a rendezvous at the outcome insert. Both pass
+    the check; one hits the index -- which is caught BY ITS NAME as
+    REFUSAL_ATTEMPT_ALREADY_RESOLVED, never a driver error. The control plants
+    the catch away and this goes red."""
+    import threading
+
+    import monthly_billing.store.postgres as pg
+
+    reference = _issued(app, tenant_id)
+    _charge_and_die(tenant_id, _Succeeds(), reference, "_settle", _tick(1))
+    (pending,) = pending_attempts(app, tenant_id, reference)
+    arrived = {"A": threading.Event(), "B": threading.Event()}
+    real_lock, real_insert = pg.lock_invoice, ch.guarded_insert
+    pg.lock_invoice = lambda cursor, invoice_uuid: None  # the lock bypassed in-process
+
+    def insert(cursor, table, record):
+        me = threading.current_thread().name
+        if table == "charge_attempts" and record.get("kind") == "outcome" and me in arrived:
+            arrived[me].set()
+            arrived["B" if me == "A" else "A"].wait(2)
+        return real_insert(cursor, table, record)
+
+    ch.guarded_insert = insert
+    results: dict[str, object] = {}
+
+    def resolver():
+        c = app_connection(DSN)
+        try:
+            resolve_attempt(
+                c, tenant_id, pending,
+                ChargeResult(outcome=Outcome.SUCCESS, detail="approved", reference="ref-1"),
+                recorded_by=threading.current_thread().name, now=_tick(2),
+            )
+            results[threading.current_thread().name] = "resolved"
+        except Exception as exc:  # noqa: BLE001 -- the shape of the failure is the finding
+            results[threading.current_thread().name] = exc
+        finally:
+            c.close()
+
+    try:
+        threads = [threading.Thread(target=resolver, name=n) for n in ("A", "B")]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=20)
+    finally:
+        pg.lock_invoice, ch.guarded_insert = real_lock, real_insert
+    outcomes = sorted(type(r).__name__ if isinstance(r, Exception) else r for r in results.values())
+    assert outcomes == ["Refused", "resolved"], results
+    refused = next(r for r in results.values() if isinstance(r, Refused))
+    assert refused.code == REFUSAL_ATTEMPT_ALREADY_RESOLVED
+    assert query(app, tenant_id, "SELECT count(*) FROM charge_attempts WHERE kind = 'outcome'") == [
+        (1,)
+    ]
+    assert query(app, tenant_id, "SELECT count(*) FROM payments") == [(1,)]
+
+
+@pytest.mark.guarantee("G31")
+def test_the_command_line_lists_pending_attempts_with_their_ids_and_state(app, tenant_id, capsys):
+    """The operator can find a pending attempt from the command line: its id,
+    what was reserved, in flight or unknown, how many re-asks, what was seen."""
+    reference = _issued(app, tenant_id)
+    dsn = f"{DSN} user=monthly_billing_app password={APP_PASSWORD}"
+    argv = ["pending-attempts", "--tenant", str(tenant_id), "--invoice", reference, "--dsn", dsn]
+    assert main(argv) == 0
+    assert "no pending attempts" in capsys.readouterr().out
+
+    processor = _ChargesThenLosesTheAnswer()
+    unknown = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(1))
+    attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(2))
+    assert main(argv) == 0
+    out = capsys.readouterr().out
+    assert "1 pending attempt(s)" in out
+    assert (
+        f"attempt {unknown.attempt_id}: 12000 USD reserved, {UNKNOWN}, asked again 1 time(s)"
+    ) in out
+    assert "last: TimeoutError" in out
+
+    _charge_and_die(tenant_id, _Succeeds(), _issued_second(app, tenant_id), "_settle", _tick(3))
+    argv2 = [*argv[:4], _issued_second.reference, *argv[5:]]
+    assert main(argv2) == 0
+    out = capsys.readouterr().out
+    assert f"reserved, {IN_FLIGHT}, asked again 0 time(s)" in out and "last:" not in out
+
+
+def _issued_second(app, tenant_id) -> str:
+    """A second invoice for the same payer: the following period."""
+    (line,) = run_billing(app, tenant_id, GARAGE.id, date(2026, 6, 1), now=_tick(2)).lines
+    _issued_second.reference = line.reference
+    return line.reference
