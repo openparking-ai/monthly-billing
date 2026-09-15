@@ -58,7 +58,23 @@ CROSS_GARAGE_INSERTS = {
         "agreement_external_id, registered_at) VALUES (%s, %s, 'xyz1', 'ag-X', now())",
         "vehicle_registrations_garage_in_tenant",
     ),
+    "agreement_garages": (
+        "INSERT INTO agreement_garages (tenant_id, agreement_id, garage_id) VALUES (%s, %s, %s)",
+        "agreement_garages_garage_in_tenant",
+    ),
 }
+
+
+def _params(table: str, tenant_id, garage, payer_a, agreement_a) -> tuple:
+    """The positional parameters each statement above takes, with ``garage`` in
+    the garage_id slot -- tenant B's for the refusal, tenant A's for the control."""
+    if table == "vehicle_registrations":
+        return (tenant_id, garage)
+    if table == "agreements":
+        return (tenant_id, garage, payer_a)
+    if table == "agreement_garages":
+        return (tenant_id, agreement_a, garage)
+    return (tenant_id, payer_a, garage)
 
 
 def _catalogue(connection, statement: str) -> list[tuple]:
@@ -144,10 +160,20 @@ def _two_tenants_two_garages(owner, app, tenant_a):
     with tenant(app, tenant_a) as cursor:
         garage_a = store_garage(cursor, tenant_a, GARAGE)
         payer_a = store_payer(cursor, tenant_a, "payer-a", "Payer A")
+        # One agreement VERSION row in tenant A for the 0004 table's insert to
+        # name -- written raw, with no covered-set rows of its own, so the
+        # control insert at tenant A's garage is not a duplicate of the home row.
+        cursor.execute(
+            "INSERT INTO agreements (tenant_id, external_id, version, garage_id, payer_id, spots, "
+            "monthly_price_minor, start_day) "
+            "VALUES (%s, 'ag-raw', 1, %s, %s, 1, 100, '2026-01-01') RETURNING id",
+            (tenant_a, garage_a, payer_a),
+        )
+        (agreement_a,) = cursor.fetchone()
     with tenant(app, tenant_b) as cursor:
         garage_b = store_garage(cursor, tenant_b, GARAGE)
     app.commit()
-    return tenant_b, garage_a, garage_b, payer_a
+    return tenant_b, garage_a, garage_b, payer_a, agreement_a
 
 
 @pytest.mark.guarantee("G37")
@@ -156,11 +182,11 @@ def test_a_raw_insert_cannot_point_at_another_tenants_garage(owner, app, tenant_
     """THE BRANCH L3'S A1.2 / ChatGPT 14, the other way: the tenant-A row naming
     tenant B's garage is refused by the database, by the composite key's name,
     on every table that references a garage."""
-    tenant_b, garage_a, garage_b, payer_a = _two_tenants_two_garages(owner, app, tenant_id)
-    statement, key = CROSS_GARAGE_INSERTS[table]
-    params = (tenant_id, garage_b) if table == "vehicle_registrations" else (
-        (tenant_id, garage_b, payer_a) if table == "agreements" else (tenant_id, payer_a, garage_b)
+    tenant_b, garage_a, garage_b, payer_a, agreement_a = _two_tenants_two_garages(
+        owner, app, tenant_id
     )
+    statement, key = CROSS_GARAGE_INSERTS[table]
+    params = _params(table, tenant_id, garage_b, payer_a, agreement_a)
     with pytest.raises(psycopg.errors.ForeignKeyViolation) as violation:
         with tenant(app, tenant_id) as cursor:
             cursor.execute(statement, params)
@@ -175,11 +201,9 @@ def test_a_raw_insert_cannot_point_at_another_tenants_garage(owner, app, tenant_
 @pytest.mark.parametrize("table", sorted(CROSS_GARAGE_INSERTS))
 def test_the_same_insert_at_the_tenants_own_garage_is_accepted(owner, app, tenant_id, table):
     """Control on the instrument: the key refuses the tenant, not the row."""
-    _, garage_a, _, payer_a = _two_tenants_two_garages(owner, app, tenant_id)
+    _, garage_a, _, payer_a, agreement_a = _two_tenants_two_garages(owner, app, tenant_id)
     statement, _ = CROSS_GARAGE_INSERTS[table]
-    params = (tenant_id, garage_a) if table == "vehicle_registrations" else (
-        (tenant_id, garage_a, payer_a) if table == "agreements" else (tenant_id, payer_a, garage_a)
-    )
+    params = _params(table, tenant_id, garage_a, payer_a, agreement_a)
     with tenant(app, tenant_id) as cursor:
         cursor.execute(statement, params)
     app.rollback()

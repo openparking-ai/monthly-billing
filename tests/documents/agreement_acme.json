@@ -2,6 +2,7 @@
   "id": "ag-acme-0001",
   "version": 1,
   "garage_id": "garage-downtown",
+  "covered_garage_ids": ["garage-downtown"],
   "payer_id": "payer-acme",
   "spots": 10,
   "vehicles": ["ABC-123", "DEF-456", "GHI-789"],

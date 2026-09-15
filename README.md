@@ -147,13 +147,19 @@ record writes the card payment for the amount reserved.
 **Every money event takes the invoice's row lock first**, so two events on one
 invoice at once are serialised, and **no exception leaves the lock held**. **One
 car, one agreement per garage**, and a refusal writes nothing. **Every garage
-reference is a composite tenant key.**
+reference is a composite tenant key.** **An agreement is billed at one home
+garage and covers the garages the owner lists** -- coverage is membership of
+that set, registrations fan out one row per covered garage under its own
+identity rule, and the unpaid, exception and grace reads follow the home; money
+never leaves it.
 
 ## What is not here
 
 No payment processor. No enrolment or registry. No customer portal. No tax. No
-multi-garage account. No refund decisions — the garage owner makes those, and
-records each one as an exception with an amount, a name and a date on it.
+multi-garage money — an agreement is billed at one home garage, whatever other
+garages of the account the owner lists it as good at. No refund decisions — the
+garage owner makes those, and records each one as an exception with an amount, a
+name and a date on it.
 
 ## Contributing
 

@@ -294,6 +294,36 @@ GUARANTEES: dict[str, str] = {
         "connection is recorded at once. The lock is taken in exactly one place, read "
         "from the source."
     ),
+    "G39": (
+        "An agreement is billed at ONE HOME GARAGE and COVERS the garages the owner "
+        "lists, the home among them -- stated by listing, never by an 'everywhere' flag "
+        "or a default, and a document that omits the set is refused by name. The "
+        "coverage door is MEMBERSHIP of that set; the asking garage still compares the "
+        "plate under its own rule. The unpaid-invoice read, the owner's exceptions and "
+        "the grace period -- days AND clock -- follow the agreement's HOME, never the "
+        "asking garage, and two agreements of one payer homed at two garages are judged "
+        "independently. Registrations fan out one row per covered garage, each under "
+        "that garage's own identity rule, all or none: a collision at ANY covered "
+        "garage refuses the whole registration by name and writes nothing. The "
+        "entitlement is across the covered set, not per garage."
+    ),
+    "G40": (
+        "MONEY IS NOT MULTI-GARAGE. The billing day, the currency, the timezone of the "
+        "period boundaries, proration, the invoice, the run and the charge are keyed on "
+        "the agreement's HOME garage only: a run at a garage the agreement merely covers "
+        "issues nothing for it, the first charge and the period invoice refuse another "
+        "garage by name whether or not the agreement covers it, and the store refuses "
+        "to file an agreement under a garage that is not its home. The billing run and "
+        "the charge read the agreements BILLED at a garage through a loader that never "
+        "widens to the covered set; the coverage call reads a second loader."
+    ),
+    "G41": (
+        "Migration 0004 gives every EXISTING agreement version a covered set of exactly "
+        "its home garage, read from agreements.garage_id, and asserts the placed rows "
+        "against the pre-migration count rather than a literal. A version whose home "
+        "cannot be placed fails the migration BY NAME -- external id and version -- "
+        "before a row is written, and the whole migration rolls back."
+    ),
 }
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from fixtures import (
+    assert_covered_garages_differ_on_every_axis,
     assert_currencies_span_the_exponents,
     assert_fixed_zone_really_does_not_shift,
     assert_identity_rules_disagree,
@@ -27,6 +28,7 @@ from fixtures import (
         assert_identity_rules_disagree,
         assert_currencies_span_the_exponents,
         assert_the_vehicle_list_exceeds_the_spots,
+        assert_covered_garages_differ_on_every_axis,
     ],
     ids=lambda f: f.__name__,
 )

@@ -34,7 +34,11 @@ Stated first, so nothing here is later read as a promise:
   physical car gets onto it.
 - **No customer portal.** No screens of any kind.
 - **No tax.**
-- **No multi-garage account.** One garage per agreement.
+- **No multi-garage MONEY.** An agreement is billed at ONE home garage -- its
+  billing day, currency, timezone, grace period and invoice are that garage's,
+  and every money door refuses another garage by name (`REFUSAL_GARAGE_MISMATCH`).
+  The owner may list other garages of the account at which the agreement is
+  good; that is coverage, and it never moves the invoice.
 - **No refund decisions.** Where an agreement does not determine the answer, the
   module refuses and names the field. The garage owner decides, and records the
   decision as an exception with an amount on it.
@@ -82,8 +86,11 @@ Stated first, so nothing here is later read as a promise:
 | **G36** | The store-backed coverage call answers the AGREEMENT axes at the instant asked and the PAYMENT state as of now, and the command line SAYS SO whenever the instant asked is in the past -- one line, present for a past instant and absent otherwise. |
 | **G37** | Every garage reference is half of a COMPOSITE TENANT KEY: every column named garage_id in the schema carries a foreign key (tenant_id, garage_id) at garages (tenant_id, id), so a row cannot name another tenant's garage even by a raw INSERT that the policy would let past -- a foreign-key check runs past row-level security and the key does not. Read from the catalogue, never from a list of table names. |
 | **G38** | No exception leaves the invoice lock held: every money event takes the lock through ONE context manager that rolls the transaction back on any raise -- a refusal, the instrument guard, a driver error -- so the caller's connection is idle and unlocked when the exception reaches it, and a money event on another connection is recorded at once. The lock is taken in exactly one place, read from the source. |
+| **G39** | An agreement is billed at ONE HOME GARAGE and COVERS the garages the owner lists, the home among them -- stated by listing, never by an 'everywhere' flag or a default, and a document that omits the set is refused by name. The coverage door is MEMBERSHIP of that set; the asking garage still compares the plate under its own rule. The unpaid-invoice read, the owner's exceptions and the grace period -- days AND clock -- follow the agreement's HOME, never the asking garage, and two agreements of one payer homed at two garages are judged independently. Registrations fan out one row per covered garage, each under that garage's own identity rule, all or none: a collision at ANY covered garage refuses the whole registration by name and writes nothing. The entitlement is across the covered set, not per garage. |
+| **G40** | MONEY IS NOT MULTI-GARAGE. The billing day, the currency, the timezone of the period boundaries, proration, the invoice, the run and the charge are keyed on the agreement's HOME garage only: a run at a garage the agreement merely covers issues nothing for it, the first charge and the period invoice refuse another garage by name whether or not the agreement covers it, and the store refuses to file an agreement under a garage that is not its home. The billing run and the charge read the agreements BILLED at a garage through a loader that never widens to the covered set; the coverage call reads a second loader. |
+| **G41** | Migration 0004 gives every EXISTING agreement version a covered set of exactly its home garage, read from agreements.garage_id, and asserts the placed rows against the pre-migration count rather than a literal. A version whose home cannot be placed fails the migration BY NAME -- external id and version -- before a row is written, and the whole migration rolls back. |
 
-That is 38 guarantees. Every one of them has a fail control that has been proven to fire, and the count above is derived from the registry rather than typed here.
+That is 41 guarantees. Every one of them has a fail control that has been proven to fire, and the count above is derived from the registry rather than typed here.
 <!-- END:guarantees -->
 
 ## The entitlement answer
@@ -134,7 +141,7 @@ named, and the list is empty only when it really did evaluate all of them.
 | `NO_AGREEMENT` | No agreement at this garage lists this vehicle. |
 | `OUTSIDE_ACCESS_HOURS` | This agreement buys entry and exit within stated hours, and this is outside them. |
 | `PAUSED` | This agreement is paused. Nothing is billed during a pause and nothing is covered by it. |
-| `UNPAID_PAST_GRACE` | This agreement has an unpaid invoice past the garage's grace period. |
+| `UNPAID_PAST_GRACE` | This agreement has an unpaid invoice past its home garage's grace period. |
 
 Every one of them carries this sentence: *Not covered means this stay is an ordinary transient stay and is priced like any other. It does not mean refuse entry, and it never means refuse exit.*
 <!-- END:not-covered -->
@@ -164,7 +171,8 @@ guessed.
 | `REFUSAL_CURRENCY_MISMATCH` | An invoice covers one garage and one currency. Two agreements in different currencies do not sum, and this module will not convert them: a conversion needs a rate, a date and a spread, none of which an agreement carries. |
 | `REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE` | This exception changes money and its amount is not a positive number of minor units. A waived fee, a credit and a refund each name how much; the direction is the kind's, never the sign's, so a negative amount is refused rather than read as the opposite kind. |
 | `REFUSAL_EXCEPTION_HAS_NO_AMOUNT` | This exception changes money and carries no amount. A note explains; an amount changes what somebody pays. They are different fields and the amount is typed, so that no free-text note can ever price anything. |
-| `REFUSAL_GARAGE_MISMATCH` | An agreement belongs to one garage and was asked about another. One garage per account is the stated shape; answering across garages would require rules for an entitlement this agreement does not describe. |
+| `REFUSAL_GARAGE_MISMATCH` | An agreement is BILLED at one home garage, and this money question named another. The billing day, the currency, the timezone, the grace period and the invoice are the home garage's; an agreement may be good at other garages the owner lists, but pricing it against one of them would pick that garage's options over the home's with no rule saying which governs. |
+| `REFUSAL_HOME_GARAGE_NOT_GIVEN` | The coverage question was asked at a garage that is not the agreement's home, with an unpaid invoice to weigh, and the home garage was not supplied. Grace is a property of the invoice -- how long after it fell due the account stays covered -- and the invoice lives at the home garage, so the home's grace and clock decide it at every door. Reading the asking garage's grace instead would make one unpaid invoice expire on two different days depending on which door the car is at; refused rather than defaulted. |
 | `REFUSAL_NOTHING_OWED` | Nothing is owed on this invoice: its unreversed payments already reach its total, so there is no balance to charge. The processor is not called and no attempt is recorded, because nothing was attempted. A charge is always for the balance, never for the total. |
 | `REFUSAL_NO_BILLING_DAY` | The garage has not stated its billing day. It is one of the offered options and there is no default, because the answer differs by garage and a guessed billing day charges somebody on the wrong date. |
 | `REFUSAL_NO_IDENTITY_RULE` | The garage has not stated how a vehicle identity is compared. There is no default, because the answer decides whether a monthly parker is recognised at all -- and an unrecognised monthly parker is charged as a transient. |
@@ -209,7 +217,7 @@ Every one of these is REQUIRED and none has a default.
 
 A kind marked ⊙ but not ▾ -- `refund` -- records the owner's decision and its amount and changes NO total: the invoice stays what it was and stays paid if it was paid. The money going back is a movement, which is a collection record when collection exists, never a billing line. The direction of every amount is the kind's, never the sign's: a negative amount is refused by name (`REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE`).
 
-An agreement document carries exactly these keys: `access_hours`, `additional_fees`, `cancelled_effective_day`, `garage_id`, `id`, `mandate`, `monthly_price_minor`, `pauses`, `payer_id`, `spots`, `start_day`, `status`, `vehicles`, `version`. Any other key is refused rather than ignored.
+An agreement document carries exactly these keys: `access_hours`, `additional_fees`, `cancelled_effective_day`, `covered_garage_ids`, `garage_id`, `id`, `mandate`, `monthly_price_minor`, `pauses`, `payer_id`, `spots`, `start_day`, `status`, `vehicles`, `version`. Any other key is refused rather than ignored.
 
 A charge is attempted at most 3 times before the module refuses, and the count resets only when the caller reports that the payer changed payment method.
 <!-- END:options -->
@@ -367,6 +375,7 @@ may do to each table, read from the catalogue of a database migrated from
 | table | the application role may |
 |---|---|
 | `agreement_fees` | DELETE, INSERT, SELECT, UPDATE |
+| `agreement_garages` | INSERT, SELECT |
 | `agreement_pauses` | DELETE, INSERT, SELECT, UPDATE |
 | `agreement_vehicles` | DELETE, INSERT, SELECT, UPDATE |
 | `agreements` | DELETE, INSERT, SELECT, UPDATE |
@@ -382,7 +391,7 @@ may do to each table, read from the catalogue of a database migrated from
 | `tenants` | DELETE, INSERT, SELECT, UPDATE |
 | `vehicle_registrations` | DELETE, INSERT, SELECT, UPDATE |
 
-15 tables. 5 are append-only -- `charge_attempts`, `invoice_lines`, `owner_exceptions`, `payment_reversals`, `payments` -- and `invoices` keeps UPDATE and loses DELETE: `paid_at` is derived by the application after every payment, reversal and adjustment, and that is the one column it writes. The rest carry the DML the application needs to store documents.
+16 tables. 6 are append-only -- `agreement_garages`, `charge_attempts`, `invoice_lines`, `owner_exceptions`, `payment_reversals`, `payments` -- and `invoices` keeps UPDATE and loses DELETE: `paid_at` is derived by the application after every payment, reversal and adjustment, and that is the one column it writes. The rest carry the DML the application needs to store documents.
 <!-- END:grants -->
 
 The charge log is the truth for retries, in the order it was recorded -- the
@@ -410,7 +419,7 @@ COVERED
 
 $ monthly-billing covered-in-store --garage garage-downtown --vehicle "ABC-123" --at 2026-05-06T09:00 (local)
 NOT COVERED
-  This agreement has an unpaid invoice past the garage's grace period. Not covered means this stay is an ordinary transient stay and is priced like any other. It does not mean refuse entry, and it never means refuse exit.
+  This agreement has an unpaid invoice past its home garage's grace period. Not covered means this stay is an ordinary transient stay and is priced like any other. It does not mean refuse entry, and it never means refuse exit.
 
 $ monthly-billing record-payment --invoice garage-downtown/2026-04-30/payer-acme --method cheque --amount-minor 14500 --received-at 2026-05-08T10:00 (local)
   invoice PAID at 2026-05-08T10:00:00-06:00

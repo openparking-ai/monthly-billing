@@ -29,6 +29,21 @@ identities listing the same vehicle, this call REFUSES by name
 disagree about coverage, and a pick is a wrong answer given confidently. The
 refusal is a first-class third result beside covered and not-covered.
 
+**COVERAGE IS MEMBERSHIP OF THE AGREEMENT'S COVERED SET; MONEY IS NOT.** An
+agreement is billed at one HOME garage and may cover others the owner listed
+(``Agreement.covered_garage_ids``). This call selects the agreements whose
+covered set holds the asking garage -- not the ones homed there -- and the asking
+garage still decides everything else about the door: the clock the agreement
+axes are judged on, and the identity rule the plate is compared under, because
+that is a property of the reader at that barrier. The GRACE is the exception, and
+it is the home's: an unpaid invoice lives at the garage that billed it, so its
+grace and its clock decide the day coverage lapses at EVERY door, or one invoice
+would expire on two different days depending on which door the car is at. A
+caller asking at a non-home garage with an unpaid instant therefore hands in the
+home garage, or is refused by name (``REFUSAL_HOME_GARAGE_NOT_GIVEN``) rather
+than answered with the asking garage's grace. The entitlement is ACROSS the
+covered set: ten spots is ten cars inside across those garages, not ten at each.
+
 **THE ANSWER SAYS WHAT IT COULD NOT CHECK.** Access hours are a condition on a
 STAY -- entry no earlier than, exit no later than -- and at the moment a car
 arrives, the exit half is unknowable. An answer that quietly reported "covered"
@@ -61,6 +76,7 @@ from .findings import (
     NOT_COVERED_PAUSED,
     NOT_COVERED_REASONS,
     NOT_COVERED_UNPAID_PAST_GRACE,
+    REFUSAL_HOME_GARAGE_NOT_GIVEN,
     REFUSAL_VEHICLE_ON_TWO_AGREEMENTS,
 )
 from .findings import Refused as _Refused  # not exported: this module decides no exit
@@ -120,8 +136,16 @@ def is_covered(
     stay_entered_at: datetime | None = None,
     has_unpaid_invoice_since: datetime | None = None,
     blocked_by_owner: bool = False,
+    home_garage: Garage | None = None,
 ) -> Answer:
     """The one call. An access fact, and nothing else.
+
+    ``garage`` is the ASKING garage -- the barrier the car is at. ``home_garage``
+    is the garage that BILLS the agreement, whose grace period and clock decide
+    an unpaid invoice; it is only consulted when ``has_unpaid_invoice_since`` is
+    given, and when the asking garage is the home it may be left unset. Asked at
+    another garage the agreement covers, with an unpaid instant and no home, the
+    call refuses by name rather than reading the asking garage's grace.
 
     ``at`` is the instant asked about. ``stay_entered_at`` is the entry instant
     when one is known -- supplied at exit, absent at entry. Where access hours are
@@ -139,7 +163,7 @@ def is_covered(
     mine = [
         a
         for a in agreements
-        if a.garage_id == garage.id
+        if a.covers_garage(garage.id)
         and any(garage.identities_match(v, vehicle_identity) for v in a.vehicles)
     ]
     if not mine:
@@ -179,8 +203,13 @@ def is_covered(
         return _not_covered(NOT_COVERED_BLOCKED_BY_OWNER, **cited)
 
     if has_unpaid_invoice_since is not None:
-        due_day = day_of(has_unpaid_invoice_since, tz)
-        if (today - due_day).days > garage.payment_grace_days:
+        home = _home_of(agreement, garage, home_garage)
+        # The home's clock for BOTH days: the invoice fell due in the home's zone,
+        # and counting from there in the asking garage's zone would move the day
+        # coverage lapses by a day for a door a few zones away.
+        home_tz = zone(home.timezone)
+        due_day = day_of(has_unpaid_invoice_since, home_tz)
+        if (day_of(at, home_tz) - due_day).days > home.payment_grace_days:
             return _not_covered(NOT_COVERED_UNPAID_PAST_GRACE, **cited)
 
     unchecked: tuple[str, ...] = ()
@@ -202,9 +231,40 @@ def is_covered(
         covered=True,
         reason=(
             f"Covered: this vehicle is on an agreement entitling {agreement.spots} "
-            f"of the account's vehicles to be inside at once."
+            f"of the account's vehicles to be inside at once"
+            + (
+                f" across the {len(agreement.covered_garage_ids)} garages it covers."
+                if len(agreement.covered_garage_ids) > 1
+                else "."
+            )
         ),
         entitlement=agreement.spots,
         unchecked=unchecked,
         **cited,
     )
+
+
+def _home_of(agreement: Agreement, garage: Garage, home_garage: Garage | None) -> Garage:
+    """The garage whose grace and clock judge this agreement's unpaid invoice.
+
+    The asking garage IS the home when the agreement is billed there, which is
+    every single-garage agreement; otherwise the caller must have handed the home
+    in, and one that names a garage other than the agreement's home is refused
+    too -- it would be somebody else's grace wearing the right parameter name.
+    """
+    if home_garage is None:
+        if agreement.garage_id == garage.id:
+            return garage
+        raise _Refused(
+            REFUSAL_HOME_GARAGE_NOT_GIVEN,
+            f"agreement {agreement.id!r} is billed at garage {agreement.garage_id!r} and "
+            f"was asked about at garage {garage.id!r} with an unpaid invoice to weigh; "
+            "pass home_garage.",
+        )
+    if home_garage.id != agreement.garage_id:
+        raise _Refused(
+            REFUSAL_HOME_GARAGE_NOT_GIVEN,
+            f"agreement {agreement.id!r} is billed at garage {agreement.garage_id!r}, but "
+            f"the home_garage handed in is {home_garage.id!r}.",
+        )
+    return home_garage

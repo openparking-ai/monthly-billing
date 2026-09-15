@@ -65,6 +65,7 @@ REFUSAL_ATTEMPT_ALREADY_RESOLVED = "REFUSAL_ATTEMPT_ALREADY_RESOLVED"
 REFUSAL_VEHICLE_ALREADY_REGISTERED = "REFUSAL_VEHICLE_ALREADY_REGISTERED"
 REFUSAL_VEHICLE_ON_TWO_AGREEMENTS = "REFUSAL_VEHICLE_ON_TWO_AGREEMENTS"
 REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL = "REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL"
+REFUSAL_HOME_GARAGE_NOT_GIVEN = "REFUSAL_HOME_GARAGE_NOT_GIVEN"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -103,9 +104,11 @@ REFUSALS: dict[str, str] = {
         "agreement carries."
     ),
     REFUSAL_GARAGE_MISMATCH: (
-        "An agreement belongs to one garage and was asked about another. One "
-        "garage per account is the stated shape; answering across garages would "
-        "require rules for an entitlement this agreement does not describe."
+        "An agreement is BILLED at one home garage, and this money question named "
+        "another. The billing day, the currency, the timezone, the grace period and "
+        "the invoice are the home garage's; an agreement may be good at other "
+        "garages the owner lists, but pricing it against one of them would pick "
+        "that garage's options over the home's with no rule saying which governs."
     ),
     REFUSAL_EXCEPTION_HAS_NO_AMOUNT: (
         "This exception changes money and carries no amount. A note explains; an "
@@ -173,6 +176,16 @@ REFUSALS: dict[str, str] = {
         "picking one, because the two may disagree about coverage and a guess at "
         "a barrier is a wrong answer given confidently."
     ),
+    REFUSAL_HOME_GARAGE_NOT_GIVEN: (
+        "The coverage question was asked at a garage that is not the agreement's "
+        "home, with an unpaid invoice to weigh, and the home garage was not "
+        "supplied. Grace is a property of the invoice -- how long after it fell due "
+        "the account stays covered -- and the invoice lives at the home garage, so "
+        "the home's grace and clock decide it at every door. Reading the asking "
+        "garage's grace instead would make one unpaid invoice expire on two "
+        "different days depending on which door the car is at; refused rather "
+        "than defaulted."
+    ),
     REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL: (
         "This adjustment would take the invoice total below zero. A waived fee or "
         "a credit may reduce what is owed to exactly nothing -- a fully waived "
@@ -215,7 +228,7 @@ NOT_COVERED_REASONS: dict[str, str] = {
         "outside them."
     ),
     NOT_COVERED_UNPAID_PAST_GRACE: (
-        "This agreement has an unpaid invoice past the garage's grace period."
+        "This agreement has an unpaid invoice past its home garage's grace period."
     ),
     NOT_COVERED_CANCELLED: (
         "This agreement was cancelled."

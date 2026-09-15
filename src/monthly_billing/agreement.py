@@ -20,6 +20,17 @@ all. The same rule holds here, so `access_hours` states both halves and the
 entitlement answer says which halves it was able to check. See entitlement.py --
 this is the field that made the answer carry `unchecked`.
 
+**AN AGREEMENT IS BILLED AT ONE HOME GARAGE AND MAY COVER OTHERS THE OWNER
+LISTS.** ``garage_id`` is the HOME: the garage whose billing day, currency,
+timezone, grace period and invoice govern this agreement -- every money decision
+is keyed on it and nothing here changes that. ``covered_garage_ids`` is the set
+of garages at which the agreement's vehicles are covered, the home included,
+stated by listing them. There is no "everywhere" flag and no default: an implicit
+"all" cannot be audited and cannot be refused, and a document that omits the set
+is refused by name rather than read as the home alone. The entitlement is
+ACROSS the covered set -- ten spots is ten cars inside across those garages, not
+ten at each. His ruling, 2026-09-15.
+
 **A PAUSE COVERS NOTHING AND BILLS NOTHING.** Both halves, deliberately: a pause
 that suspended billing while still opening the barrier would be a free month, and
 one that suspended coverage while still billing would be theft. It is one field
@@ -190,9 +201,11 @@ class Mandate:
 
 @dataclass(frozen=True)
 class Agreement:
-    """One account's agreement at one garage.
+    """One account's agreement, billed at one home garage.
 
-    ``version`` is monotonic per agreement id and is what an entitlement answer
+    ``garage_id`` is the home garage -- the money key. ``covered_garage_ids``
+    is every garage the agreement is good at, the home among them; see the
+    module docstring. ``version`` is monotonic per agreement id and is what an entitlement answer
     cites, so a coverage decision can be traced to the exact document that made
     it. A price change writes a new version; it never edits one.
     """
@@ -205,6 +218,9 @@ class Agreement:
     vehicles: tuple[str, ...]
     monthly_price_minor: int
     start_day: date
+    #: Every garage this agreement covers, the home (``garage_id``) included.
+    #: Required, non-empty, no duplicates, no default -- see the module docstring.
+    covered_garage_ids: tuple[str, ...]
     mandate: Mandate | None = None
     status: Status = Status.ACTIVE
     cancelled_effective_day: date | None = None
@@ -257,6 +273,38 @@ class Agreement:
         if not isinstance(self.start_day, date):
             raise InvalidAgreement(f"agreement {self.id!r} has start_day {self.start_day!r}.")
 
+        if not isinstance(self.garage_id, str) or not self.garage_id.strip():
+            raise InvalidAgreement(
+                f"agreement {self.id!r} has garage_id {self.garage_id!r}. It is the HOME "
+                "garage -- the one that bills this agreement -- and it is a non-empty "
+                "string, opaque to this module."
+            )
+        if not isinstance(self.covered_garage_ids, tuple) or not self.covered_garage_ids:
+            raise InvalidAgreement(
+                f"agreement {self.id!r} lists no covered garages. The set is stated by "
+                "listing it, the home garage included; there is no 'everywhere' and no "
+                "default, because an implicit set cannot be audited and cannot be refused."
+            )
+        for i, covered in enumerate(self.covered_garage_ids):
+            if not isinstance(covered, str) or not covered.strip():
+                raise InvalidAgreement(
+                    f"agreement[{self.id}].covered_garage_ids[{i}] is {covered!r}. A garage "
+                    "id is a non-empty string, opaque to this module."
+                )
+        if len(set(self.covered_garage_ids)) != len(self.covered_garage_ids):
+            raise InvalidAgreement(
+                f"agreement {self.id!r} lists the same covered garage twice. Refused "
+                "rather than de-duplicated, as a vehicle listed twice is: it usually "
+                "means two garages were meant and one id was typed for both."
+            )
+        if self.garage_id not in self.covered_garage_ids:
+            raise InvalidAgreement(
+                f"agreement {self.id!r} is billed at garage {self.garage_id!r} but its "
+                f"covered garages {list(self.covered_garage_ids)} do not include it. The "
+                "home garage is where the invoice lives, and an agreement not covered "
+                "where it is billed would be paid for and good nowhere it pays."
+            )
+
         if self.status is Status.CANCELLED and self.cancelled_effective_day is None:
             raise InvalidAgreement(
                 f"agreement {self.id!r} is cancelled with no effective day. "
@@ -302,6 +350,11 @@ class Agreement:
     def is_paused_on(self, day: date) -> bool:
         return any(pause.covers(day) for pause in self.pauses)
 
+    def covers_garage(self, garage_id: str) -> bool:
+        """Membership of the covered set -- the ACCESS question. Money asks
+        ``garage_id == self.garage_id`` and nothing else; see invoice._same_garage."""
+        return garage_id in self.covered_garage_ids
+
     def recurring_fees(self) -> tuple[AdditionalFee, ...]:
         return tuple(f for f in self.additional_fees if f.cadence is FeeCadence.RECURRING)
 
@@ -321,6 +374,7 @@ KNOWN_KEYS: frozenset[str] = frozenset(
         "id",
         "version",
         "garage_id",
+        "covered_garage_ids",
         "payer_id",
         "spots",
         "vehicles",
@@ -379,11 +433,19 @@ def load_agreement(document: dict[str, Any]) -> Agreement:
             "while the module does another."
         )
     missing = sorted(
-        {"id", "version", "garage_id", "payer_id", "spots", "vehicles",
-         "monthly_price_minor", "start_day"} - set(document)
+        {"id", "version", "garage_id", "covered_garage_ids", "payer_id", "spots",
+         "vehicles", "monthly_price_minor", "start_day"} - set(document)
     )
     if missing:
-        raise InvalidAgreement(f"the agreement is missing required fields: {missing}.")
+        raise InvalidAgreement(
+            f"the agreement is missing required fields: {missing}."
+            + (
+                " covered_garage_ids is the set of garages the agreement is good at, the "
+                "home garage_id among them; it is listed, never defaulted to the home alone."
+                if "covered_garage_ids" in missing
+                else ""
+            )
+        )
 
     mandate_doc = document.get("mandate")
     mandate = None
@@ -469,6 +531,11 @@ def load_agreement(document: dict[str, Any]) -> Agreement:
         ),
         monthly_price_minor=document["monthly_price_minor"],
         start_day=_as_date(document["start_day"], "agreement.start_day"),
+        covered_garage_ids=(
+            tuple(document["covered_garage_ids"])
+            if isinstance(document["covered_garage_ids"], list)
+            else document["covered_garage_ids"]
+        ),
         mandate=mandate,
         status=status,
         cancelled_effective_day=(

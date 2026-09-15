@@ -7,7 +7,12 @@ mechanism with one agreement, never a second path -- two paths would mean two se
 of arithmetic and the seldom-used one would be the one that was wrong.
 
 **AN INVOICE COVERS ONE GARAGE, ONE PERIOD AND ONE CURRENCY**, and the reason is
-arithmetic rather than policy. The billing day is a property of the garage, so two
+arithmetic rather than policy. That garage is the agreement's HOME -- the one
+that bills it -- and it stays the home when the agreement covers other garages:
+coverage may fan out, money does not, because the billing day, currency, timezone
+and grace are stated per garage with no defaults and a multi-garage agreement
+has no rule for which one governs. ``_same_garage`` is STRICT at every money
+door for that reason. The billing day is a property of the garage, so two
 garages bill on different dates and their periods are not the same period. The
 currency is a property of the garage too, and two currencies do not sum -- this
 module will not convert them, because a conversion needs a rate, a date and a
@@ -269,11 +274,24 @@ def invoice_for_period(
 
 
 def _same_garage(garage: Garage, agreement: Agreement) -> None:
+    """The money door: the agreement's HOME, by equality, never its covered set.
+
+    An agreement that covers ``garage`` without being billed there is refused
+    here exactly as one that has nothing to do with it -- pricing it against a
+    garage it merely covers would take that garage's billing day, currency and
+    grace over the home's. See the module docstring, and ``Agreement.covers_garage``
+    for the access question this deliberately is not.
+    """
     if agreement.garage_id != garage.id:
         raise Refused(
             REFUSAL_GARAGE_MISMATCH,
-            f"agreement {agreement.id!r} belongs to garage "
-            f"{agreement.garage_id!r} and was billed against {garage.id!r}.",
+            f"agreement {agreement.id!r} is billed at garage "
+            f"{agreement.garage_id!r} and was billed against {garage.id!r}"
+            + (
+                ", which it covers but is not billed at."
+                if agreement.covers_garage(garage.id)
+                else "."
+            ),
         )
 
 

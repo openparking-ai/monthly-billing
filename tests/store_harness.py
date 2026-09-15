@@ -32,7 +32,7 @@ from __future__ import annotations
 import os
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -86,27 +86,52 @@ def cluster_lock(dsn: str):
     holder.close()
 
 
-def migrate(dsn: str) -> Any:
+def migrate(dsn: str, *, through: str | None = None) -> Any:
     """Drop and rebuild the schema from ``migrations/`` as the owner -- one
-    migration at a time in the cluster."""
+    migration at a time in the cluster.
+
+    ``through`` names the last migration to apply, by its four-digit prefix
+    (``"0003"``), for a test that seeds a schema and then applies the next
+    migration itself with ``apply_migration`` -- the only way to prove a
+    backfill did what it says against rows that were there before it ran.
+    """
     owner = connect(dsn)
     owner.autocommit = True
     with cluster_lock(dsn), owner.cursor() as cursor:
         cursor.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
         cursor.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
         for path in sorted(MIGRATIONS.glob("*.sql")):
-            try:
-                cursor.execute(path.read_text())
-            except Exception:
-                # A migration file opens its own BEGIN and never reaches its COMMIT
-                # when it raises, so the connection is left inside an aborted
-                # transaction. End it here, so the failure is the migration's
-                # message and not "current transaction is aborted" on the next
-                # statement -- and so the catalogue is the pre-migration state.
-                cursor.execute("ROLLBACK")
-                raise
+            if through is not None and path.name[:4] > through:
+                break
+            _apply(cursor, path)
         cursor.execute(f"ALTER ROLE monthly_billing_app LOGIN PASSWORD '{APP_PASSWORD}'")
     return owner
+
+
+def migration_path(prefix: str) -> Path:
+    """The one migration file with this four-digit prefix."""
+    (path,) = MIGRATIONS.glob(f"{prefix}_*.sql")
+    return path
+
+
+def apply_migration(owner: Any, prefix: str) -> None:
+    """Apply one migration file to an already-migrated schema, as the owner,
+    under the same cluster lock ``migrate`` takes."""
+    with cluster_lock(DSN), owner.cursor() as cursor:
+        _apply(cursor, migration_path(prefix))
+
+
+def _apply(cursor: Any, path: Path) -> None:
+    try:
+        cursor.execute(path.read_text())
+    except Exception:
+        # A migration file opens its own BEGIN and never reaches its COMMIT
+        # when it raises, so the connection is left inside an aborted
+        # transaction. End it here, so the failure is the migration's
+        # message and not "current transaction is aborted" on the next
+        # statement -- and so the catalogue is the pre-migration state.
+        cursor.execute("ROLLBACK")
+        raise
 
 
 def app_connection(dsn: str) -> Any:
@@ -128,10 +153,13 @@ def new_tenant(owner: Any, slug: str | None = None) -> UUID:
 @dataclass(frozen=True)
 class Seeded:
     tenant_id: UUID
+    #: The FIRST garage seeded -- the only one, for a single-garage seed.
     garage: Garage
     garage_uuid: UUID
     payer_uuids: dict[str, UUID]
     agreement_uuids: dict[str, UUID]
+    #: Every garage seeded, by its id. ``garage_uuids[garage.id] == garage_uuid``.
+    garage_uuids: dict[str, UUID] = field(default_factory=dict)
 
 
 def seed(
@@ -141,20 +169,43 @@ def seed(
     agreements: tuple[Agreement, ...],
 ) -> Seeded:
     """The garage, every payer the agreements name, and the agreements."""
+    return seed_garages(app, tenant_id, (garage,), agreements)
+
+
+def seed_garages(
+    app: Any,
+    tenant_id: UUID,
+    garages: tuple[Garage, ...],
+    agreements: tuple[Agreement, ...],
+    *,
+    now: datetime | None = None,
+) -> Seeded:
+    """Several garages, every payer the agreements name, and the agreements --
+    each stored under its HOME garage, which must be among ``garages``. The
+    shape a multi-garage agreement needs: its covered garages have to be in the
+    store before it is."""
     payer_uuids: dict[str, UUID] = {}
     agreement_uuids: dict[str, UUID] = {}
+    garage_uuids: dict[str, UUID] = {}
+    by_id = {garage.id: garage for garage in garages}
     with tenant(app, tenant_id) as cursor:
-        garage_uuid = store_garage(cursor, tenant_id, garage)
+        for garage in garages:
+            garage_uuids[garage.id] = store_garage(cursor, tenant_id, garage)
         for agreement in agreements:
             if agreement.payer_id not in payer_uuids:
                 payer_uuids[agreement.payer_id] = store_payer(
                     cursor, tenant_id, agreement.payer_id, f"Payer {agreement.payer_id}"
                 )
+            home = by_id[agreement.garage_id]
             agreement_uuids[agreement.id] = store_agreement(
-                cursor, tenant_id, garage, garage_uuid, payer_uuids[agreement.payer_id], agreement
+                cursor, tenant_id, home, garage_uuids[home.id],
+                payer_uuids[agreement.payer_id], agreement, now=now,
             )
     app.commit()
-    return Seeded(tenant_id, garage, garage_uuid, payer_uuids, agreement_uuids)
+    first = garages[0]
+    return Seeded(
+        tenant_id, first, garage_uuids[first.id], payer_uuids, agreement_uuids, garage_uuids
+    )
 
 
 def query(app: Any, tenant_id: Any, statement: str, parameters: tuple = ()) -> list[tuple]:
