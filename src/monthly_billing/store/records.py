@@ -75,7 +75,12 @@ from ..agreement import (
     Pause,
     Status,
 )
-from ..findings import REFUSAL_GARAGE_MISMATCH, REFUSAL_VEHICLE_ALREADY_REGISTERED, Refused
+from ..findings import (
+    REFUSAL_AGREEMENT_HOME_MOVED,
+    REFUSAL_GARAGE_MISMATCH,
+    REFUSAL_VEHICLE_ALREADY_REGISTERED,
+    Refused,
+)
 from ..garage import BillingDay, Garage, IdentityRule
 from ..localday import day_of, zone
 from .writes import as_uuid, guarded_insert, guarded_update
@@ -147,7 +152,9 @@ def store_agreement(
 
     ``garage`` and ``garage_uuid`` are the HOME garage -- the one the agreement
     is billed at, and the one ``agreement.garage_id`` names; a mismatch is
-    refused before anything is written. Every other garage the agreement covers
+    refused before anything is written, and so is a version whose home differs
+    from the versions already stored for the same agreement: THE HOME NEVER
+    MOVES (``REFUSAL_AGREEMENT_HOME_MOVED``). Every other garage the agreement covers
     is looked up in the store by its id, and one the store does not hold raises
     ``GarageNotFound`` -- a covered set naming a garage that does not exist
     cannot be registered, and inventing the garage is not this module's to do.
@@ -165,6 +172,28 @@ def store_agreement(
             REFUSAL_GARAGE_MISMATCH,
             f"agreement {agreement.id!r} is billed at garage {agreement.garage_id!r} and "
             f"was stored under garage {garage.id!r}.",
+        )
+    # THE HOME NEVER MOVES. A later version billed at a different garage from
+    # the versions already stored is refused by name, before anything is
+    # written: moving an agreement's home is an operation nobody designed --
+    # nothing says what it does to the month already invoiced at the old home,
+    # to an unpaid invoice or a block sitting there, or to which garage's
+    # billing day and currency govern next -- and three rounds each found a
+    # different door answering that undesigned question differently. The prior
+    # version is found by IDENTITY alone (UNIQUE (tenant_id, external_id,
+    # version), 0001), so no garage enters the lookup. With the move refused,
+    # the home is stable for the agreement's whole life, which is what makes
+    # the home-keyed reads in entitlement_store correct for every state this
+    # module can store. No cross-row database backstop exists for this; the
+    # contract says so, as it does for G33.
+    home_already = _home_of_stored(cursor, agreement.id)
+    if home_already is not None and home_already != garage_uuid:
+        raise Refused(
+            REFUSAL_AGREEMENT_HOME_MOVED,
+            f"agreement {agreement.id!r} version {agreement.version} is billed at garage "
+            f"{garage.id!r}, but the versions the store already holds for it are billed "
+            "at another garage. The home never moves; a different home is a different "
+            "agreement.",
         )
     covered = covered_garages_of(cursor, agreement, home=StoredGarage(garage_uuid, garage))
     register_vehicles(cursor, tenant_id, covered, agreement, now=now)
@@ -246,6 +275,19 @@ def store_agreement(
             },
         )
     return agreement_uuid
+
+
+def _home_of_stored(cursor: Any, agreement_external_id: str) -> UUID | None:
+    """The garage uuid every stored version of this agreement is billed at --
+    None when the store holds no version yet. By identity alone; the tenant
+    policy scopes the read. Every version has the same home by construction
+    (the refusal above), so the latest one's is the agreement's."""
+    cursor.execute(
+        "SELECT garage_id FROM agreements WHERE external_id = %s ORDER BY version DESC LIMIT 1",
+        (agreement_external_id,),
+    )
+    row = cursor.fetchone()
+    return None if row is None else as_uuid(row[0])
 
 
 def covered_garages_of(
@@ -580,10 +622,10 @@ def load_agreements_on_invoice(cursor: Any, invoice_uuid: Any) -> tuple[StoredAg
     needs is the agreement's mandate, and that is the LATEST version's -- a
     payer who agreed to a card after the invoice was issued is charged on it,
     and one who withdrew it is not. So the lines give the IDENTITIES and the
-    store gives each identity's latest version, wherever it is homed now: an
-    invoice issued before the agreement moved its home is charged exactly as
-    one issued after. A garage-keyed read here returned nothing for such an
-    invoice, and nothing is not a gate.
+    store gives each identity's latest version. The home never moves through
+    the store (``REFUSAL_AGREEMENT_HOME_MOVED``); for a row written past the
+    module at another home, a garage-keyed read here returned nothing, and
+    nothing is not a gate.
     """
     cursor.execute(
         """

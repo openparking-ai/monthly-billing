@@ -220,6 +220,15 @@ def test_the_registration_decides_coverage_not_a_scan_of_vehicle_lists(app, tena
             "VALUES (%s, %s, %s, 'shared1')",
             (tenant_id, z_uuid, PLATE),
         )
+        # Its 0004 row too, so the covering loader CAN return this row and the
+        # registration read is what keeps it out. Without it the loader's join
+        # hid the row and this test stayed green under G32/registration's plant
+        # -- measured at the M3 gate: the control narrowed from 3 tests to 1.
+        cursor.execute(
+            "INSERT INTO agreement_garages (tenant_id, agreement_id, garage_id) "
+            "VALUES (%s, %s, %s)",
+            (tenant_id, z_uuid, garage),
+        )
     app.commit()
     answer = covered_from_store(app, tenant_id, GARAGE.id, PLATE, DAY)
     assert answer.covered and answer.agreement_id == "ag-A"
@@ -243,6 +252,15 @@ def test_a_vehicle_with_no_registration_is_on_no_agreement(app, tenant_id):
             "(tenant_id, agreement_id, identity, identity_normalised) "
             "VALUES (%s, %s, %s, 'shared1')",
             (tenant_id, z_uuid, PLATE),
+        )
+        # Its 0004 row too, so the covering loader CAN return this row and the
+        # registration read is what keeps it out. Without it the loader's join
+        # hid the row and this test stayed green under G32/registration's plant
+        # -- measured at the M3 gate: the control narrowed from 3 tests to 1.
+        cursor.execute(
+            "INSERT INTO agreement_garages (tenant_id, agreement_id, garage_id) "
+            "VALUES (%s, %s, %s)",
+            (tenant_id, z_uuid, garage),
         )
     app.commit()
     answer = covered_from_store(app, tenant_id, GARAGE.id, PLATE, DAY)

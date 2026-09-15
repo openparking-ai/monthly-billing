@@ -67,6 +67,7 @@ REFUSAL_VEHICLE_ON_TWO_AGREEMENTS = "REFUSAL_VEHICLE_ON_TWO_AGREEMENTS"
 REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL = "REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL"
 REFUSAL_HOME_GARAGE_NOT_GIVEN = "REFUSAL_HOME_GARAGE_NOT_GIVEN"
 REFUSAL_INVOICE_NAMES_NO_AGREEMENT = "REFUSAL_INVOICE_NAMES_NO_AGREEMENT"
+REFUSAL_AGREEMENT_HOME_MOVED = "REFUSAL_AGREEMENT_HOME_MOVED"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -193,6 +194,17 @@ REFUSALS: dict[str, str] = {
         "lines name, each at its latest version, wherever it is homed now; an "
         "invoice that reaches this state was written past the module, and a charge "
         "with no gate is refused rather than attempted."
+    ),
+    REFUSAL_AGREEMENT_HOME_MOVED: (
+        "This version is billed at a different home garage from the versions the "
+        "store already holds for the same agreement, and MOVING AN AGREEMENT'S HOME "
+        "IS AN OPERATION NOBODY DESIGNED. Nothing states what a move does to the month "
+        "already invoiced at the old home, to an unpaid invoice or an owner's block "
+        "sitting there, or to which garage's billing day and currency govern next -- "
+        "so the module refuses rather than invents. An agreement keeps the home it "
+        "was first stored with for its whole life; a different home is a different "
+        "agreement. There is no cross-row database backstop for this: a row written "
+        "past the module with another home is read at that home only."
     ),
     REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL: (
         "This adjustment would take the invoice total below zero. A waived fee or "

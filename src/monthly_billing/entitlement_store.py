@@ -107,6 +107,17 @@ def covered_from_store(
             )
         (chosen,) = mine  # one identity, and the loader already gave its latest version
         # The invoice, the exceptions and the grace live at the agreement's HOME.
+        # ONE home for the agreement's whole life: the store refuses a version
+        # that would move it (records.store_agreement, REFUSAL_AGREEMENT_HOME_MOVED),
+        # so the latest version's home IS the home every invoice of this
+        # agreement was issued at, and keying these reads on it is correct for
+        # every state the module can store. Do NOT re-key them to an identity
+        # read without first re-opening the home-move question: a home move is
+        # an operation nobody designed, and the gate measured what keying on
+        # "the newest home" did to an unpaid invoice and an owner's block at the
+        # old one when a move could still be stored. A row written PAST the
+        # module with another home is read at that home only; there is no
+        # cross-row database backstop, and the contract says so.
         home = _home_garage(cursor, stored, chosen.agreement.garage_id)
         unpaid_since = _earliest_unpaid_due_at(cursor, chosen.payer_uuid, home.uuid)
         exceptions = _exceptions_for(cursor, chosen.agreement.id, chosen.payer_uuid, home.uuid)

@@ -24,15 +24,22 @@ an agreement under a garage that is not its home.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from fixtures import MULTI_HOME, MULTI_OTHER, multi_garage_agreement, simple_agreement
+from monthly_billing.agreement import AccessHours, Status
 from monthly_billing.billing_run import RunOutcome, run_billing
 from monthly_billing.cycle import period_containing
+from monthly_billing.entitlement_store import covered_from_store
+from monthly_billing.exceptions_by_owner import ExceptionKind, OwnerException
+from monthly_billing.exceptions_store import record_invoice_exception
 from monthly_billing.findings import (
+    NOT_COVERED_BLOCKED_BY_OWNER,
+    NOT_COVERED_NO_AGREEMENT,
+    REFUSAL_AGREEMENT_HOME_MOVED,
     REFUSAL_GARAGE_MISMATCH,
     REFUSAL_INVOICE_NAMES_NO_AGREEMENT,
     REFUSAL_NO_MANDATE,
@@ -44,6 +51,7 @@ from monthly_billing.store.postgres import tenant
 from monthly_billing.store.records import (
     load_agreements_at_garage,
     load_payers_at_garage,
+    registrations_at_garage,
     store_agreement,
 )
 from store_harness import needs_postgres, query, seed_garages
@@ -220,7 +228,14 @@ def test_the_store_refuses_to_file_an_agreement_under_a_garage_that_is_not_its_h
 # ---------------------------------------------------------------------------
 # The L3's F1 / the fix brief's X2: the money loaders choose the LATEST version
 # FIRST and ask where it is homed second. And X4: the charge gate reads the
-# agreements the invoice's lines name, wherever they are homed now.
+# agreements the invoice's lines name, and the garage does not enter it.
+#
+# THE STATE THESE MEASURE IS THE RESIDUE. Since the gate-fix round the store
+# REFUSES a version that would move the home (X5, below), so a "moved"
+# agreement can only exist as a row written PAST the module -- which is what
+# ``_plant_moved_version`` writes: the raw rows, as the app role, with none of
+# the store's refusals in the way. X2 and X4 go on measuring exactly that
+# state, and the contract says that is the state they hold for.
 # ---------------------------------------------------------------------------
 
 
@@ -259,6 +274,48 @@ def _store_v2(app, tenant_id, seeded, v2, home):
     app.commit()
 
 
+def _plant_moved_version(app, tenant_id, seeded, version):
+    """A version homed at ANOTHER garage than the stored ones, written PAST the
+    module: the raw agreement row, its covered set, its vehicles and its
+    mandate, as the app role -- the residue the contract names. The store
+    itself refuses this (``REFUSAL_AGREEMENT_HOME_MOVED``); this is the only
+    way the state can come to exist."""
+    home = {HOME.id: HOME, OTHER.id: OTHER}[version.garage_id]
+    home_uuid = seeded.garage_uuids[home.id]
+    with tenant(app, tenant_id) as cursor:
+        cursor.execute(
+            "INSERT INTO agreements (tenant_id, external_id, version, garage_id, payer_id, "
+            "spots, monthly_price_minor, start_day, status) VALUES (%s, %s, %s, %s, %s, %s, %s, "
+            "%s, %s) RETURNING id",
+            (tenant_id, version.id, version.version, home_uuid,
+             seeded.payer_uuids[version.payer_id], version.spots, version.monthly_price_minor,
+             version.start_day, version.status.value),
+        )
+        (row_id,) = cursor.fetchone()
+        for garage_id in version.covered_garage_ids:
+            cursor.execute(
+                "INSERT INTO agreement_garages (tenant_id, agreement_id, garage_id) "
+                "VALUES (%s, %s, %s)",
+                (tenant_id, row_id, seeded.garage_uuids[garage_id]),
+            )
+        for identity in version.vehicles:
+            cursor.execute(
+                "INSERT INTO agreement_vehicles (tenant_id, agreement_id, identity, "
+                "identity_normalised) VALUES (%s, %s, %s, %s)",
+                (tenant_id, row_id, identity, home.normalise_identity(identity)),
+            )
+        if version.mandate is not None:
+            m = version.mandate
+            cursor.execute(
+                "INSERT INTO mandates (tenant_id, agreement_id, agreed_by, agreed_at, "
+                "terms_shown, frequency_shown, amount_basis_shown, cancellation_shown) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (tenant_id, row_id, m.agreed_by, datetime.fromisoformat(m.agreed_at_iso),
+                 m.terms_shown, m.frequency_shown, m.amount_basis_shown, m.cancellation_shown),
+            )
+    app.commit()
+
+
 @pytest.mark.guarantee("G40")
 @store_backed
 def test_an_agreement_whose_newer_version_moved_its_home_is_billed_at_the_new_home_only(
@@ -268,9 +325,10 @@ def test_an_agreement_whose_newer_version_moved_its_home_is_billed_at_the_new_ho
     THERE) and the run invoiced one agreement at two garages -- USD on v1 and
     JPY on v2, measured at c4baa88 and at main. Latest-first returns nothing at
     HOME: no payer is reported there, no invoice exists there, and the run at
-    OTHER issues v2 alone."""
+    OTHER issues v2 alone. The moved version is the RESIDUE -- written past the
+    module, since the store refuses the move (X5)."""
     seeded, v1, v2 = _move_home(app, tenant_id)
-    _store_v2(app, tenant_id, seeded, v2, OTHER)
+    _plant_moved_version(app, tenant_id, seeded, v2)
     with tenant(app, tenant_id) as cursor:
         at_home = load_agreements_at_garage(cursor, seeded.garage_uuids[HOME.id])
         at_other = load_agreements_at_garage(cursor, seeded.garage_uuids[OTHER.id])
@@ -304,11 +362,12 @@ def test_an_invoice_issued_before_a_home_move_is_still_charged_after_it(app, ten
     ``agreements[0]`` default raised IndexError under the lock. The gate reads
     the agreement the invoice's lines NAME, at its latest version wherever it
     is homed: the charge goes through, for the invoice's own amount, in the
-    invoice's own currency."""
+    invoice's own currency. The moved version is the RESIDUE -- written past the
+    module, since the store refuses the move (X5)."""
     seeded, v1, v2 = _move_home(app, tenant_id)
     (line,) = run_billing(app, tenant_id, HOME.id, date(2026, 5, 15), now=NOW).lines
     assert line.outcome is RunOutcome.ISSUED and line.total_minor == 12000
-    _store_v2(app, tenant_id, seeded, v2, OTHER)
+    _plant_moved_version(app, tenant_id, seeded, v2)
     from monthly_billing.charging import attempt_charge
 
     processor = _Succeeds()
@@ -414,3 +473,154 @@ def test_an_invoice_naming_no_loadable_agreement_is_refused_by_name_never_an_ind
                                       recorded_by="cron", now=NOW + timedelta(hours=2))
     assert outcome.paid is not None and outcome.paid.paid and processor.amounts == [12000]
 
+
+
+# ---------------------------------------------------------------------------
+# The gate-fix round's X5: THE HOME NEVER MOVES. Moving an agreement's home
+# garage is an operation nobody designed -- nothing states what it does to the
+# month already invoiced at the old home, to an unpaid invoice or an owner's
+# block sitting there, or to which garage's billing day and currency govern
+# next -- so the store refuses it by name before a row is written. The gate
+# measured what a stored move did: the old home's unpaid invoice and the block
+# on it vanished from the barrier while the charge still collected the invoice.
+# ---------------------------------------------------------------------------
+
+
+def _counts(app, tenant_id):
+    (row,) = query(
+        app, tenant_id,
+        "SELECT (SELECT count(*) FROM agreements), (SELECT count(*) FROM agreement_garages), "
+        "(SELECT count(*) FROM agreement_vehicles), (SELECT count(*) FROM vehicle_registrations), "
+        "(SELECT count(*) FROM mandates)",
+    )
+    return row
+
+
+@pytest.mark.guarantee("G40")
+@store_backed
+def test_a_version_that_moves_the_home_is_refused_by_name_and_writes_nothing(app, tenant_id):
+    """The gate's own B1 sequence, made UNCONSTRUCTIBLE through the store: v1
+    homed at HOME, its May invoice issued there and BLOCKED by the owner; then
+    v2 homed at OTHER (HOME still covered) is offered under OTHER -- and refused
+    by name, with every table as it was. The barrier goes on reading the block
+    at HOME and NO_AGREEMENT at OTHER: nothing the move would have erased is
+    erased, because the move never happened."""
+    seeded, v1, v2 = _move_home(app, tenant_id)
+    v2 = simple_agreement(
+        version=2, garage_id=OTHER.id, covered_garage_ids=(OTHER.id, HOME.id),
+        start_day=date(2026, 1, 5),
+    )
+    (line,) = run_billing(app, tenant_id, HOME.id, date(2026, 5, 1), now=NOW).lines
+    assert line.outcome is RunOutcome.ISSUED
+    record_invoice_exception(
+        app, tenant_id,
+        OwnerException(
+            id="exc-block-home", agreement_id=None, invoice_reference=line.reference,
+            kind=ExceptionKind.BLOCK, recorded_by="the owner",
+            recorded_at=datetime(2026, 5, 1, 12, tzinfo=HOME_TZ),
+        ),
+    )
+    when = datetime(2026, 5, 3, 12, tzinfo=HOME_TZ)
+    before = covered_from_store(app, tenant_id, HOME.id, "car 001", when)
+    assert not before.covered and before.reason_code == NOT_COVERED_BLOCKED_BY_OWNER
+    counts = _counts(app, tenant_id)
+    registrations = {
+        g.id: sorted(query(
+            app, tenant_id,
+            "SELECT identity_normalised, agreement_external_id FROM vehicle_registrations "
+            "WHERE garage_id = %s", (seeded.garage_uuids[g.id],),
+        ))
+        for g in (HOME, OTHER)
+    }
+
+    try:
+        with tenant(app, tenant_id) as cursor:
+            with pytest.raises(Refused) as refused:
+                store_agreement(
+                    cursor, tenant_id, OTHER, seeded.garage_uuids[OTHER.id],
+                    seeded.payer_uuids[v2.payer_id], v2, now=NOW,
+                )
+    except BaseException:
+        app.rollback()
+        raise
+    app.commit()
+    assert refused.value.code == REFUSAL_AGREEMENT_HOME_MOVED
+    assert "'ag-0001' version 2" in refused.value.detail
+    assert f"garage {OTHER.id!r}" in refused.value.detail
+    assert "never moves" in refused.value.detail
+
+    assert _counts(app, tenant_id) == counts, "the refused move wrote something"
+    for g in (HOME, OTHER):
+        rows = sorted(query(
+            app, tenant_id,
+            "SELECT identity_normalised, agreement_external_id FROM vehicle_registrations "
+            "WHERE garage_id = %s", (seeded.garage_uuids[g.id],),
+        ))
+        assert rows == registrations[g.id], g.id
+    # The barrier, after the refusal: exactly as before it.
+    after = covered_from_store(app, tenant_id, HOME.id, "car 001", when)
+    assert not after.covered and after.reason_code == NOT_COVERED_BLOCKED_BY_OWNER
+    at_other = covered_from_store(app, tenant_id, OTHER.id, "CAR001", when)
+    assert not at_other.covered and at_other.reason_code == NOT_COVERED_NO_AGREEMENT
+    # And the invoice the block sits on is still the payer's, unpaid, at HOME.
+    assert query(app, tenant_id, "SELECT count(*) FROM invoices WHERE paid_at IS NULL") == [(1,)]
+
+
+@pytest.mark.guarantee("G40")
+@store_backed
+def test_the_refused_move_is_the_second_version_not_the_first_agreement_at_a_garage(
+    app, tenant_id, owner
+):
+    """The refusal compares with the versions ALREADY STORED for the same
+    identity -- a brand-new agreement stores at any garage, and the same
+    external id in ANOTHER tenant is another agreement (the tenant policy scopes
+    the lookup)."""
+    seeded, v1, v2 = _move_home(app, tenant_id)
+    fresh = simple_agreement(
+        id="ag-fresh", garage_id=OTHER.id, covered_garage_ids=(OTHER.id,),
+        start_day=date(2026, 1, 5), vehicles=("FRESH-1",),
+    )
+    _store_v2(app, tenant_id, seeded, fresh, OTHER)
+    assert query(app, tenant_id, "SELECT count(*) FROM agreements") == [(2,)]
+    # Another tenant, the same external id, a different home: not a move.
+    from store_harness import new_tenant
+
+    other_tenant = new_tenant(owner)
+    twin = simple_agreement(
+        version=1, garage_id=OTHER.id, covered_garage_ids=(OTHER.id,), start_day=date(2026, 1, 5)
+    )
+    seed_garages(app, other_tenant, (HOME, OTHER), (twin,), now=NOW)
+    assert query(app, other_tenant, "SELECT count(*) FROM agreements") == [(1,)]
+
+
+@pytest.mark.guarantee("G40")
+@store_backed
+def test_a_version_that_changes_anything_but_the_home_still_stores(app, tenant_id):
+    """The over-reach control, must stay green: price, vehicles, covered set
+    (added AND dropped -- the whole of M3), access hours, mandate withdrawn,
+    cancellation -- every one a later version at the SAME home, every one
+    stored. Only the home is pinned."""
+    seeded, v1, _ = _move_home(app, tenant_id)
+    versions = (
+        simple_agreement(version=2, garage_id=HOME.id, covered_garage_ids=(HOME.id, OTHER.id),
+                         start_day=date(2026, 1, 5), monthly_price_minor=15000),
+        simple_agreement(version=3, garage_id=HOME.id, covered_garage_ids=(HOME.id, OTHER.id),
+                         start_day=date(2026, 1, 5), vehicles=("CAR000", "NEW-1"),
+                         access_hours=AccessHours(entry_from=time(6, 0), exit_by=time(20, 0))),
+        simple_agreement(version=4, garage_id=HOME.id, covered_garage_ids=(HOME.id,),
+                         start_day=date(2026, 1, 5), vehicles=("CAR000",), with_mandate=False),
+        simple_agreement(version=5, garage_id=HOME.id, covered_garage_ids=(HOME.id,),
+                         start_day=date(2026, 1, 5), vehicles=("CAR000",), with_mandate=False,
+                         status=Status.CANCELLED, cancelled_effective_day=date(2026, 6, 30)),
+    )
+    for version in versions:
+        _store_v2(app, tenant_id, seeded, version, HOME)
+    assert query(app, tenant_id, "SELECT version FROM agreements ORDER BY version") == [
+        (1,), (2,), (3,), (4,), (5,)
+    ]
+    with tenant(app, tenant_id) as cursor:
+        (latest,) = load_agreements_at_garage(cursor, seeded.garage_uuids[HOME.id])
+        (regs_other,) = [registrations_at_garage(cursor, seeded.garage_uuids[OTHER.id])]
+    app.rollback()
+    assert latest.agreement.version == 5 and latest.agreement.status is Status.CANCELLED
+    assert regs_other == (), "the dropped garage's rows were not released"

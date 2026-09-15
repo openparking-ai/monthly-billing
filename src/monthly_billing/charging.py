@@ -116,9 +116,10 @@ any one of them has no mandate, nothing is charged, by name, before the row. The
 agreements are read by the IDENTITIES the invoice's lines name, each at its
 LATEST version and wherever it is homed now -- the mandate is the latest
 version's, so a card agreed to after the invoice was issued is charged and one
-withdrawn since is not, and an invoice issued before the agreement moved its
-home is charged exactly as one issued after. The garage does not enter that
-read (``store.records.load_agreements_on_invoice``).
+withdrawn since is not. The garage does not enter that read
+(``store.records.load_agreements_on_invoice``): the store refuses a version that
+would move an agreement's home, so a version homed elsewhere can only be a row
+written past the module -- and even then the invoice is still charged.
 """
 
 from __future__ import annotations

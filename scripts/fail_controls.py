@@ -1359,6 +1359,17 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "it merely covers -- that garage's billing day, currency and proration over "
         "the home's, with no rule saying which governs",
     ),
+    "G40/home-move-allowed": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "store/records.py",
+        "    if home_already is not None and home_already != garage_uuid:",
+        "    if False:  # PLANTED: the home may move",
+        "THE GATE'S B1 PLANTED BACK: a later version billed at another garage is "
+        "stored, the agreement's home moves, and the old home's unpaid invoice and "
+        "the owner's block on it stop reaching every barrier while the charge still "
+        "collects that invoice -- an operation nobody designed, answered differently "
+        "at every door",
+    ),
     "G40/store-under-any-garage": (
         "tests/test_g40_money_stays_at_the_home_garage.py",
         "store/records.py",
