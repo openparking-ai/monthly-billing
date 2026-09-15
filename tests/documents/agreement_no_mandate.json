@@ -2,6 +2,7 @@
   "id": "ag-cheque-0002",
   "version": 1,
   "garage_id": "garage-downtown",
+  "covered_garage_ids": ["garage-downtown"],
   "payer_id": "payer-cheque",
   "spots": 2,
   "vehicles": ["JKL-012"],

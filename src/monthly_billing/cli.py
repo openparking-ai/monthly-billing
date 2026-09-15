@@ -104,6 +104,11 @@ def _check_agreement(args: argparse.Namespace) -> int:
     agreement = load_agreement_file(args.agreement)
     print(f"{agreement.id} version {agreement.version}: loads cleanly.")
     print(f"  {agreement.spots} spots, {len(agreement.vehicles)} vehicles listed")
+    others = [g for g in agreement.covered_garage_ids if g != agreement.garage_id]
+    print(
+        f"  billed at garage {agreement.garage_id}"
+        + (f", also covers {', '.join(others)}" if others else ", covers no other garage")
+    )
     print(f"  starts {agreement.start_day}, status {agreement.status.value}")
     print(f"  mandate: {'present' if agreement.mandate else 'ABSENT — cannot be charged'}")
     return 0

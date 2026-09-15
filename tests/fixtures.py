@@ -14,6 +14,10 @@ module's decisions actually turn on, read from the code rather than imagined:
 * the identity rule -- both, because they disagree about "ABC 123"
 * the period -- one containing a spring-forward, one a fall-back, one neither
 * the agreement -- with and without access hours, a pause, a mandate, fees
+* the covered set -- one garage, and one agreement covering TWO garages that
+  differ on every axis a door decides by: timezone, currency and identity rule.
+  A multi-garage fixture whose garages agreed on those would let a test look
+  like it crossed the axis while sampling one point on it.
 """
 
 from __future__ import annotations
@@ -101,6 +105,7 @@ def simple_agreement(
         "id": "ag-0001",
         "version": 1,
         "garage_id": garage_id,
+        "covered_garage_ids": (garage_id,),
         "payer_id": "payer-acme",
         "spots": spots,
         "vehicles": tuple(f"CAR{n:03d}" for n in range(20)),
@@ -110,6 +115,40 @@ def simple_agreement(
     }
     fields.update(overrides)
     return Agreement(**fields)  # type: ignore[arg-type]
+
+
+#: The home and the second garage of the multi-garage fixture, by construction
+#: the two garage fixtures that disagree on timezone, currency AND identity rule.
+MULTI_HOME = month_end_garage
+MULTI_OTHER = first_of_month_garage
+
+
+def multi_garage_agreement(**overrides: object) -> Agreement:
+    """One agreement billed at the month-end garage (Denver, USD, folded) and
+    covering the first-of-month garage too (Phoenix, JPY, exact). Every door
+    axis differs between the two, and ``assert_covered_garages_differ_on_every_axis``
+    is the control that they do."""
+    fields: dict[str, object] = {
+        "garage_id": MULTI_HOME().id,
+        "covered_garage_ids": (MULTI_HOME().id, MULTI_OTHER().id),
+    }
+    fields.update(overrides)
+    return simple_agreement(**fields)  # type: ignore[arg-type]
+
+
+def dropping_versions(**overrides: object) -> tuple[Agreement, Agreement]:
+    """The one agreement at two versions: v1 is ``multi_garage_agreement`` (home
+    + other), v2 is the owner's WITHDRAWAL of the other garage -- same home,
+    same vehicles, the covered set shrunk to the home alone. The shape the L3's
+    blocker needed and no fixture could express: a door that answers on the
+    version that still listed a garage instead of the one that dropped it.
+    ``assert_the_dropping_versions_differ_only_on_the_dropped_garage`` is the
+    control that the pair is what it claims."""
+    v1 = multi_garage_agreement(version=1, **overrides)
+    v2 = multi_garage_agreement(
+        version=2, covered_garage_ids=(MULTI_HOME().id,), **overrides
+    )
+    return v1, v2
 
 
 def agreement_with_everything(garage_id: str = "garage-month-end") -> Agreement:
@@ -145,6 +184,7 @@ def agreement_document(**overrides: object) -> dict:
         "id": "ag-0001",
         "version": 1,
         "garage_id": "garage-month-end",
+        "covered_garage_ids": ["garage-month-end"],
         "payer_id": "payer-acme",
         "spots": 10,
         "vehicles": ["CAR000", "CAR001"],
@@ -236,6 +276,47 @@ def assert_the_vehicle_list_exceeds_the_spots() -> None:
     assert len(agreement.vehicles) == 20
     assert agreement.spots == 10
     assert len(agreement.vehicles) > agreement.spots
+
+
+def assert_covered_garages_differ_on_every_axis() -> None:
+    """The multi-garage fixture is only a multi-garage fixture if its two garages
+    disagree on every axis a door decides by -- timezone, currency and identity
+    rule -- and if the agreement really is homed at one and covers the other.
+
+    A fixture pair that agreed on any of the three would let the coverage,
+    grace and registration tests cross that axis in name while sampling one
+    point on it.
+    """
+    home, other = MULTI_HOME(), MULTI_OTHER()
+    agreement = multi_garage_agreement()
+    assert agreement.garage_id == home.id
+    assert set(agreement.covered_garage_ids) == {home.id, other.id}
+    assert len(agreement.covered_garage_ids) == 2
+    assert home.timezone != other.timezone, "the two covered garages share a timezone"
+    assert home.currency != other.currency, "the two covered garages share a currency"
+    assert home.identity_rule is not other.identity_rule, (
+        "the two covered garages share an identity rule"
+    )
+    # The rules disagree on THIS fixture's plates, not merely in the abstract:
+    # the same identity normalises to two different strings.
+    plate = agreement.vehicles[0]
+    assert home.normalise_identity(plate + " ") != other.normalise_identity(plate + " ")
+
+
+def assert_the_dropping_versions_differ_only_on_the_dropped_garage() -> None:
+    """The dropping pair is one identity, v2 above v1, homed at the SAME garage,
+    listing the SAME vehicles, and v2 covers the home alone where v1 covered
+    the other garage too -- so a door that answers differently at the other
+    garage is answering the covered set and nothing else."""
+    v1, v2 = dropping_versions()
+    other = MULTI_OTHER().id
+    assert v1.id == v2.id and v2.version > v1.version
+    assert v1.garage_id == v2.garage_id == MULTI_HOME().id, "the home moved; that is another shape"
+    assert set(v1.vehicles) == set(v2.vehicles), "a vehicle changed; that is another shape"
+    assert other in v1.covered_garage_ids and other not in v2.covered_garage_ids, (
+        "v2 did not drop the other garage"
+    )
+    assert v2.covered_garage_ids == (v1.garage_id,)
 
 
 def sometime_on(day: date, timezone: str, hour: int = 12) -> datetime:

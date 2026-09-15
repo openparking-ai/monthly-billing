@@ -68,6 +68,7 @@ from monthly_billing.findings import (  # noqa: E402
     REFUSAL_REVERSAL_REASON_MISMATCH,
     REFUSAL_VEHICLE_ON_TWO_AGREEMENTS,
     REFUSALS,
+    UNPAID_IS_THE_PAYERS,
 )
 from monthly_billing.garage import BillingDay, IdentityRule  # noqa: E402
 from monthly_billing.invoice import first_charge  # noqa: E402
@@ -111,6 +112,8 @@ def block_not_covered() -> str:
         rows.append(f"| `{code}` | {sentence} |")
     rows.append("")
     rows.append(f"Every one of them carries this sentence: *{NOT_COVERED_MEANS}*")
+    rows.append("")
+    rows.append(f"`UNPAID_PAST_GRACE` is judged per payer, per home garage. {UNPAID_IS_THE_PAYERS}")
     return "\n".join(rows)
 
 

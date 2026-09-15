@@ -490,8 +490,8 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
     "G21/grace": (
         "tests/test_g21_covered_from_the_store.py",
         "entitlement_store.py",
-        "    grace = applied_grace_days(garage.payment_grace_days, exceptions)",
-        "    grace = garage.payment_grace_days  # PLANTED: the owner's extension is ignored",
+        "    grace = applied_grace_days(home.garage.payment_grace_days, exceptions)",
+        "    grace = home.garage.payment_grace_days  # PLANTED: the owner's extension is ignored",
         "the store-backed call reads the garage's base grace and never the owner's "
         "extend_grace exceptions, so an owner who gave a customer another week "
         "watches the lane call them transient on day six",
@@ -996,17 +996,21 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "tests/test_g32_one_car_one_agreement_per_garage.py",
         "store/records.py",
         source(
-            "    held = _held_elsewhere(cursor, garage, garage_uuid, agreement, listed, today)",
-            "    # A version that drops a vehicle releases it -- AFTER every refusal.",
+            "    plan: list[tuple[StoredGarage, datetime, set[str], dict[str, UUID]]] = []",
+            "    for stored in covered:",
         ),
         source(
-            "    cursor.execute(  # PLANTED: the release DELETE runs before the refusals",
+            "    plan: list[tuple[StoredGarage, datetime, set[str], dict[str, UUID]]] = []",
+            "    cursor.execute(  # PLANTED: the home's release DELETE runs before the refusals",
             '        "DELETE FROM vehicle_registrations WHERE garage_id = %s "',
             '        "AND agreement_external_id = %s AND NOT (identity_normalised = ANY(%s))",',
-            "        (garage_uuid, agreement.id, sorted(listed)),",
+            "        (covered[0].uuid, agreement.id,",
+            (
+                "         sorted({covered[0].garage.normalise_identity(v) for v in "
+                "agreement.vehicles})),"
+            ),
             "    )",
-            "    held = _held_elsewhere(cursor, garage, garage_uuid, agreement, listed, today)",
-            "    # A version that drops a vehicle releases it -- AFTER every refusal.",
+            "    for stored in covered:",
         ),
         "the release DELETE runs before the refusal check again -- the branch L3's "
         "Blocker 2: a version that drops one car and is refused on another leaves "
@@ -1071,6 +1075,479 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "the tenant-column guard looks for a column no table has, so it reports every "
         "table but tenants as lacking one -- proving the catalogue read is a "
         "measurement of the column and the tenants exemption is the only one",
+    ),
+    # -- M3: an agreement covers many garages; money stays at the home --
+    "G14/covered-garages": (
+        "tests/test_fixture_axes.py",
+        "tests/fixtures.py",
+        "MULTI_OTHER = first_of_month_garage",
+        "MULTI_OTHER = tenth_of_month_garage  # PLANTED: the home's zone and currency",
+        "the multi-garage fixture's second garage shares the home's timezone and "
+        "currency, so every number the fan-out, grace and money tests take across "
+        "'two garages' is taken across one point on two of the three axes -- the "
+        "fixture is part of the measurement",
+    ),
+    "G39/membership": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "entitlement.py",
+        "        if a.covers_garage(garage.id)",
+        "        if a.garage_id == garage.id  # PLANTED: equality, the pre-0004 door",
+        "the coverage door is the home-garage equality again, so an agreement "
+        "covering a second garage answers NO_AGREEMENT there -- the shape this "
+        "round exists to change",
+    ),
+    "G39/grace-home": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "entitlement.py",
+        "        if (day_of(at, home_tz) - due_day).days > home.payment_grace_days:",
+        "        if (day_of(at, home_tz) - due_day).days > garage.payment_grace_days:  # PLANTED",
+        "the asking garage's grace is applied to the home's invoice, so one unpaid "
+        "invoice lapses on two different days depending on which door the car is "
+        "at -- the alternative C5 rejected",
+    ),
+    "G39/grace-clock": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "entitlement.py",
+        "        home_tz = zone(home.timezone)",
+        "        home_tz = tz  # PLANTED: the days of grace counted on the asking garage's clock",
+        "the days since the invoice fell due are counted on the asking garage's "
+        "clock, so a door one zone away reads one more day than the home does and "
+        "lapses the car an hour before the invoice's own garage would",
+    ),
+    "G39/across-set": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "entitlement.py",
+        '                f" across the {len(agreement.covered_garage_ids)} garages it covers."',
+        '                " at this garage."  # PLANTED: the entitlement stated per garage',
+        "the covered answer tells the platform the entitlement is per garage -- ten "
+        "at each -- instead of across the covered set; the NUMBER at each door is the "
+        "same either way, so only the sentence the platform reads can carry the rule",
+    ),
+    "G39/home-required": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "entitlement.py",
+        source(
+            "    if home_garage is None:",
+            "        if agreement.garage_id == garage.id:",
+            "            return garage",
+        ),
+        source(
+            "    if home_garage is None:",
+            "        if True:  # PLANTED: the asking garage stands in for the home",
+            "            return garage",
+        ),
+        "a library caller asking at a non-home garage with an unpaid instant and no "
+        "home garage is answered with the asking garage's grace instead of refused "
+        "by name -- a default in the one place this module refuses to have one",
+    ),
+    "G39/unpaid-home": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "entitlement_store.py",
+        "        unpaid_since = _earliest_unpaid_due_at(cursor, chosen.payer_uuid, home.uuid)",
+        (
+            "        unpaid_since = _earliest_unpaid_due_at(cursor, chosen.payer_uuid, "
+            "stored.uuid)  "
+            "# PLANTED"
+        ),
+        "THE DEFECT THIS ROUND WOULD OTHERWISE SHIP: the unpaid read is keyed on the "
+        "ASKING garage, where the invoice does not live, so an unpaid monthly reads "
+        "COVERED at every garage except the one that bills it. The query compiles "
+        "and every single-garage test stays green",
+    ),
+    "G39/exceptions-home": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "entitlement_store.py",
+        (
+            "        exceptions = _exceptions_for(cursor, chosen.agreement.id, chosen.payer_uuid, "
+            "home.uuid)"
+        ),
+        (
+            "        exceptions = _exceptions_for(cursor, chosen.agreement.id, chosen.payer_uuid, "
+            "stored.uuid)  # PLANTED"
+        ),
+        "the exceptions read is keyed on the asking garage, so an owner's block or "
+        "grace extension recorded on the home's invoice does not reach the other "
+        "doors",
+    ),
+    "G39/unpaid-payer-wide": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "entitlement_store.py",
+        '        "WHERE payer_id = %s AND garage_id = %s AND paid_at IS NULL",',
+        (
+            '        "WHERE payer_id = %s AND (garage_id = %s OR TRUE) AND paid_at IS NULL",  # '
+            'PLANTED'
+        ),
+        "the unpaid read aggregates across every home the payer has, so an unpaid "
+        "invoice on one agreement lapses the payer's OTHER agreement, homed "
+        "elsewhere -- a blocking relationship A1.2 says does not exist",
+    ),
+    "G39/access-door": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "entitlement_store.py",
+        "            for item in load_agreements_covering_garage(cursor, stored.uuid)",
+        source(
+            "            for item in __import__(",
+            '                "monthly_billing.store.records", fromlist=["x"]',
+            (
+                "            ).load_agreements_at_garage(cursor, stored.uuid)  # PLANTED: the "
+                "money "
+                "door"
+            ),
+        ),
+        "the coverage call reads the MONEY loader -- agreements billed here -- so a "
+        "car on an agreement homed elsewhere is NO_AGREEMENT at every garage it "
+        "covers but the home",
+    ),
+    "G39/fanout": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "store/records.py",
+        source(
+            "    for stored in covered:",
+            "        tz = zone(stored.garage.timezone)",
+        ),
+        source(
+            "    for stored in covered[:1]:  # PLANTED: registrations at the home only",
+            "        tz = zone(stored.garage.timezone)",
+        ),
+        "the registrations are written at the home alone, so the other covered "
+        "garage holds no row for the plate and its door reads NO_AGREEMENT",
+    ),
+    "G39/fanout-rule": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "store/records.py",
+        "        listed = {stored.garage.normalise_identity(v) for v in agreement.vehicles}",
+        (
+            "        listed = {covered[0].garage.normalise_identity(v) for v in "
+            "agreement.vehicles}  "
+            "# PLANTED"
+        ),
+        "every garage's row is normalised under the HOME's rule, so at an exact-rule "
+        "garage the stored form is the folded one and the barrier's own lookup never "
+        "finds it",
+    ),
+    "G39/collisions-at-home-only": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "store/records.py",
+        (
+            "        held = _held_elsewhere(cursor, stored.garage, stored.uuid, agreement, listed, "
+            "today)"
+        ),
+        source(
+            "        held = (  # PLANTED: collisions checked at the home only",
+            (
+                "            _held_elsewhere(cursor, stored.garage, stored.uuid, agreement, "
+                "listed, "
+                "today)"
+            ),
+            "            if stored is covered[0] else {}",
+            "        )",
+        ),
+        "a plate another agreement holds at a covered-but-not-home garage is not "
+        "refused by name before the writes: the home's rows land, the other garage's "
+        "insert hits the UNIQUE, and the caller's transaction is aborted with rows "
+        "already written in it -- the 0003 rule not met at each garage the agreement "
+        "now covers (A1.3)",
+    ),
+    "G39/dropped-garage": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "store/records.py",
+        '        "AND NOT (garage_id = ANY(%s))",',
+        (
+            '        "AND NOT (garage_id = ANY(%s)) AND FALSE",  # PLANTED: a dropped garage keeps '
+            'its rows'
+        ),
+        "a version that drops a garage from the covered set leaves the agreement's "
+        "registrations there, so the door at the dropped garage keeps answering "
+        "covered on a version that no longer lists it",
+    ),
+    "G39/released-by-home-rows": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "store/records.py",
+        "        frees_on = _released_on(cursor, holder)",
+        source(
+            (
+                "        cursor.execute(  # PLANTED: the holder's release read on the asking "
+                "garage's "
+                "home rows"
+            ),
+            (
+                '            "SELECT status, cancelled_effective_day FROM agreements WHERE '
+                'garage_id '
+                '= %s "'
+            ),
+            '            "AND external_id = %s ORDER BY version DESC LIMIT 1",',
+            "            (garage_uuid, holder),",
+            "        )",
+            "        _row = cursor.fetchone()",
+            (
+                "        frees_on = None if _row is None or _row[0] != Status.CANCELLED.value else "
+                "_row[1]"
+            ),
+        ),
+        "the holder's release day is read from the agreements homed at the ASKING "
+        "garage, so a cancelled holder homed elsewhere has no row there and is called "
+        "active forever -- its plate never frees at the garages it merely covered",
+    ),
+    "G39/document-defaults": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "agreement.py",
+        '        {"id", "version", "garage_id", "covered_garage_ids", "payer_id", "spots",',
+        (
+            '        {"id", "version", "garage_id", "payer_id", "spots",  # PLANTED: the set is '
+            'optional'
+        ),
+        "a document that omits covered_garage_ids is no longer refused by name at the "
+        "required-fields check; it falls through to a KeyError, which is not the "
+        "refusal the contract publishes",
+    ),
+    "G39/home-in-set": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "agreement.py",
+        "        if self.garage_id not in self.covered_garage_ids:",
+        "        if False:  # PLANTED: the home need not be covered",
+        "an agreement billed at a garage its covered set does not hold is accepted, "
+        "paid for and good nowhere it pays",
+    ),
+    "G40/loader-widened": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "store/records.py",
+        "        WHERE a.garage_id = %s AND (%s::uuid IS NULL OR a.payer_id = %s::uuid)",
+        source(
+            (
+                "        WHERE a.id IN (SELECT agreement_id FROM agreement_garages WHERE garage_id "
+                "= "
+                "%s)"
+            ),
+            (
+                "          AND (%s::uuid IS NULL OR a.payer_id = %s::uuid)  -- PLANTED: every "
+                "agreement valid here"
+            ),
+        ),
+        "THE TRAP OF §4: the money loader returns every agreement VALID at the garage "
+        "instead of every agreement BILLED there, so the run at a covered-but-not-home "
+        "garage prices the multi-garage agreement onto that garage's invoice -- in "
+        "that garage's currency, on that garage's period",
+    ),
+    "G40/payers-widened": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "store/records.py",
+        '        "WHERE a.garage_id = %s ORDER BY p.external_id",',
+        source(
+            (
+                '        "WHERE a.id IN (SELECT agreement_id FROM agreement_garages WHERE '
+                'garage_id = '
+                '%s) "'
+            ),
+            (
+                '        "ORDER BY p.external_id",  # PLANTED: every payer with an agreement valid '
+                'here'
+            ),
+        ),
+        "the run finds a payer at a garage their agreement merely covers and reports "
+        "a line for them there; nothing is issued only because the agreement loader "
+        "still holds, and the report no longer says what is true",
+    ),
+    "G40/money-door-membership": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "invoice.py",
+        "    if agreement.garage_id != garage.id:",
+        (
+            "    if not agreement.covers_garage(garage.id):  # PLANTED: the money door reads the "
+            "covered set"
+        ),
+        "the first charge and the period invoice price an agreement against a garage "
+        "it merely covers -- that garage's billing day, currency and proration over "
+        "the home's, with no rule saying which governs",
+    ),
+    "G40/home-move-allowed": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "store/records.py",
+        "    if home_already is not None and home_already != garage_uuid:",
+        "    if False:  # PLANTED: the home may move",
+        "THE GATE'S B1 PLANTED BACK: a later version billed at another garage is "
+        "stored, the agreement's home moves, and the old home's unpaid invoice and "
+        "the owner's block on it stop reaching every barrier while the charge still "
+        "collects that invoice -- an operation nobody designed, answered differently "
+        "at every door",
+    ),
+    "G40/store-under-any-garage": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "store/records.py",
+        "    if garage.id != agreement.garage_id:",
+        "    if False:  # PLANTED: an agreement may be filed under a garage that is not its home",
+        "the store files an agreement's version row under whatever garage the caller "
+        "named, so agreements.garage_id -- the money key -- stops being the home the "
+        "document states",
+    ),
+    # -- M3 fix round: the LATEST version is chosen before any garage question --
+    "G14/dropping-versions": (
+        "tests/test_fixture_axes.py",
+        "tests/fixtures.py",
+        "        version=2, covered_garage_ids=(MULTI_HOME().id,), **overrides",
+        "        version=2, **overrides  # PLANTED: v2 drops nothing",
+        "the 'dropping' fixture's second version covers the same two garages as its "
+        "first, so every test that says it crosses 'a version that dropped a garage' "
+        "samples a version that dropped nothing -- the fixture is part of the "
+        "measurement",
+    ),
+    "G39/latest-after-filter": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "entitlement.py",
+        "    return tuple(latest.values())",
+        "    return tuple(agreements)  # PLANTED: every version reaches the coverage filter",
+        "THE L3'S BLOCKER B1 PLANTED BACK: every version survives to the coverage "
+        "filter and the latest SURVIVOR wins, so a garage the newer version dropped is "
+        "answered COVERED on the older version that listed it -- the withdrawn "
+        "coverage still opens the barrier",
+    ),
+    "G40/loader-order": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "store/records.py",
+        source(
+            "        SELECT a.id, a.external_id, a.version, a.payer_id, p.external_id, a.spots,",
+            (
+                "               a.monthly_price_minor, a.start_day, a.status, "
+                "a.cancelled_effective_day,"
+            ),
+            "               a.access_entry_from, a.access_exit_by, g.external_id",
+            "        FROM (",
+            "            SELECT DISTINCT ON (external_id) *",
+            "            FROM agreements",
+            "            ORDER BY external_id, version DESC",
+            "        ) a",
+            "        JOIN payers p ON p.id = a.payer_id",
+            "        JOIN garages g ON g.id = a.garage_id",
+            "        WHERE a.garage_id = %s AND (%s::uuid IS NULL OR a.payer_id = %s::uuid)",
+            "        ORDER BY a.external_id",
+        ),
+        source(
+            "        SELECT DISTINCT ON (a.external_id)  -- PLANTED: garage filter first",
+            "               a.id, a.external_id, a.version, a.payer_id, p.external_id, a.spots,",
+            (
+                "               a.monthly_price_minor, a.start_day, a.status, "
+                "a.cancelled_effective_day,"
+            ),
+            "               a.access_entry_from, a.access_exit_by, g.external_id",
+            "        FROM agreements a",
+            "        JOIN payers p ON p.id = a.payer_id",
+            "        JOIN garages g ON g.id = a.garage_id",
+            "        WHERE a.garage_id = %s AND (%s::uuid IS NULL OR a.payer_id = %s::uuid)",
+            "        ORDER BY a.external_id, a.version DESC",
+        ),
+        "THE L3'S F1 PLANTED BACK: the money loader filters on the garage and then "
+        "takes the latest survivor, so at a garage an agreement's newer version has "
+        "LEFT the older version still homed there is returned, and the run invoices "
+        "one agreement at two garages",
+    ),
+    "G40/payers-order": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "store/records.py",
+        source(
+            '        "SELECT DISTINCT p.id, p.external_id FROM ("',
+            (
+                '        "  SELECT DISTINCT ON (external_id) * FROM agreements '
+                'ORDER BY external_id, version DESC"'
+            ),
+            '        ") a JOIN payers p ON p.id = a.payer_id "',
+        ),
+        source(
+            (
+                '        "SELECT DISTINCT p.id, p.external_id FROM agreements a JOIN payers p ON '
+                'p.id = a.payer_id "  # PLANTED: every version'
+            ),
+        ),
+        "the payer read judges every version rather than the latest, so a run at the "
+        "OLD home of a moved agreement finds its payer there on the version that used "
+        "to be, loads no agreement, and reports NOTHING_BILLABLE for a payer who has "
+        "nothing billed there -- the report no longer says what is true",
+    ),
+    "G40/gate-by-garage": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "charging.py",
+        (
+            "                    item.agreement for item in load_agreements_on_invoice(cursor, "
+            "invoice_uuid)"
+        ),
+        source(
+            "                    item.agreement  # PLANTED: the garage-keyed read",
+            (
+                '                    for item in __import__("monthly_billing.store.records", '
+                'fromlist=["x"]).load_agreements_at_garage(cursor, _garage_uuid)'
+            ),
+            (
+                "                    if item.agreement.id in {line.agreement_id for line in "
+                "invoice.lines}"
+            ),
+        ),
+        "the charge gate reads the agreements homed at the INVOICE'S garage: an "
+        "invoice issued before the agreement moved its home finds nothing there and "
+        "cannot be charged, though the payer agreed to be charged for it",
+    ),
+    "G40/gate-eager-default": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "charging.py",
+        source(
+            "                if not agreements:",
+            "                    raise Refused(",
+        ),
+        source(
+            "                if not agreements and False:  # PLANTED: the empty gate falls through",
+            "                    raise Refused(",
+        ),
+        "an invoice whose lines name no loadable agreement reaches the eager "
+        "``agreements[0]`` default and raises IndexError under the invoice lock "
+        "instead of refusing by name -- a crash where a refusal was promised",
+    ),
+    "G40/gate-by-line-version": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "store/records.py",
+        source(
+            "            WHERE external_id IN (",
+            "                SELECT named.external_id",
+            "                FROM invoice_lines l",
+            "                JOIN agreements named ON named.id = l.agreement_id",
+            "                WHERE l.invoice_id = %s",
+            "            )",
+        ),
+        source(
+            (
+                "            WHERE id IN (SELECT agreement_id FROM invoice_lines WHERE "
+                "invoice_id = %s)"
+            ),
+            "              -- PLANTED: the version row the line names, not the identity's latest",
+        ),
+        "the charge gate reads the VERSION ROW each line names -- the one that PRICED "
+        "it -- so a mandate the payer agreed to in a later version is never seen and "
+        "the invoice can never be charged, and a mandate withdrawn since is charged "
+        "anyway",
+    ),
+    "G41/orphan-unnamed": (
+        "tests/test_g41_migration_0004_backfills_the_covered_set.py",
+        "migrations/0004_agreement_garages.sql",
+        source(
+            "  IF FOUND THEN",
+            "    RAISE EXCEPTION",
+        ),
+        source(
+            "  IF FOUND AND FALSE THEN  -- PLANTED: the orphan is not refused by name",
+            "    RAISE EXCEPTION",
+        ),
+        "a version whose home cannot be placed is no longer refused by the "
+        "agreement's name; the insert then fails on the foreign key, by constraint "
+        "name, and the operator reading the failure has no row to fix",
+    ),
+    "G41/backfill-narrowed": (
+        "tests/test_g41_migration_0004_backfills_the_covered_set.py",
+        "migrations/0004_agreement_garages.sql",
+        "  SELECT a.tenant_id, a.id, a.garage_id FROM agreements a;",
+        (
+            "  SELECT a.tenant_id, a.id, a.garage_id FROM agreements a WHERE a.version = 1;  -- "
+            "PLANTED"
+        ),
+        "the backfill places a covered set for version-1 rows only; the migration's "
+        "own count assertion fires on a seeded cluster and the seeded test goes red "
+        "on it -- and a plant that also removed the assertion would leave every later "
+        "version covering nothing, which the pair-wise comparison catches",
     ),
 }
 

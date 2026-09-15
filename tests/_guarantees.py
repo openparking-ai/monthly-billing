@@ -294,6 +294,51 @@ GUARANTEES: dict[str, str] = {
         "connection is recorded at once. The lock is taken in exactly one place, read "
         "from the source."
     ),
+    "G39": (
+        "An agreement is billed at ONE HOME GARAGE and COVERS the garages the owner "
+        "lists, the home among them -- stated by listing, never by an 'everywhere' flag "
+        "or a default, and a document that omits the set is refused by name. The "
+        "coverage door is MEMBERSHIP of that set; the asking garage still compares the "
+        "plate under its own rule. The unpaid-invoice read, the owner's exceptions and "
+        "the grace period -- days AND clock -- follow the agreement's HOME, never the "
+        "asking garage, and two agreements of one payer homed at two garages are judged "
+        "independently. Registrations fan out one row per covered garage, each under "
+        "that garage's own identity rule, all or none: a collision at ANY covered "
+        "garage refuses the whole registration by name and writes nothing. The "
+        "entitlement is across the covered set, not per garage. THE HOME NEVER MOVES: "
+        "a version billed at a different garage from the versions already stored is "
+        "refused by name and writes nothing, because a move has no stated answer for "
+        "the month already invoiced, for an unpaid invoice or a block at the old home, "
+        "or for whose billing day governs next -- so the home-keyed reads are correct "
+        "for every state the module can store. There is no cross-row database backstop "
+        "for this; a row written past the module with another home is read at that "
+        "home only."
+    ),
+    "G40": (
+        "MONEY IS NOT MULTI-GARAGE. The billing day, the currency, the timezone of the "
+        "period boundaries, proration, the invoice, the run and the charge are keyed on "
+        "the agreement's HOME garage only: a run at a garage the agreement merely covers "
+        "issues nothing for it, the first charge and the period invoice refuse another "
+        "garage by name whether or not the agreement covers it, and the store refuses "
+        "to file an agreement under a garage that is not its home. The billing run reads "
+        "the agreements BILLED at a garage through a loader that never widens to the "
+        "covered set and that chooses each agreement's LATEST version before it asks "
+        "where that version is homed; the coverage call reads a second loader. A "
+        "version that would MOVE the home is refused by name and never stored, so the "
+        "ordering matters only for a row written past the module -- and for that row "
+        "the run bills the newest version's home only. The charge reads the agreements "
+        "the invoice's own lines name, each at its latest version, and the garage does "
+        "not enter that read: an invoice whose agreement's newest row was written past "
+        "the module at another home is still charged, and an invoice naming no "
+        "loadable agreement is refused by name."
+    ),
+    "G41": (
+        "Migration 0004 gives every EXISTING agreement version a covered set of exactly "
+        "its home garage, read from agreements.garage_id, and asserts the placed rows "
+        "against the pre-migration count rather than a literal. A version whose home "
+        "cannot be placed fails the migration BY NAME -- external id and version -- "
+        "before a row is written, and the whole migration rolls back."
+    ),
 }
 
 

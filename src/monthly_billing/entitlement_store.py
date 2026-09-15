@@ -9,8 +9,19 @@ that comes back is the pure function's ``Answer`` -- the same 7 fields, no money
 -- and this module adds nothing to it.
 
 **"UNPAID SINCE" IS THE EARLIEST DUE DATE AMONG THE PAYER'S UNPAID INVOICES AT
-THIS GARAGE.** Not the latest: a payer two months behind has been unpaid since
-the first of them, and grace counts from there. ``paid_at`` is derived by
+THE AGREEMENT'S HOME GARAGE -- NEVER THE ASKING ONE.** Not the latest: a payer
+two months behind has been unpaid since the first of them, and grace counts from
+there. And the home's, because the invoice LIVES at the garage that bills the
+agreement: the moment an agreement covers a second garage, a read keyed on the
+asking garage finds no invoice there and calls an unpaid monthly COVERED at
+every door except the one that bills it. The exceptions read follows the home
+for the same reason -- an owner's block recorded on the home's invoice must
+reach every door -- and so does the grace period, which is a property of the
+invoice and not of the barrier. Two agreements of one payer homed at two
+garages stay INDEPENDENT: each is judged by the unpaid invoices at ITS home,
+so an unpaid invoice on one does not make the other not-covered anywhere.
+Aggregating across a payer's homes would create a blocking relationship that
+does not exist today, which is a money decision and not this round's. ``paid_at`` is derived by
 ``payments.rederive_paid_at`` and never set by hand, so an unpaid invoice is
 exactly one whose unreversed payments have not reached its total.
 
@@ -38,12 +49,14 @@ from .exceptions_by_owner import (
     is_blocked,
 )
 from .store.postgres import tenant
-from .store.records import load_agreements_at_garage, load_garage, registration_for
+from .store.records import (
+    GarageNotFound,
+    StoredGarage,
+    load_agreements_covering_garage,
+    load_garage,
+    registration_for,
+)
 from .store.writes import as_uuid
-
-
-class GarageNotFound(LookupError):
-    """The garage id names no row in the store."""
 
 
 def covered_from_store(
@@ -78,9 +91,11 @@ def covered_from_store(
         # agreement's vehicle list, which would still find the plate on a version
         # that has since released it or on a row written past the module.
         holder = registration_for(cursor, stored.uuid, garage.normalise_identity(vehicle_identity))
+        # The ACCESS door: agreements whose latest version COVERS this garage,
+        # billed here or not. The money doors read load_agreements_at_garage.
         mine = [
             item
-            for item in load_agreements_at_garage(cursor, stored.uuid)
+            for item in load_agreements_covering_garage(cursor, stored.uuid)
             if item.agreement.id == holder
             and any(garage.identities_match(v, vehicle_identity) for v in item.agreement.vehicles)
         ]
@@ -91,23 +106,51 @@ def covered_from_store(
                 stay_entered_at=stay_entered_at,
             )
         (chosen,) = mine  # one identity, and the loader already gave its latest version
-        unpaid_since = _earliest_unpaid_due_at(cursor, chosen.payer_uuid, stored.uuid)
-        exceptions = _exceptions_for(cursor, chosen.agreement.id, chosen.payer_uuid, stored.uuid)
+        # The invoice, the exceptions and the grace live at the agreement's HOME.
+        # ONE home for the agreement's whole life: the store refuses a version
+        # that would move it (records.store_agreement, REFUSAL_AGREEMENT_HOME_MOVED),
+        # so the latest version's home IS the home every invoice of this
+        # agreement was issued at, and keying these reads on it is correct for
+        # every state the module can store. Do NOT re-key them to an identity
+        # read without first re-opening the home-move question: a home move is
+        # an operation nobody designed, and the gate measured what keying on
+        # "the newest home" did to an unpaid invoice and an owner's block at the
+        # old one when a move could still be stored. A row written PAST the
+        # module with another home is read at that home only; there is no
+        # cross-row database backstop, and the contract says so.
+        home = _home_garage(cursor, stored, chosen.agreement.garage_id)
+        unpaid_since = _earliest_unpaid_due_at(cursor, chosen.payer_uuid, home.uuid)
+        exceptions = _exceptions_for(cursor, chosen.agreement.id, chosen.payer_uuid, home.uuid)
     connection.rollback()
 
-    grace = applied_grace_days(garage.payment_grace_days, exceptions)
+    grace = applied_grace_days(home.garage.payment_grace_days, exceptions)
     return is_covered(
-        garage=replace(garage, payment_grace_days=grace),
+        garage=garage,
         agreements=(chosen.agreement,),
         vehicle_identity=vehicle_identity,
         at=at,
         stay_entered_at=stay_entered_at,
         has_unpaid_invoice_since=unpaid_since,
         blocked_by_owner=is_blocked(exceptions),
+        home_garage=replace(home.garage, payment_grace_days=grace),
     )
 
 
+def _home_garage(cursor: Any, asking: StoredGarage, home_id: str) -> StoredGarage:
+    """The garage that bills the chosen agreement -- the asking garage itself
+    when the agreement is homed here, which is every single-garage agreement."""
+    if home_id == asking.garage.id:
+        return asking
+    home = load_garage(cursor, home_id)
+    if home is None:
+        # The agreement loaded, so its home row exists; this is a store the
+        # module did not write. Refuse rather than answer with no grace.
+        raise GarageNotFound(f"agreement home garage {home_id!r} is not in the store.")
+    return home
+
+
 def _earliest_unpaid_due_at(cursor: Any, payer_uuid: Any, garage_uuid: Any) -> datetime | None:
+    """``garage_uuid`` is the agreement's HOME -- see the module docstring."""
     cursor.execute(
         "SELECT min(due_at) FROM invoices "
         "WHERE payer_id = %s AND garage_id = %s AND paid_at IS NULL",
@@ -121,7 +164,8 @@ def _exceptions_for(
     cursor: Any, agreement_external_id: str, payer_uuid: Any, garage_uuid: Any
 ) -> tuple[OwnerException, ...]:
     """The exceptions on the agreement, plus those on the payer's unpaid invoices
-    at this garage -- the two places a grace extension or a block can sit.
+    at the agreement's HOME garage -- the two places a grace extension or a block
+    can sit. ``garage_uuid`` is the home, never the asking garage.
 
     **BY THE AGREEMENT'S IDENTITY, ACROSS EVERY VERSION.** An exception is stored
     against the version row the owner was looking at -- that is a fact worth

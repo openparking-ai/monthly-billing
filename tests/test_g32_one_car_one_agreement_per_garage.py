@@ -220,6 +220,15 @@ def test_the_registration_decides_coverage_not_a_scan_of_vehicle_lists(app, tena
             "VALUES (%s, %s, %s, 'shared1')",
             (tenant_id, z_uuid, PLATE),
         )
+        # Its 0004 row too, so the covering loader CAN return this row and the
+        # registration read is what keeps it out. Without it the loader's join
+        # hid the row and this test stayed green under G32/registration's plant
+        # -- measured at the M3 gate: the control narrowed from 3 tests to 1.
+        cursor.execute(
+            "INSERT INTO agreement_garages (tenant_id, agreement_id, garage_id) "
+            "VALUES (%s, %s, %s)",
+            (tenant_id, z_uuid, garage),
+        )
     app.commit()
     answer = covered_from_store(app, tenant_id, GARAGE.id, PLATE, DAY)
     assert answer.covered and answer.agreement_id == "ag-A"
@@ -243,6 +252,15 @@ def test_a_vehicle_with_no_registration_is_on_no_agreement(app, tenant_id):
             "(tenant_id, agreement_id, identity, identity_normalised) "
             "VALUES (%s, %s, %s, 'shared1')",
             (tenant_id, z_uuid, PLATE),
+        )
+        # Its 0004 row too, so the covering loader CAN return this row and the
+        # registration read is what keeps it out. Without it the loader's join
+        # hid the row and this test stayed green under G32/registration's plant
+        # -- measured at the M3 gate: the control narrowed from 3 tests to 1.
+        cursor.execute(
+            "INSERT INTO agreement_garages (tenant_id, agreement_id, garage_id) "
+            "VALUES (%s, %s, %s)",
+            (tenant_id, z_uuid, garage),
         )
     app.commit()
     answer = covered_from_store(app, tenant_id, GARAGE.id, PLATE, DAY)
@@ -276,15 +294,23 @@ def test_a_refusal_writes_nothing_so_a_caller_that_commits_after_it_has_committe
     assert registrations_at_garage_as_app(app, tenant_id, garage) == before
     v2 = simple_agreement(id="ag-A", version=2, payer_id="payer-a", vehicles=("CARA1", "CARB1"),
                           start_day=date(2026, 1, 5))
-    with tenant(app, tenant_id) as cursor:
-        with pytest.raises(Refused) as refused:
-            store_agreement(cursor, tenant_id, GARAGE, garage, payers["payer-a"], v2, now=DAY)
-        assert refused.value.code == REFUSAL_VEHICLE_ALREADY_REGISTERED
-        assert _regs_in_transaction(cursor) == before, (
-            "the refusal left the dropped car's registration deleted in the open transaction"
-        )
-        cursor.execute("SELECT max(version) FROM agreements WHERE external_id = 'ag-A'")
-        assert cursor.fetchone() == (1,)
+    try:
+        with tenant(app, tenant_id) as cursor:
+            with pytest.raises(Refused) as refused:
+                store_agreement(cursor, tenant_id, GARAGE, garage, payers["payer-a"], v2, now=DAY)
+            assert refused.value.code == REFUSAL_VEHICLE_ALREADY_REGISTERED
+            assert _regs_in_transaction(cursor) == before, (
+                "the refusal left the dropped car's registration deleted in the open transaction"
+            )
+            cursor.execute("SELECT max(version) FROM agreements WHERE external_id = 'ag-A'")
+            assert cursor.fetchone() == (1,)
+    except BaseException:
+        # A failed assertion here would leave the module's shared connection
+        # inside an aborted transaction; end it, so this test's red is this
+        # test's alone and the tests after it are measured rather than poisoned
+        # (the same shape test_g39 and test_g40 carry).
+        app.rollback()
+        raise
     app.commit()  # the caller that treats Refused as a per-agreement outcome and goes on
     assert registrations_at_garage_as_app(app, tenant_id, garage) == before
     assert query(
