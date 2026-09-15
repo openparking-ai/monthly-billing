@@ -1368,6 +1368,148 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "named, so agreements.garage_id -- the money key -- stops being the home the "
         "document states",
     ),
+    # -- M3 fix round: the LATEST version is chosen before any garage question --
+    "G14/dropping-versions": (
+        "tests/test_fixture_axes.py",
+        "tests/fixtures.py",
+        "        version=2, covered_garage_ids=(MULTI_HOME().id,), **overrides",
+        "        version=2, **overrides  # PLANTED: v2 drops nothing",
+        "the 'dropping' fixture's second version covers the same two garages as its "
+        "first, so every test that says it crosses 'a version that dropped a garage' "
+        "samples a version that dropped nothing -- the fixture is part of the "
+        "measurement",
+    ),
+    "G39/latest-after-filter": (
+        "tests/test_g39_coverage_follows_the_covered_set.py",
+        "entitlement.py",
+        "    return tuple(latest.values())",
+        "    return tuple(agreements)  # PLANTED: every version reaches the coverage filter",
+        "THE L3'S BLOCKER B1 PLANTED BACK: every version survives to the coverage "
+        "filter and the latest SURVIVOR wins, so a garage the newer version dropped is "
+        "answered COVERED on the older version that listed it -- the withdrawn "
+        "coverage still opens the barrier",
+    ),
+    "G40/loader-order": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "store/records.py",
+        source(
+            "        SELECT a.id, a.external_id, a.version, a.payer_id, p.external_id, a.spots,",
+            (
+                "               a.monthly_price_minor, a.start_day, a.status, "
+                "a.cancelled_effective_day,"
+            ),
+            "               a.access_entry_from, a.access_exit_by, g.external_id",
+            "        FROM (",
+            "            SELECT DISTINCT ON (external_id) *",
+            "            FROM agreements",
+            "            ORDER BY external_id, version DESC",
+            "        ) a",
+            "        JOIN payers p ON p.id = a.payer_id",
+            "        JOIN garages g ON g.id = a.garage_id",
+            "        WHERE a.garage_id = %s AND (%s::uuid IS NULL OR a.payer_id = %s::uuid)",
+            "        ORDER BY a.external_id",
+        ),
+        source(
+            "        SELECT DISTINCT ON (a.external_id)  -- PLANTED: garage filter first",
+            "               a.id, a.external_id, a.version, a.payer_id, p.external_id, a.spots,",
+            (
+                "               a.monthly_price_minor, a.start_day, a.status, "
+                "a.cancelled_effective_day,"
+            ),
+            "               a.access_entry_from, a.access_exit_by, g.external_id",
+            "        FROM agreements a",
+            "        JOIN payers p ON p.id = a.payer_id",
+            "        JOIN garages g ON g.id = a.garage_id",
+            "        WHERE a.garage_id = %s AND (%s::uuid IS NULL OR a.payer_id = %s::uuid)",
+            "        ORDER BY a.external_id, a.version DESC",
+        ),
+        "THE L3'S F1 PLANTED BACK: the money loader filters on the garage and then "
+        "takes the latest survivor, so at a garage an agreement's newer version has "
+        "LEFT the older version still homed there is returned, and the run invoices "
+        "one agreement at two garages",
+    ),
+    "G40/payers-order": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "store/records.py",
+        source(
+            '        "SELECT DISTINCT p.id, p.external_id FROM ("',
+            (
+                '        "  SELECT DISTINCT ON (external_id) * FROM agreements '
+                'ORDER BY external_id, version DESC"'
+            ),
+            '        ") a JOIN payers p ON p.id = a.payer_id "',
+        ),
+        source(
+            (
+                '        "SELECT DISTINCT p.id, p.external_id FROM agreements a JOIN payers p ON '
+                'p.id = a.payer_id "  # PLANTED: every version'
+            ),
+        ),
+        "the payer read judges every version rather than the latest, so a run at the "
+        "OLD home of a moved agreement finds its payer there on the version that used "
+        "to be, loads no agreement, and reports NOTHING_BILLABLE for a payer who has "
+        "nothing billed there -- the report no longer says what is true",
+    ),
+    "G40/gate-by-garage": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "charging.py",
+        (
+            "                    item.agreement for item in load_agreements_on_invoice(cursor, "
+            "invoice_uuid)"
+        ),
+        source(
+            "                    item.agreement  # PLANTED: the garage-keyed read",
+            (
+                '                    for item in __import__("monthly_billing.store.records", '
+                'fromlist=["x"]).load_agreements_at_garage(cursor, _garage_uuid)'
+            ),
+            (
+                "                    if item.agreement.id in {line.agreement_id for line in "
+                "invoice.lines}"
+            ),
+        ),
+        "the charge gate reads the agreements homed at the INVOICE'S garage: an "
+        "invoice issued before the agreement moved its home finds nothing there and "
+        "cannot be charged, though the payer agreed to be charged for it",
+    ),
+    "G40/gate-eager-default": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "charging.py",
+        source(
+            "                if not agreements:",
+            "                    raise Refused(",
+        ),
+        source(
+            "                if not agreements and False:  # PLANTED: the empty gate falls through",
+            "                    raise Refused(",
+        ),
+        "an invoice whose lines name no loadable agreement reaches the eager "
+        "``agreements[0]`` default and raises IndexError under the invoice lock "
+        "instead of refusing by name -- a crash where a refusal was promised",
+    ),
+    "G40/gate-by-line-version": (
+        "tests/test_g40_money_stays_at_the_home_garage.py",
+        "store/records.py",
+        source(
+            "            WHERE external_id IN (",
+            "                SELECT named.external_id",
+            "                FROM invoice_lines l",
+            "                JOIN agreements named ON named.id = l.agreement_id",
+            "                WHERE l.invoice_id = %s",
+            "            )",
+        ),
+        source(
+            (
+                "            WHERE id IN (SELECT agreement_id FROM invoice_lines WHERE "
+                "invoice_id = %s)"
+            ),
+            "              -- PLANTED: the version row the line names, not the identity's latest",
+        ),
+        "the charge gate reads the VERSION ROW each line names -- the one that PRICED "
+        "it -- so a mandate the payer agreed to in a later version is never seen and "
+        "the invoice can never be charged, and a mandate withdrawn since is charged "
+        "anyway",
+    ),
     "G41/orphan-unnamed": (
         "tests/test_g41_migration_0004_backfills_the_covered_set.py",
         "migrations/0004_agreement_garages.sql",

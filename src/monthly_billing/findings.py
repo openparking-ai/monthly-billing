@@ -66,6 +66,7 @@ REFUSAL_VEHICLE_ALREADY_REGISTERED = "REFUSAL_VEHICLE_ALREADY_REGISTERED"
 REFUSAL_VEHICLE_ON_TWO_AGREEMENTS = "REFUSAL_VEHICLE_ON_TWO_AGREEMENTS"
 REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL = "REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL"
 REFUSAL_HOME_GARAGE_NOT_GIVEN = "REFUSAL_HOME_GARAGE_NOT_GIVEN"
+REFUSAL_INVOICE_NAMES_NO_AGREEMENT = "REFUSAL_INVOICE_NAMES_NO_AGREEMENT"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -186,6 +187,13 @@ REFUSALS: dict[str, str] = {
         "different days depending on which door the car is at; refused rather "
         "than defaulted."
     ),
+    REFUSAL_INVOICE_NAMES_NO_AGREEMENT: (
+        "This invoice's lines name no agreement the store can load, so there is no "
+        "mandate to charge it against. The charge gate reads the agreements the "
+        "lines name, each at its latest version, wherever it is homed now; an "
+        "invoice that reaches this state was written past the module, and a charge "
+        "with no gate is refused rather than attempted."
+    ),
     REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL: (
         "This adjustment would take the invoice total below zero. A waived fee or "
         "a credit may reduce what is owed to exactly nothing -- a fully waived "
@@ -244,6 +252,16 @@ NOT_COVERED_REASONS: dict[str, str] = {
 #: written into seven strings that would drift. A parking lane reads this and it
 #: is the only thing it needs to know about money, which is that there isn't any
 #: in this answer.
+#: The unpaid state is the PAYER'S at a home garage, and it always was; after
+#: 0004 it shows at every garage the payer's agreements homed there cover.
+UNPAID_IS_THE_PAYERS: str = (
+    "The unpaid invoice is the PAYER'S: an unpaid invoice of the payer at a home "
+    "garage makes every agreement of that payer homed there not-covered once its "
+    "grace has run, at every garage each of them covers. An agreement of the same "
+    "payer homed at another garage is untouched by it -- each home's invoices judge "
+    "only the agreements billed there."
+)
+
 NOT_COVERED_MEANS: str = (
     "Not covered means this stay is an ordinary transient stay and is priced "
     "like any other. It does not mean refuse entry, and it never means refuse "

@@ -15,6 +15,7 @@ from fixtures import (
     assert_fixed_zone_really_does_not_shift,
     assert_identity_rules_disagree,
     assert_shifting_zone_really_shifts,
+    assert_the_dropping_versions_differ_only_on_the_dropped_garage,
     assert_the_vehicle_list_exceeds_the_spots,
 )
 
@@ -29,6 +30,7 @@ from fixtures import (
         assert_currencies_span_the_exponents,
         assert_the_vehicle_list_exceeds_the_spots,
         assert_covered_garages_differ_on_every_axis,
+        assert_the_dropping_versions_differ_only_on_the_dropped_garage,
     ],
     ids=lambda f: f.__name__,
 )

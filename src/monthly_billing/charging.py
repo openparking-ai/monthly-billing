@@ -112,7 +112,13 @@ same ``paid_state`` the derivation uses -- is what is reserved and requested.
 Nothing owed is ``REFUSAL_NOTHING_OWED`` before any row is written.
 
 **THE MANDATE IS CHECKED FOR EVERY AGREEMENT ON THE INVOICE**, as before: if
-any one of them has no mandate, nothing is charged, by name, before the row.
+any one of them has no mandate, nothing is charged, by name, before the row. The
+agreements are read by the IDENTITIES the invoice's lines name, each at its
+LATEST version and wherever it is homed now -- the mandate is the latest
+version's, so a card agreed to after the invoice was issued is charged and one
+withdrawn since is not, and an invoice issued before the agreement moved its
+home is charged exactly as one issued after. The garage does not enter that
+read (``store.records.load_agreements_on_invoice``).
 """
 
 from __future__ import annotations
@@ -125,6 +131,7 @@ from uuid import UUID, uuid4
 from .findings import (
     REFUSAL_ATTEMPT_ALREADY_RESOLVED,
     REFUSAL_ATTEMPT_UNRESOLVED,
+    REFUSAL_INVOICE_NAMES_NO_AGREEMENT,
     Refused,
 )
 from .invoice import Invoice, InvoiceLine, LineKind
@@ -147,7 +154,7 @@ from .payments import (
     rederive_paid_at,
 )
 from .store.postgres import locked_invoice, tenant
-from .store.records import load_agreements_at_garage
+from .store.records import load_agreements_on_invoice
 from .store.writes import as_uuid, guarded_insert
 
 #: The index whose violation MEANS "this attempt already has an outcome"
@@ -396,7 +403,7 @@ def _reserve(
     with tenant(connection, tenant_id) as cursor:
         invoice_uuid = invoice_uuid_for(cursor, invoice_reference)
         with locked_invoice(connection, cursor, invoice_uuid):
-            invoice, garage_uuid = _load_invoice(cursor, invoice_uuid)
+            invoice, _garage_uuid = _load_invoice(cursor, invoice_uuid)
             retry = retry_state_from_rows(
                 invoice_reference, _load_attempt_rows(cursor, invoice_uuid)
             )
@@ -422,12 +429,21 @@ def _reserve(
                     pending.currency, retry, resumed=True,
                 )
             else:
-                on_invoice = {line.agreement_id for line in invoice.lines}
+                # The agreements the invoice's own lines name, each at its latest
+                # version, wherever it is homed NOW -- the garage does not enter
+                # this read. A garage-keyed read returned nothing for an invoice
+                # issued before the agreement moved its home, and the old eager
+                # default (``agreements[0]``) turned that into an IndexError under
+                # the lock; an empty gate is refused by name instead.
                 agreements = [
-                    item.agreement
-                    for item in load_agreements_at_garage(cursor, garage_uuid)
-                    if item.agreement.id in on_invoice
+                    item.agreement for item in load_agreements_on_invoice(cursor, invoice_uuid)
                 ]
+                if not agreements:
+                    raise Refused(
+                        REFUSAL_INVOICE_NAMES_NO_AGREEMENT,
+                        f"invoice {invoice_reference!r} has {len(invoice.lines)} line(s) and "
+                        "the store holds no agreement version any of them names.",
+                    )
                 owed = paid_state(cursor, invoice_uuid)
                 # The mandate rule, for every agreement the invoice itemises: the
                 # first one without a mandate is the one the refusal names.

@@ -136,6 +136,21 @@ def multi_garage_agreement(**overrides: object) -> Agreement:
     return simple_agreement(**fields)  # type: ignore[arg-type]
 
 
+def dropping_versions(**overrides: object) -> tuple[Agreement, Agreement]:
+    """The one agreement at two versions: v1 is ``multi_garage_agreement`` (home
+    + other), v2 is the owner's WITHDRAWAL of the other garage -- same home,
+    same vehicles, the covered set shrunk to the home alone. The shape the L3's
+    blocker needed and no fixture could express: a door that answers on the
+    version that still listed a garage instead of the one that dropped it.
+    ``assert_the_dropping_versions_differ_only_on_the_dropped_garage`` is the
+    control that the pair is what it claims."""
+    v1 = multi_garage_agreement(version=1, **overrides)
+    v2 = multi_garage_agreement(
+        version=2, covered_garage_ids=(MULTI_HOME().id,), **overrides
+    )
+    return v1, v2
+
+
 def agreement_with_everything(garage_id: str = "garage-month-end") -> Agreement:
     return simple_agreement(
         garage_id=garage_id,
@@ -286,6 +301,22 @@ def assert_covered_garages_differ_on_every_axis() -> None:
     # the same identity normalises to two different strings.
     plate = agreement.vehicles[0]
     assert home.normalise_identity(plate + " ") != other.normalise_identity(plate + " ")
+
+
+def assert_the_dropping_versions_differ_only_on_the_dropped_garage() -> None:
+    """The dropping pair is one identity, v2 above v1, homed at the SAME garage,
+    listing the SAME vehicles, and v2 covers the home alone where v1 covered
+    the other garage too -- so a door that answers differently at the other
+    garage is answering the covered set and nothing else."""
+    v1, v2 = dropping_versions()
+    other = MULTI_OTHER().id
+    assert v1.id == v2.id and v2.version > v1.version
+    assert v1.garage_id == v2.garage_id == MULTI_HOME().id, "the home moved; that is another shape"
+    assert set(v1.vehicles) == set(v2.vehicles), "a vehicle changed; that is another shape"
+    assert other in v1.covered_garage_ids and other not in v2.covered_garage_ids, (
+        "v2 did not drop the other garage"
+    )
+    assert v2.covered_garage_ids == (v1.garage_id,)
 
 
 def sometime_on(day: date, timezone: str, hour: int = 12) -> datetime:

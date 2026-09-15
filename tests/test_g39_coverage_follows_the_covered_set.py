@@ -42,6 +42,7 @@ from fixtures import (
     MULTI_HOME,
     MULTI_OTHER,
     agreement_document,
+    dropping_versions,
     multi_garage_agreement,
     simple_agreement,
     tenth_of_month_garage,
@@ -58,6 +59,7 @@ from monthly_billing.findings import (
     NOT_COVERED_UNPAID_PAST_GRACE,
     REFUSAL_HOME_GARAGE_NOT_GIVEN,
     REFUSAL_VEHICLE_ALREADY_REGISTERED,
+    REFUSAL_VEHICLE_ON_TWO_AGREEMENTS,
     Refused,
 )
 from monthly_billing.store.postgres import tenant
@@ -227,6 +229,92 @@ def test_asked_at_a_non_home_garage_with_an_unpaid_instant_the_home_is_required(
         has_unpaid_invoice_since=due,
     ).covered
     assert is_covered(garage=OTHER, agreements=(MULTI,), vehicle_identity=PLATE, at=at).covered
+
+
+# ---------------------------------------------------------------------------
+# The pure call: the LATEST version is chosen before membership is asked of it
+# (the L3's blocker B1 -- filter-then-pick answered a dropped garage on v1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.guarantee("G39")
+@pytest.mark.parametrize("order", ["v1-then-v2", "v2-then-v1"])
+def test_a_garage_the_newer_version_dropped_is_not_covered_on_the_older_one(order):
+    """v1 covers HOME + OTHER, v2 -- the owner's withdrawal -- covers HOME
+    alone. Handed both, the door at OTHER answers NO_AGREEMENT: the latest
+    version is chosen FIRST and it does not cover OTHER. Filtering on
+    coverage first and taking the latest survivor answered COVERED citing v1
+    (measured at c4baa88). Controls in the same test: at HOME v2 is cited,
+    at a third garage NO_AGREEMENT, and v2 alone at OTHER is the same answer
+    as the pair -- the older version adds nothing."""
+    v1, v2 = dropping_versions(start_day=date(2026, 1, 5))
+    handed = (v1, v2) if order == "v1-then-v2" else (v2, v1)
+    at = _at(date(2026, 5, 3))
+    dropped = is_covered(garage=OTHER, agreements=handed, vehicle_identity=PLATE, at=at)
+    assert not dropped.covered and dropped.reason_code == NOT_COVERED_NO_AGREEMENT, (
+        f"answered on version {dropped.agreement_version} at the dropped garage"
+    )
+    home = is_covered(garage=HOME, agreements=handed, vehicle_identity=PLATE, at=at)
+    assert home.covered and home.agreement_version == 2
+    assert "across" not in home.reason, "v2 covers one garage; its sentence says so"
+    third = is_covered(garage=THIRD, agreements=handed, vehicle_identity=PLATE, at=at)
+    assert not third.covered and third.reason_code == NOT_COVERED_NO_AGREEMENT
+    alone = is_covered(garage=OTHER, agreements=(v2,), vehicle_identity=PLATE, at=at)
+    assert alone == dropped
+
+
+@pytest.mark.guarantee("G39")
+def test_a_version_that_adds_a_garage_is_covered_there_on_the_new_version():
+    """The over-reach control: the fix must not read as 'only the first version
+    counts'. v1 covers HOME alone; v2 adds OTHER; at OTHER the door answers
+    COVERED citing v2, in both orders."""
+    v1 = simple_agreement(version=1, start_day=date(2026, 1, 5))
+    v2 = multi_garage_agreement(version=2, start_day=date(2026, 1, 5))
+    assert OTHER.id not in v1.covered_garage_ids and OTHER.id in v2.covered_garage_ids
+    at = _at(date(2026, 5, 3))
+    for handed in ((v1, v2), (v2, v1)):
+        added = is_covered(garage=OTHER, agreements=handed, vehicle_identity=PLATE, at=at)
+        assert added.covered and added.agreement_version == 2, handed
+    # And v1 alone at OTHER is NO_AGREEMENT -- the answer moved because v2 was handed in.
+    assert not is_covered(garage=OTHER, agreements=(v1,), vehicle_identity=PLATE, at=at).covered
+
+
+@pytest.mark.guarantee("G39")
+def test_two_identities_are_judged_on_their_latest_versions():
+    """A1.4: the two-agreements refusal is judged on the LATEST versions of the
+    identities handed in, never on the pre-filter set. ag-A listed PLATE at v1
+    and dropped it at v2; ag-B lists it. Handed all three, the door answers
+    COVERED under ag-B -- A's latest version is not a claimant. The control:
+    handed A's v1 and B alone, the same door refuses by name."""
+    a1 = simple_agreement(id="ag-A", version=1, vehicles=(PLATE, "A-ONLY"),
+                          start_day=date(2026, 1, 5))
+    a2 = simple_agreement(id="ag-A", version=2, vehicles=("A-ONLY",),
+                          start_day=date(2026, 1, 5))
+    b1 = simple_agreement(id="ag-B", version=1, payer_id="payer-z", vehicles=(PLATE,),
+                          start_day=date(2026, 1, 5))
+    at = _at(date(2026, 5, 3))
+    answer = is_covered(garage=HOME, agreements=(a1, a2, b1), vehicle_identity=PLATE, at=at)
+    assert answer.covered and answer.agreement_id == "ag-B" and answer.agreement_version == 1
+    with pytest.raises(Refused) as refused:
+        is_covered(garage=HOME, agreements=(a1, b1), vehicle_identity=PLATE, at=at)
+    assert refused.value.code == REFUSAL_VEHICLE_ON_TWO_AGREEMENTS
+    assert "'ag-A'" in refused.value.detail and "'ag-B'" in refused.value.detail
+
+
+@pytest.mark.guarantee("G39")
+def test_a_single_version_agreement_answers_exactly_as_before_the_reorder():
+    """One version handed in: the reorder is a no-op. The same seven fields at
+    every door, measured against the answer the single-garage and multi-garage
+    fixtures gave at c4baa88 (covered at both covered garages citing version 1,
+    NO_AGREEMENT at the third)."""
+    at = _at(date(2026, 5, 3))
+    for garage, covered in ((HOME, True), (OTHER, True), (THIRD, False)):
+        answer = is_covered(garage=garage, agreements=(MULTI,), vehicle_identity=PLATE, at=at)
+        assert answer.covered is covered, garage.id
+        assert answer.agreement_version == (1 if covered else None)
+    single = simple_agreement(start_day=date(2026, 1, 5))
+    alone = is_covered(garage=HOME, agreements=(single,), vehicle_identity=PLATE, at=at)
+    assert alone.covered and alone.agreement_id == single.id and alone.agreement_version == 1
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +615,30 @@ def test_a_version_that_drops_a_garage_releases_every_row_there(app, tenant_id):
         store_agreement(cursor, tenant_id, OTHER, other_uuid, payer_z, taker, now=NOW)
     app.commit()
     assert covered_from_store(app, tenant_id, OTHER.id, PLATE, at).agreement_id == "ag-taker"
+
+
+@pytest.mark.guarantee("G39")
+@store_backed
+def test_the_store_door_and_the_pure_door_agree_at_a_dropped_garage(app, tenant_id):
+    """One rule in one shape: with both versions in the store, the store-backed
+    call at the dropped garage and the pure call handed the same two versions
+    give the SAME answer -- NO_AGREEMENT -- and the same version-2 answer at
+    the home. Before the reorder the two doors disagreed at the dropped garage."""
+    v1, v2 = dropping_versions(start_day=date(2026, 1, 5))
+    seeded = _seed_multi(app, tenant_id, v1)
+    with tenant(app, tenant_id) as cursor:
+        store_agreement(
+            cursor, tenant_id, HOME, seeded.garage_uuids[HOME.id],
+            seeded.payer_uuids[v2.payer_id], v2, now=NOW,
+        )
+    app.commit()
+    at = _at(date(2026, 5, 3))
+    for garage in (OTHER, HOME):
+        stored = covered_from_store(app, tenant_id, garage.id, PLATE, at)
+        pure = is_covered(garage=garage, agreements=(v1, v2), vehicle_identity=PLATE, at=at)
+        assert stored == pure, f"at {garage.id}: store {stored!r} != pure {pure!r}"
+    assert not covered_from_store(app, tenant_id, OTHER.id, PLATE, at).covered
+    assert covered_from_store(app, tenant_id, HOME.id, PLATE, at).agreement_version == 2
 
 
 @pytest.mark.guarantee("G39")

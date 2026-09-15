@@ -313,9 +313,15 @@ GUARANTEES: dict[str, str] = {
         "the agreement's HOME garage only: a run at a garage the agreement merely covers "
         "issues nothing for it, the first charge and the period invoice refuse another "
         "garage by name whether or not the agreement covers it, and the store refuses "
-        "to file an agreement under a garage that is not its home. The billing run and "
-        "the charge read the agreements BILLED at a garage through a loader that never "
-        "widens to the covered set; the coverage call reads a second loader."
+        "to file an agreement under a garage that is not its home. The billing run reads "
+        "the agreements BILLED at a garage through a loader that never widens to the "
+        "covered set and that chooses each agreement's LATEST version before it asks "
+        "where that version is homed -- so an agreement whose newer version moved its "
+        "home is billed at the new home only; the coverage call reads a second loader. "
+        "The charge reads the agreements the invoice's own lines name, each at its "
+        "latest version wherever it is homed now, and the garage does not enter that "
+        "read: an invoice issued before a home move is charged like one issued after, "
+        "and an invoice naming no loadable agreement is refused by name."
     ),
     "G41": (
         "Migration 0004 gives every EXISTING agreement version a covered set of exactly "

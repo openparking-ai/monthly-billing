@@ -50,16 +50,13 @@ from .exceptions_by_owner import (
 )
 from .store.postgres import tenant
 from .store.records import (
+    GarageNotFound,
     StoredGarage,
     load_agreements_covering_garage,
     load_garage,
     registration_for,
 )
 from .store.writes import as_uuid
-
-
-class GarageNotFound(LookupError):
-    """The garage id names no row in the store."""
 
 
 def covered_from_store(

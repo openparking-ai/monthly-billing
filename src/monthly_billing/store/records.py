@@ -82,7 +82,9 @@ from .writes import as_uuid, guarded_insert, guarded_update
 
 
 class GarageNotFound(LookupError):
-    """A garage id names no row in the store."""
+    """A garage id names no row in the store. The ONE class of that name: the
+    billing run, the store-backed coverage call and the store itself all raise
+    this one, so a caller catching it catches every garage-not-found."""
 
 
 #: The constraint whose violation MEANS "registered elsewhere" (migration 0003).
@@ -483,9 +485,14 @@ def load_garage(cursor: Any, external_id: str) -> StoredGarage | None:
 
 
 def load_payers_at_garage(cursor: Any, garage_uuid: Any) -> tuple[tuple[UUID, str], ...]:
-    """(payer uuid, payer id) for every payer with an agreement at the garage."""
+    """(payer uuid, payer id) for every payer with an agreement BILLED at the
+    garage -- judged on each agreement's LATEST version, like the loader above,
+    so a payer whose agreement moved its home away is not reported here on the
+    strength of the version that used to be."""
     cursor.execute(
-        "SELECT DISTINCT p.id, p.external_id FROM agreements a JOIN payers p ON p.id = a.payer_id "
+        "SELECT DISTINCT p.id, p.external_id FROM ("
+        "  SELECT DISTINCT ON (external_id) * FROM agreements ORDER BY external_id, version DESC"
+        ") a JOIN payers p ON p.id = a.payer_id "
         "WHERE a.garage_id = %s ORDER BY p.external_id",
         (as_uuid(garage_uuid),),
     )
@@ -507,18 +514,28 @@ def load_agreements_at_garage(
     agreement that covers this garage without being billed here is not
     returned, or the run would invoice it once per garage it is valid at. The
     access question is ``load_agreements_covering_garage``.
+
+    THE LATEST VERSION IS CHOSEN FIRST, and the garage and payer filters are
+    applied to THAT row -- never the other way round. Filtering on the garage
+    first and then taking the latest survivor returned, at a garage an
+    agreement's newer version had LEFT, the older version still homed there --
+    and the run invoiced one agreement at two garages. ``payer_id`` lives per
+    version too, so it is read off the latest row for the same reason.
     """
     cursor.execute(
         """
-        SELECT DISTINCT ON (a.external_id)
-               a.id, a.external_id, a.version, a.payer_id, p.external_id, a.spots,
+        SELECT a.id, a.external_id, a.version, a.payer_id, p.external_id, a.spots,
                a.monthly_price_minor, a.start_day, a.status, a.cancelled_effective_day,
                a.access_entry_from, a.access_exit_by, g.external_id
-        FROM agreements a
+        FROM (
+            SELECT DISTINCT ON (external_id) *
+            FROM agreements
+            ORDER BY external_id, version DESC
+        ) a
         JOIN payers p ON p.id = a.payer_id
         JOIN garages g ON g.id = a.garage_id
         WHERE a.garage_id = %s AND (%s::uuid IS NULL OR a.payer_id = %s::uuid)
-        ORDER BY a.external_id, a.version DESC
+        ORDER BY a.external_id
         """,
         (as_uuid(garage_uuid), None if payer_uuid is None else as_uuid(payer_uuid),
          None if payer_uuid is None else as_uuid(payer_uuid)),
@@ -551,6 +568,44 @@ def load_agreements_covering_garage(cursor: Any, garage_uuid: Any) -> tuple[Stor
         ORDER BY a.external_id
         """,
         (as_uuid(garage_uuid),),
+    )
+    return _as_stored(cursor, cursor.fetchall())
+
+
+def load_agreements_on_invoice(cursor: Any, invoice_uuid: Any) -> tuple[StoredAgreement, ...]:
+    """Every agreement the invoice's own lines name, at its LATEST version, as
+    engine values. THE CHARGE GATE'S DOOR -- and the garage does not enter it.
+
+    An invoice line records the version that PRICED it (G5); what a charge
+    needs is the agreement's mandate, and that is the LATEST version's -- a
+    payer who agreed to a card after the invoice was issued is charged on it,
+    and one who withdrew it is not. So the lines give the IDENTITIES and the
+    store gives each identity's latest version, wherever it is homed now: an
+    invoice issued before the agreement moved its home is charged exactly as
+    one issued after. A garage-keyed read here returned nothing for such an
+    invoice, and nothing is not a gate.
+    """
+    cursor.execute(
+        """
+        SELECT a.id, a.external_id, a.version, a.payer_id, p.external_id, a.spots,
+               a.monthly_price_minor, a.start_day, a.status, a.cancelled_effective_day,
+               a.access_entry_from, a.access_exit_by, g.external_id
+        FROM (
+            SELECT DISTINCT ON (external_id) *
+            FROM agreements
+            WHERE external_id IN (
+                SELECT named.external_id
+                FROM invoice_lines l
+                JOIN agreements named ON named.id = l.agreement_id
+                WHERE l.invoice_id = %s
+            )
+            ORDER BY external_id, version DESC
+        ) a
+        JOIN payers p ON p.id = a.payer_id
+        JOIN garages g ON g.id = a.garage_id
+        ORDER BY a.external_id
+        """,
+        (as_uuid(invoice_uuid),),
     )
     return _as_stored(cursor, cursor.fetchall())
 
@@ -684,6 +739,7 @@ __all__ = [
     "covered_garages_of",
     "load_agreements_at_garage",
     "load_agreements_covering_garage",
+    "load_agreements_on_invoice",
     "load_garage",
     "load_payers_at_garage",
     "payer_uuid_for",

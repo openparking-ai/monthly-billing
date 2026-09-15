@@ -276,15 +276,23 @@ def test_a_refusal_writes_nothing_so_a_caller_that_commits_after_it_has_committe
     assert registrations_at_garage_as_app(app, tenant_id, garage) == before
     v2 = simple_agreement(id="ag-A", version=2, payer_id="payer-a", vehicles=("CARA1", "CARB1"),
                           start_day=date(2026, 1, 5))
-    with tenant(app, tenant_id) as cursor:
-        with pytest.raises(Refused) as refused:
-            store_agreement(cursor, tenant_id, GARAGE, garage, payers["payer-a"], v2, now=DAY)
-        assert refused.value.code == REFUSAL_VEHICLE_ALREADY_REGISTERED
-        assert _regs_in_transaction(cursor) == before, (
-            "the refusal left the dropped car's registration deleted in the open transaction"
-        )
-        cursor.execute("SELECT max(version) FROM agreements WHERE external_id = 'ag-A'")
-        assert cursor.fetchone() == (1,)
+    try:
+        with tenant(app, tenant_id) as cursor:
+            with pytest.raises(Refused) as refused:
+                store_agreement(cursor, tenant_id, GARAGE, garage, payers["payer-a"], v2, now=DAY)
+            assert refused.value.code == REFUSAL_VEHICLE_ALREADY_REGISTERED
+            assert _regs_in_transaction(cursor) == before, (
+                "the refusal left the dropped car's registration deleted in the open transaction"
+            )
+            cursor.execute("SELECT max(version) FROM agreements WHERE external_id = 'ag-A'")
+            assert cursor.fetchone() == (1,)
+    except BaseException:
+        # A failed assertion here would leave the module's shared connection
+        # inside an aborted transaction; end it, so this test's red is this
+        # test's alone and the tests after it are measured rather than poisoned
+        # (the same shape test_g39 and test_g40 carry).
+        app.rollback()
+        raise
     app.commit()  # the caller that treats Refused as a per-agreement outcome and goes on
     assert registrations_at_garage_as_app(app, tenant_id, garage) == before
     assert query(

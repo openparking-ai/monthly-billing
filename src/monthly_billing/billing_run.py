@@ -52,7 +52,12 @@ from .garage import Garage
 from .invoice import Invoice, invoice_for_period
 from .money import NotMinorUnits
 from .store.postgres import tenant
-from .store.records import load_agreements_at_garage, load_garage, load_payers_at_garage
+from .store.records import (
+    GarageNotFound,
+    load_agreements_at_garage,
+    load_garage,
+    load_payers_at_garage,
+)
 from .store.writes import as_uuid, guarded_insert
 
 
@@ -135,10 +140,6 @@ class RunReport:
             for line in self.lines
         )
         return f"{head}\n{body}" if body else f"{head}\n  no payer has an agreement here"
-
-
-class GarageNotFound(LookupError):
-    """The garage id names no row in the store."""
 
 
 def invoice_reference(garage: Garage, period: BillingPeriod, payer_id: str) -> str:

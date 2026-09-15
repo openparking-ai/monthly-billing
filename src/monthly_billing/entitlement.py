@@ -23,8 +23,10 @@ copies of it would drift and the drifted one would be read at a barrier.
 His ruling. The store registers a vehicle identity to one agreement per garage
 and refuses a second; so the agreements this call is handed should list a
 vehicle under ONE agreement identity, at whatever versions. Among versions of
-one identity the latest wins. If a library caller hands in two different
-identities listing the same vehicle, this call REFUSES by name
+one identity the latest wins -- chosen BEFORE the coverage question is asked of
+it, so a garage a newer version dropped is not answered on an older one. If a
+library caller hands in two different identities listing the same vehicle, this
+call REFUSES by name
 (``REFUSAL_VEHICLE_ON_TWO_AGREEMENTS``) rather than picking one: the two may
 disagree about coverage, and a pick is a wrong answer given confidently. The
 refusal is a first-class third result beside covered and not-covered.
@@ -160,15 +162,23 @@ def is_covered(
     tz = zone(garage.timezone)
     today = day_of(at, tz)
 
+    # Among the versions of one identity the LATEST wins -- chosen BEFORE the
+    # coverage filter, never after it. Filtering first and then taking the
+    # latest survivor answered a garage the newer version DROPPED on the
+    # strength of the older version that listed it: the rule the store's
+    # access door already states (records.load_agreements_covering_garage),
+    # brought here so that one rule lives in one shape.
     mine = [
         a
-        for a in agreements
+        for a in _latest_per_identity(agreements)
         if a.covers_garage(garage.id)
         and any(garage.identities_match(v, vehicle_identity) for v in a.vehicles)
     ]
     if not mine:
         return _not_covered(NOT_COVERED_NO_AGREEMENT)
 
+    # Judged on the latest versions: an identity whose newer version dropped
+    # the vehicle no longer lists it, so it is not a second claimant.
     identities = sorted({a.id for a in mine})
     if len(identities) > 1:
         raise _Refused(
@@ -176,8 +186,8 @@ def is_covered(
             f"vehicle {vehicle_identity!r} at garage {garage.id!r} is listed by "
             f"agreements {', '.join(repr(i) for i in identities)}.",
         )
-    # One identity; among its versions the latest wins, and the answer cites it.
-    agreement = max(mine, key=lambda a: a.version)
+    # One identity, one version -- its latest -- and the answer cites it.
+    (agreement,) = mine
 
     cited = {
         "agreement_id": agreement.id,
@@ -242,6 +252,17 @@ def is_covered(
         unchecked=unchecked,
         **cited,
     )
+
+
+def _latest_per_identity(agreements: tuple[Agreement, ...]) -> tuple[Agreement, ...]:
+    """One agreement per identity: its highest version among those handed in.
+    Order of the input is irrelevant to the result."""
+    latest: dict[str, Agreement] = {}
+    for a in agreements:
+        held = latest.get(a.id)
+        if held is None or a.version > held.version:
+            latest[a.id] = a
+    return tuple(latest.values())
 
 
 def _home_of(agreement: Agreement, garage: Garage, home_garage: Garage | None) -> Garage:
