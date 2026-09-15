@@ -337,7 +337,10 @@ GUARANTEES: dict[str, str] = {
         "its home garage, read from agreements.garage_id, and asserts the placed rows "
         "against the pre-migration count rather than a literal. A version whose home "
         "cannot be placed fails the migration BY NAME -- external id and version -- "
-        "before a row is written, and the whole migration rolls back."
+        "before a row is written, and the whole migration rolls back. It refuses BY "
+        "NAME, before its BEGIN, a role that cannot see every row -- neither superuser "
+        "nor BYPASSRLS -- because under such a role the backfill would place nothing "
+        "and its count check would pass, zero against zero."
     ),
     "G42": (
         "ONE AGREEMENT, ONE REGISTRAR. An agreement STATES who writes its "
@@ -360,7 +363,24 @@ GUARANTEES: dict[str, str] = {
         "has today -- this module -- and asserts the stated rows against the "
         "pre-migration count rather than a literal: a default that left any "
         "version stating otherwise fails the migration and the whole file rolls "
-        "back. No version is left unstated."
+        "back. No version is left unstated. The file refuses BY NAME, before its "
+        "BEGIN, a role that cannot see every row of a FORCE-RLS table -- neither "
+        "superuser nor BYPASSRLS -- because under such a role its count check "
+        "compares zero with zero and a flipped default applies with nothing done; "
+        "0004 carries the same refusal for the same reason."
+    ),
+    "G44": (
+        "THE BARRIER READS THE AGREEMENT'S REGISTER, AND WHO KEEPS IT IS STATED. "
+        "Which vehicle identities belong to an agreement at a garage is decided in "
+        "ONE place for both coverage doors: the version's own vehicle list under "
+        "this module -- the answer it always gave, field for field -- and the "
+        "store's registration rows under an OUTSIDE registrar, which the store-backed "
+        "door supplies to the pure call as a STATED parameter, empty or not. The pure "
+        "call refuses by name an outside registrar's agreement handed in without "
+        "them, never answering 'no agreement' for a car it could not look up; a car "
+        "with no row is not covered; the money state at the home reaches a "
+        "door-registered car at every door it covers; and the money doors read none "
+        "of this."
     ),
 }
 

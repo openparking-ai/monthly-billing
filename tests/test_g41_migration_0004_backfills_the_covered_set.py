@@ -37,10 +37,14 @@ from monthly_billing.entitlement_store import covered_from_store
 from monthly_billing.store.postgres import set_tenant
 from monthly_billing.store.records import store_garage, store_payer
 from store_harness import (
+    BLIND_OWNER,
     DSN,
     app_connection,
     apply_migration,
+    as_blind_owner,
+    cluster_lock,
     migrate,
+    migration_path,
     needs_postgres,
     new_tenant,
 )
@@ -158,6 +162,39 @@ def test_every_existing_version_gets_exactly_its_home_asserted_against_the_rows_
         )
     finally:
         app.close()
+
+
+@pytest.mark.guarantee("G41")
+def test_a_role_that_cannot_see_every_row_is_refused_by_name_before_anything_is_written(
+    schema_0003,
+):
+    """The L3's F-A sibling, measured on main: `agreements` is FORCE-RLS, so an
+    owner that is neither superuser nor BYPASSRLS reads ZERO rows -- the
+    backfill placed 0 rows for 1 version and its count check passed, 0 = 0.
+    The file now refuses that role by name, first, and writes nothing."""
+    import psycopg
+
+    owner = schema_0003
+    tenant_id = new_tenant(owner)
+    _seed_through_0003(owner, tenant_id, versions=(("ag-A", 1, HOME.id),))
+    # The control that the role is blind: as it, the rows are not there.
+    with as_blind_owner(owner) as blind:
+        blind.execute("SELECT count(*) FROM agreements")
+        assert blind.fetchone() == (0,)
+        with cluster_lock(DSN), pytest.raises(psycopg.errors.RaiseException) as refused:
+            try:
+                blind.execute(migration_path("0004").read_text())
+            except Exception:
+                blind.execute("ROLLBACK")
+                raise
+    message = str(refused.value)
+    assert f"running as role {BLIND_OWNER}" in message and "BYPASSRLS" in message, message
+    assert "Nothing was written" in message
+    assert _owner_rows(owner, "SELECT to_regclass('agreement_garages')") == [(None,)]
+    # The real owner sees the row, and the shipped file places it.
+    assert _owner_rows(owner, "SELECT count(*) FROM agreements") == [(1,)]
+    apply_migration(owner, "0004")
+    assert _owner_rows(owner, "SELECT count(*) FROM agreement_garages") == [(1,)]
 
 
 @pytest.mark.guarantee("G41")

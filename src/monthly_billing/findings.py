@@ -69,6 +69,10 @@ REFUSAL_HOME_GARAGE_NOT_GIVEN = "REFUSAL_HOME_GARAGE_NOT_GIVEN"
 REFUSAL_INVOICE_NAMES_NO_AGREEMENT = "REFUSAL_INVOICE_NAMES_NO_AGREEMENT"
 REFUSAL_AGREEMENT_HOME_MOVED = "REFUSAL_AGREEMENT_HOME_MOVED"
 REFUSAL_REGISTRAR_IS_THIS_MODULE = "REFUSAL_REGISTRAR_IS_THIS_MODULE"
+REFUSAL_REGISTRAR_IS_OUTSIDE = "REFUSAL_REGISTRAR_IS_OUTSIDE"
+REFUSAL_REGISTRAR_CHANGED = "REFUSAL_REGISTRAR_CHANGED"
+REFUSAL_REGISTRATIONS_NOT_GIVEN = "REFUSAL_REGISTRATIONS_NOT_GIVEN"
+REFUSAL_VEHICLE_NOT_REGISTERED = "REFUSAL_VEHICLE_NOT_REGISTERED"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -215,6 +219,41 @@ REFUSALS: dict[str, str] = {
         "by name instead. To move a car onto this agreement, store a version that "
         "lists it; to hand the register to an outside registrar, store a version "
         "that says so."
+    ),
+    REFUSAL_REGISTRAR_IS_OUTSIDE: (
+        "This agreement's registrations are written by an OUTSIDE registrar, one "
+        "vehicle at a time through the registration door, and the version path "
+        "writes registrations only for an agreement whose registrar is this "
+        "module. One agreement, one registrar: writing this agreement's rows from a "
+        "version's list would take out every car the outside registrar put on, so "
+        "the writer refuses by name instead. Storing a version of such an agreement "
+        "is ordinary and writes none of them; only a direct call to the writer "
+        "lands here."
+    ),
+    REFUSAL_REGISTRAR_CHANGED: (
+        "This version names a different registrar from the versions the store "
+        "already holds for the same agreement. Handing the register from this "
+        "module to an outside registrar, or back, is an operation nobody designed: "
+        "nothing says what becomes of the registrations already written by the "
+        "other one. It is refused by name rather than stored -- as a version that "
+        "would move the home is -- and a different registrar is a different "
+        "agreement."
+    ),
+    REFUSAL_REGISTRATIONS_NOT_GIVEN: (
+        "The coverage question was asked about an agreement whose registrar is "
+        "OUTSIDE, and the store's registrations were not supplied. Such an "
+        "agreement lists no vehicles on its document by rule; its register is the "
+        "registration rows the outside registrar wrote through the door, and a "
+        "call without them cannot tell a registered car from one nobody "
+        "registered. Refused by name rather than answered 'no agreement' for "
+        "every car; the store-backed call supplies them."
+    ),
+    REFUSAL_VEHICLE_NOT_REGISTERED: (
+        "This vehicle identity is registered to this agreement at no garage the "
+        "agreement covers, so there is nothing to release. For a register kept by "
+        "one writer a release that finds no row means the two registers have "
+        "diverged, which is the one thing the single-writer rule exists to "
+        "surface -- so it is refused by name rather than reported as done."
     ),
     REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL: (
         "This adjustment would take the invoice total below zero. A waived fee or "

@@ -67,8 +67,12 @@ from monthly_billing.findings import (  # noqa: E402
     REFUSAL_ATTEMPT_UNRESOLVED,
     REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE,
     REFUSAL_NOTHING_OWED,
+    REFUSAL_REGISTRAR_CHANGED,
+    REFUSAL_REGISTRAR_IS_OUTSIDE,
     REFUSAL_REGISTRAR_IS_THIS_MODULE,
+    REFUSAL_REGISTRATIONS_NOT_GIVEN,
     REFUSAL_REVERSAL_REASON_MISMATCH,
+    REFUSAL_VEHICLE_NOT_REGISTERED,
     REFUSAL_VEHICLE_ON_TWO_AGREEMENTS,
     REFUSALS,
     UNPAID_IS_THE_PAYERS,
@@ -210,8 +214,26 @@ def _registrar_lines() -> list[str]:
         "set under each garage's own identity rule, refuses at every covered garage "
         "before it writes anywhere, and answers with the identity AS STORED per garage. "
         "Both halves of the door refuse by name an agreement whose registrations this "
-        f"module writes (`{REFUSAL_REGISTRAR_IS_THIS_MODULE}`). A document that says "
-        f"nothing is `{default.value}`; the mode is never inferred from the list.",
+        f"module writes (`{REFUSAL_REGISTRAR_IS_THIS_MODULE}`), and the version path's "
+        "writer refuses by name an agreement an outside registrar writes "
+        f"(`{REFUSAL_REGISTRAR_IS_OUTSIDE}`) -- one check, reached from every writer. "
+        f"A document that says nothing is `{default.value}`; the mode is never inferred "
+        "from the list, and it never changes between versions "
+        f"(`{REFUSAL_REGISTRAR_CHANGED}`).",
+        "",
+        "**What the barrier reads** is the agreement's REGISTER, decided in one place "
+        f"for both coverage doors: under `{module.value}` the version's own vehicle "
+        f"list; under `{outside.value}` the registration rows the door wrote. The "
+        "store-backed call supplies those rows to the pure call as a stated "
+        "parameter (`registrations`), empty or not; the pure call, which has no "
+        "database, refuses by name an outside registrar's agreement handed in "
+        f"without them (`{REFUSAL_REGISTRATIONS_NOT_GIVEN}`) rather than answering "
+        "'no agreement' for a car it could not look up. A car with no row is not "
+        "covered; a self-written agreement answers exactly as it did before the "
+        "parameter existed. Storing a version that drops a covered garage releases "
+        "the agreement's rows there under either registrar (the covered set is the "
+        "version's own fact), and releasing an identity that holds no row at any "
+        f"covered garage is refused by name (`{REFUSAL_VEHICLE_NOT_REGISTERED}`).",
     ]
     return lines
 

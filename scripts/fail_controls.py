@@ -1362,8 +1362,8 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
     "G40/home-move-allowed": (
         "tests/test_g40_money_stays_at_the_home_garage.py",
         "store/records.py",
-        "    if home_already is not None and home_already != garage_uuid:",
-        "    if False:  # PLANTED: the home may move",
+        "        if home_already != garage_uuid:",
+        "        if False:  # PLANTED: the home may move",
         "THE GATE'S B1 PLANTED BACK: a later version billed at another garage is "
         "stored, the agreement's home moves, and the old home's unpaid invoice and "
         "the owner's block on it stop reaching every barrier while the charge still "
@@ -1553,21 +1553,23 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
     "G42/switch": (
         "tests/test_g42_the_registration_door_and_the_single_writer.py",
         "store/records.py",
-        "    if agreement.registrar is Registrar.THIS_MODULE:",
-        "    if True:  # PLANTED: the module registers every agreement's list, whoever owns it",
+        "    if agreement.registrar is Registrar.OUTSIDE:",
+        "    if False:  # PLANTED: every agreement's version walks the writer, whoever owns it",
         "THE SWITCH PLANTED AWAY: storing a version of an outside registrar's agreement "
-        "walks the version path with its empty list, and the per-garage release "
-        "deletes every row the outside registrar put there through the door -- two "
-        "writers of one agreement's rows, and the module's empty list wins",
+        "hands its empty list to the version path's writer -- which now refuses it by "
+        "name, so the version cannot be stored at all: the switch is where the store "
+        "decides not to write, and the writer's own check is the backstop behind it",
     ),
     "G42/door-any-registrar": (
         "tests/test_g42_the_registration_door_and_the_single_writer.py",
         "store/records.py",
-        "    if registrar is not Registrar.OUTSIDE:",
-        "    if False:  # PLANTED: the door takes any agreement",
-        "both halves of the door accept an agreement whose registrations this module "
-        "writes, so a car the version's list does not name is registered beside the "
-        "list and released from under it -- the single-writer rule with no mechanism",
+        source("    if registrar is expected:", "        return"),
+        source("    if True:  # PLANTED: any registrar, at every writer", "        return"),
+        "THE ONE CHECK PLANTED AWAY: both halves of the door accept an agreement whose "
+        "registrations this module writes, AND the version path's writer accepts an "
+        "outside registrar's agreement -- one plant, and every writer stops asking "
+        "who owns the rows; a control that reddened only one of them would be two "
+        "implementations again",
     ),
     "G42/list-accepted": (
         "tests/test_g42_the_registration_door_and_the_single_writer.py",
@@ -1684,6 +1686,137 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "the migration no longer asserts the stated rows against the version rows, "
         "so a wrong default commits silently -- the test that applies a copy with the "
         "default flipped and requires the count to fail it goes red",
+    ),
+    "G43/blind-owner-allowed": (
+        "tests/test_g43_migration_0005_states_the_registrar.py",
+        "migrations/0005_agreements_registrar.sql",
+        "  IF NOT coalesce(sees_every_row, false) THEN",
+        "  IF false THEN  -- PLANTED: any role may run this, blind or not",
+        "THE L3's F-A PLANTED BACK: an owner that is neither superuser nor BYPASSRLS "
+        "reads zero version rows, the count check compares 0 with 0, and the flipped "
+        "default APPLIES with every version reading 'outside' on disk -- the test that "
+        "runs the file as that role and requires the refusal by name goes red",
+    ),
+    "G41/blind-owner-allowed": (
+        "tests/test_g41_migration_0004_backfills_the_covered_set.py",
+        "migrations/0004_agreement_garages.sql",
+        "  IF NOT coalesce(sees_every_row, false) THEN",
+        "  IF false THEN  -- PLANTED: any role may run this, blind or not",
+        "THE L3's F-A SIBLING PLANTED BACK: under an owner that cannot see every row "
+        "the backfill places 0 rows for 1 version and its count check passes, 0 = 0 -- "
+        "every pre-existing version left without its home row; the test that runs the "
+        "file as that role and requires the refusal by name goes red",
+    ),
+    "G42/registrar-change-allowed": (
+        "tests/test_g42_the_registration_door_and_the_single_writer.py",
+        "store/records.py",
+        "        if registrar_already is not agreement.registrar:",
+        "        if False:  # PLANTED: the register may change hands",
+        "F3 PLANTED BACK: a version naming the other registrar is stored, and nothing "
+        "says what becomes of the rows the first writer wrote -- an operation nobody "
+        "designed, accepted silently",
+    ),
+    "G42/dropped-garage-kept-under-outside": (
+        "tests/test_g42_the_registration_door_and_the_single_writer.py",
+        "store/records.py",
+        source(
+            "        _release_at_dropped_garages(cursor, agreement.id, covered)",
+            "    else:",
+        ),
+        source(
+            "        pass  # PLANTED: an outside registrar's rows stay at a dropped garage",
+            "    else:",
+        ),
+        "F2 PLANTED BACK: the version that drops a garage leaves the outside registrar's "
+        "rows there, where the door -- which fans out over the CURRENT covered set -- can "
+        "never reach them again",
+    ),
+    "G42/release-no-row-silent": (
+        "tests/test_g42_the_registration_door_and_the_single_writer.py",
+        "store/records.py",
+        source(
+            "    if not released:",
+            "        raise Refused(",
+            "            REFUSAL_VEHICLE_NOT_REGISTERED,",
+        ),
+        source(
+            "    if False:  # PLANTED: a release that found no row is reported as done",
+            "        raise Refused(",
+            "            REFUSAL_VEHICLE_NOT_REGISTERED,",
+        ),
+        "F4 PLANTED BACK: releasing an identity the agreement holds at no covered garage "
+        "answers with an empty tuple and exit 0, and the divergence between the two "
+        "registers that the single-writer rule exists to surface goes unreported",
+    ),
+    "G18/door-commands": (
+        "tests/test_g42_the_registration_door_and_the_single_writer.py",
+        "cli.py",
+        "    except ValueError as bad:",
+        source(
+            "    except ValueError as bad:  # PLANTED: the sentence is not rendered",
+            "        raise",
+        ),
+        "the two door commands show a traceback for a vehicle identity that normalises "
+        "to nothing under the garage's rule, instead of the refusal sentence and exit 2 "
+        "every other refusal on the command line gets",
+    ),
+    "G44/reads-the-list": (
+        "tests/test_g44_the_barrier_reads_the_register.py",
+        "entitlement.py",
+        "    if agreement.registrar is not Registrar.OUTSIDE:",
+        "    if True:  # PLANTED: B1 -- the version's list, whoever writes the rows",
+        "THE L3's B1 PLANTED BACK: both coverage doors read the version's own vehicle "
+        "list, which an outside registrar's agreement leaves empty by rule, so a car the "
+        "door registered reads NO_AGREEMENT at every garage with the stranger's exact "
+        "reason string -- the money state never reaches a connected monthly",
+    ),
+    "G44/refusal-skipped": (
+        "tests/test_g44_the_barrier_reads_the_register.py",
+        "entitlement.py",
+        source(
+            "    if registrations is None:",
+            "        raise _Refused(",
+        ),
+        source(
+            "    if registrations is None:",
+            "        return ()  # PLANTED: an unasked question is answered 'no agreement'",
+            "    if False:",
+            "        raise _Refused(",
+        ),
+        "the pure call handed an outside registrar's agreement WITHOUT the register "
+        "answers 'no agreement' for every car instead of refusing by name -- the "
+        "fail-open shape B1 was",
+    ),
+    "G44/every-car-covered": (
+        "tests/test_g44_the_barrier_reads_the_register.py",
+        "entitlement.py",
+        source(
+            "        and any(",
+            "            garage.identities_match(v, vehicle_identity)",
+            "            for v in register_of(a, garage, registrations)",
+            "        )",
+        ),
+        source(
+            "        and (a.registrar is Registrar.OUTSIDE or any(  # PLANTED: every car is theirs",
+            "            garage.identities_match(v, vehicle_identity)",
+            "            for v in register_of(a, garage, registrations)",
+            "        ))",
+        ),
+        "THE OVER-REACH: an outside registrar's agreement covers every car presented at "
+        "a garage it covers, registered or not -- a fix that made every car covered "
+        "would be worse than the defect, and the no-row control is what catches it",
+    ),
+    "G44/store-passes-nothing": (
+        "tests/test_g44_the_barrier_reads_the_register.py",
+        "entitlement_store.py",
+        (
+            "        registrations: dict[str, tuple[str, ...]] = "
+            "{holder: (normalised,)} if holder else {}"
+        ),
+        "        registrations = None  # PLANTED: the store asks without its own rows",
+        "the store-backed door hands the pure call no register, so a car the door "
+        "registered is REFUSED by name at the barrier rather than answered -- fail "
+        "closed, and still not the answer the lane needs",
     ),
 }
 

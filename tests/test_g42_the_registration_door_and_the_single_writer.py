@@ -59,17 +59,23 @@ from monthly_billing.agreement import (
 )
 from monthly_billing.cli import main
 from monthly_billing.findings import (
+    REFUSAL_REGISTRAR_CHANGED,
+    REFUSAL_REGISTRAR_IS_OUTSIDE,
     REFUSAL_REGISTRAR_IS_THIS_MODULE,
     REFUSAL_VEHICLE_ALREADY_REGISTERED,
+    REFUSAL_VEHICLE_NOT_REGISTERED,
     Refused,
 )
 from monthly_billing.store.postgres import tenant
 from monthly_billing.store.records import (
     AgreementNotFound,
     RegisteredIdentity,
+    StoredGarage,
+    covered_garages_of,
     load_agreements_at_garage,
     load_agreements_covering_garage,
     register_from_outside,
+    register_vehicles,
     registrations_at_garage,
     release_from_outside,
     store_agreement,
@@ -81,7 +87,14 @@ OTHER = MULTI_OTHER()  # Phoenix, JPY, EXACT
 HOME_TZ = ZoneInfo(HOME.timezone)
 DAY = datetime(2026, 5, 10, 9, 0, tzinfo=HOME_TZ)
 
-OUTSIDE = outside_registrar_agreement(start_day=date(2026, 1, 5))
+OUTSIDE_ID = "ag-outside"
+
+
+def outside(**overrides: object):
+    """The outside registrar's agreement, built INSIDE each test rather than at
+    import: a plant that makes an empty list refuse must redden the tests that
+    depend on it, by their subject, not the module's collection."""
+    return outside_registrar_agreement(**{"start_day": date(2026, 1, 5), **overrides})
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +187,7 @@ def _release(app, tenant_id, agreement_id, identity):
 def test_storing_an_outside_registrars_version_writes_no_registration_and_releases_none(
     app, tenant_id
 ):
-    seeded = _seed(app, tenant_id, OUTSIDE)
+    seeded = _seed(app, tenant_id, outside())
     assert query(app, tenant_id, "SELECT registrar FROM agreements") == [("outside",)]
     assert query(app, tenant_id, "SELECT count(*) FROM agreement_vehicles") == [(0,)]
     assert _rows(app, tenant_id, seeded, HOME) == [] and _rows(app, tenant_id, seeded, OTHER) == []
@@ -182,14 +195,14 @@ def test_storing_an_outside_registrars_version_writes_no_registration_and_releas
     # The switch, the half that matters: with a car on through the door, a
     # NEW VERSION of the outside agreement releases nothing -- the version path
     # would have deleted every row not on its (empty) list.
-    _register(app, tenant_id, OUTSIDE.id, "AB-123")
+    _register(app, tenant_id, OUTSIDE_ID, "AB-123")
     v2 = outside_registrar_agreement(
         version=2, monthly_price_minor=13000, start_day=date(2026, 1, 5)
     )
     with tenant(app, tenant_id) as cursor:
         store_agreement(
             cursor, tenant_id, HOME, seeded.garage_uuids[HOME.id],
-            seeded.payer_uuids[OUTSIDE.payer_id], v2, now=DAY,
+            seeded.payer_uuids[outside().payer_id], v2, now=DAY,
         )
     app.commit()
     assert _rows(app, tenant_id, seeded, HOME) == [("ab123", "ag-outside")]
@@ -201,13 +214,13 @@ def test_storing_an_outside_registrars_version_writes_no_registration_and_releas
 def test_an_outside_registrars_version_stored_with_no_vehicles_loads_back(app, tenant_id):
     """The round trip: the empty list is legal on the way in AND on the way
     out, at the one hydration site every loader shares."""
-    seeded = _seed(app, tenant_id, OUTSIDE)
+    seeded = _seed(app, tenant_id, outside())
     with tenant(app, tenant_id) as cursor:
         (billed,) = load_agreements_at_garage(cursor, seeded.garage_uuids[HOME.id])
         (covering,) = load_agreements_covering_garage(cursor, seeded.garage_uuids[OTHER.id])
     app.rollback()
     for item in (billed, covering):
-        assert item.agreement.id == OUTSIDE.id
+        assert item.agreement.id == OUTSIDE_ID
         assert item.agreement.registrar is Registrar.OUTSIDE
         assert item.agreement.vehicles == ()
         assert set(item.agreement.covered_garage_ids) == {HOME.id, OTHER.id}
@@ -218,8 +231,8 @@ def test_an_outside_registrars_version_stored_with_no_vehicles_loads_back(app, t
 def test_the_door_registers_at_every_covered_garage_under_its_rule_and_says_what_it_stored(
     app, tenant_id
 ):
-    seeded = _seed(app, tenant_id, OUTSIDE)
-    stored = _register(app, tenant_id, OUTSIDE.id, "AB-123")
+    seeded = _seed(app, tenant_id, outside())
+    stored = _register(app, tenant_id, OUTSIDE_ID, "AB-123")
     # Per covered garage, ordered by garage id: the exact garage kept the
     # dashes and the case, the folded one did not.
     assert stored == (
@@ -231,7 +244,7 @@ def test_the_door_registers_at_every_covered_garage_under_its_rule_and_says_what
     # The same car spelt the other way: ONE row at the folded garage (already
     # this agreement's, left alone), a SECOND at the exact one -- and the
     # answer is what tells the registrar on the other side that it happened.
-    again = _register(app, tenant_id, OUTSIDE.id, "ab123")
+    again = _register(app, tenant_id, OUTSIDE_ID, "ab123")
     assert again == (RegisteredIdentity(OTHER.id, "ab123"), RegisteredIdentity(HOME.id, "ab123"))
     assert _rows(app, tenant_id, seeded, HOME) == [("ab123", "ag-outside")]
     assert _rows(app, tenant_id, seeded, OTHER) == [
@@ -239,7 +252,7 @@ def test_the_door_registers_at_every_covered_garage_under_its_rule_and_says_what
     ]
     # And the silent split under the exact rule: a trailing space is a
     # second car there and the same car at the folded garage.
-    split = _register(app, tenant_id, OUTSIDE.id, "ABC123 ")
+    split = _register(app, tenant_id, OUTSIDE_ID, "ABC123 ")
     assert split == (RegisteredIdentity(OTHER.id, "ABC123 "), RegisteredIdentity(HOME.id, "abc123"))
     assert ("ABC123 ", "ag-outside") in _rows(app, tenant_id, seeded, OTHER)
 
@@ -252,9 +265,9 @@ def test_the_door_refuses_at_any_covered_garage_before_it_writes_anywhere(app, t
         id="ag-B", payer_id="payer-b", garage_id=OTHER.id, vehicles=("SHARED-1",),
         start_day=date(2026, 1, 5),
     )
-    seeded = _seed(app, tenant_id, OUTSIDE, holder)
+    seeded = _seed(app, tenant_id, outside(), holder)
     with pytest.raises(Refused) as refused:
-        _register(app, tenant_id, OUTSIDE.id, "SHARED-1")
+        _register(app, tenant_id, OUTSIDE_ID, "SHARED-1")
     assert refused.value.code == REFUSAL_VEHICLE_ALREADY_REGISTERED
     assert f"garage {OTHER.id!r}" in refused.value.detail and "'ag-B'" in refused.value.detail
     assert "active" in refused.value.detail
@@ -286,22 +299,21 @@ def test_both_halves_of_the_door_refuse_an_agreement_whose_registrations_this_mo
 @pytest.mark.guarantee("G42")
 @store_backed
 def test_the_door_releases_one_vehicle_at_every_covered_garage(app, tenant_id):
-    seeded = _seed(app, tenant_id, OUTSIDE)
-    _register(app, tenant_id, OUTSIDE.id, "AB-123")
-    _register(app, tenant_id, OUTSIDE.id, "CD-456")
-    released = _release(app, tenant_id, OUTSIDE.id, "ab-123")  # spelt as the registrar has it
-    # The answer is what was looked for, per garage, in that garage's form.
-    assert released == (
-        RegisteredIdentity(OTHER.id, "ab-123"), RegisteredIdentity(HOME.id, "ab123"),
-    )
-    # Folded: 'ab-123' IS 'AB-123', released. Exact: it is another car, and
-    # 'AB-123' stays -- the answer above is how the registrar learns that.
+    seeded = _seed(app, tenant_id, outside())
+    _register(app, tenant_id, OUTSIDE_ID, "AB-123")
+    _register(app, tenant_id, OUTSIDE_ID, "CD-456")
+    released = _release(app, tenant_id, OUTSIDE_ID, "ab-123")  # spelt as the registrar has it
+    # The answer is where a row WENT, per garage, in that garage's form. Folded:
+    # 'ab-123' IS 'AB-123', released. Exact: it is another car, no row went, and
+    # the garage is absent from the answer -- how the registrar learns that
+    # 'AB-123' still stands there.
+    assert released == (RegisteredIdentity(HOME.id, "ab123"),)
     assert _rows(app, tenant_id, seeded, HOME) == [("cd456", "ag-outside")]
     assert _rows(app, tenant_id, seeded, OTHER) == [
         ("AB-123", "ag-outside"), ("CD-456", "ag-outside"),
     ]
-    gone = _release(app, tenant_id, OUTSIDE.id, "AB-123")
-    assert gone == (RegisteredIdentity(OTHER.id, "AB-123"), RegisteredIdentity(HOME.id, "ab123"))
+    gone = _release(app, tenant_id, OUTSIDE_ID, "AB-123")
+    assert gone == (RegisteredIdentity(OTHER.id, "AB-123"),)  # 'ab123' had already gone
     assert _rows(app, tenant_id, seeded, OTHER) == [("CD-456", "ag-outside")]
     # There is no end date: the row is gone, and the car is another agreement's
     # to register.
@@ -321,19 +333,19 @@ def test_a_cancelled_holders_row_passes_to_the_outside_registrars_agreement_on_i
         id="ag-A", payer_id="payer-a", garage_id=HOME.id, vehicles=("HAND-1",),
         start_day=date(2026, 1, 5), status=Status.CANCELLED, cancelled_effective_day=frees,
     )
-    seeded = _seed(app, tenant_id, OUTSIDE, cancelled)
+    seeded = _seed(app, tenant_id, outside(), cancelled)
     (row_before,) = query(
         app, tenant_id, "SELECT id FROM vehicle_registrations WHERE identity_normalised = 'hand1'"
     )
     eve = datetime(2026, 5, 31, 23, 0, tzinfo=HOME_TZ)
     with pytest.raises(Refused) as refused:
-        _register(app, tenant_id, OUTSIDE.id, "HAND-1", now=eve)
+        _register(app, tenant_id, OUTSIDE_ID, "HAND-1", now=eve)
     assert refused.value.code == REFUSAL_VEHICLE_ALREADY_REGISTERED
     assert "'ag-A'" in refused.value.detail and str(frees) in refused.value.detail
     assert _rows(app, tenant_id, seeded, HOME) == [("hand1", "ag-A")]
 
     day = datetime(2026, 6, 1, 0, 30, tzinfo=HOME_TZ)
-    passed = _register(app, tenant_id, OUTSIDE.id, "HAND-1", now=day)
+    passed = _register(app, tenant_id, OUTSIDE_ID, "HAND-1", now=day)
     assert passed == (RegisteredIdentity(OTHER.id, "HAND-1"), RegisteredIdentity(HOME.id, "hand1"))
     assert _rows(app, tenant_id, seeded, HOME) == [("hand1", "ag-outside")]
     assert _rows(app, tenant_id, seeded, OTHER) == [("HAND-1", "ag-outside")]
@@ -362,21 +374,137 @@ def test_the_self_written_path_is_untouched(app, tenant_id):
 
 @pytest.mark.guarantee("G42")
 @store_backed
+def test_the_version_paths_writer_refuses_an_outside_registrars_agreement_by_name(
+    app, tenant_id
+):
+    """The exported writer carries the check itself: called directly on an
+    outside registrar's agreement it refuses by name and touches no row --
+    the L3's F-B, where it deleted every row the door had written."""
+    seeded = _seed(app, tenant_id, outside())
+    _register(app, tenant_id, OUTSIDE_ID, "DOOR-1")
+    before = (_rows(app, tenant_id, seeded, HOME), _rows(app, tenant_id, seeded, OTHER))
+    assert before == ([("door1", OUTSIDE_ID)], [("DOOR-1", OUTSIDE_ID)])
+    with tenant(app, tenant_id) as cursor:
+        covered = covered_garages_of(
+            cursor, outside(), home=StoredGarage(seeded.garage_uuids[HOME.id], HOME)
+        )
+        with pytest.raises(Refused) as refused:
+            register_vehicles(cursor, tenant_id, covered, outside(), now=DAY)
+    app.rollback()
+    assert refused.value.code == REFUSAL_REGISTRAR_IS_OUTSIDE
+    assert f"{OUTSIDE_ID!r}" in refused.value.detail and "'outside'" in refused.value.detail
+    assert (_rows(app, tenant_id, seeded, HOME), _rows(app, tenant_id, seeded, OTHER)) == before
+
+
+@pytest.mark.guarantee("G42")
+@store_backed
+def test_a_version_that_drops_a_garage_releases_the_doors_rows_there_and_nowhere_else(
+    app, tenant_id
+):
+    """F2: which garages the agreement covers is the version's fact whoever
+    writes the cars, so the outside registrar's rows at a dropped garage go
+    with the garage -- and the rows at a garage still covered stay, because
+    the release BY IDENTITY is the door's alone."""
+    seeded = _seed(app, tenant_id, outside())
+    _register(app, tenant_id, OUTSIDE_ID, "AB-123")
+    v2 = outside(version=2, covered_garage_ids=(HOME.id,))
+    with tenant(app, tenant_id) as cursor:
+        store_agreement(
+            cursor, tenant_id, HOME, seeded.garage_uuids[HOME.id],
+            seeded.payer_uuids[outside().payer_id], v2, now=DAY,
+        )
+    app.commit()
+    assert _rows(app, tenant_id, seeded, OTHER) == []
+    assert _rows(app, tenant_id, seeded, HOME) == [("ab123", OUTSIDE_ID)]
+
+
+@pytest.mark.guarantee("G42")
+@store_backed
+def test_a_version_that_changes_the_registrar_is_refused_by_name_and_stores_nothing(
+    app, tenant_id
+):
+    """F3: handing the register from one writer to the other is an operation
+    nobody designed -- the home move's case -- and it is refused both ways."""
+    mine = multi_garage_agreement(start_day=date(2026, 1, 5))
+    seeded = _seed(app, tenant_id, outside(), mine)
+    _register(app, tenant_id, OUTSIDE_ID, "AB-123")
+    to_module = multi_garage_agreement(
+        id=OUTSIDE_ID, payer_id=outside().payer_id, version=2, start_day=date(2026, 1, 5),
+        vehicles=("AB-123",),
+    )
+    to_outside = outside(id=mine.id, payer_id=mine.payer_id, version=2)
+    for version in (to_module, to_outside):
+        with tenant(app, tenant_id) as cursor:
+            with pytest.raises(Refused) as refused:
+                store_agreement(
+                    cursor, tenant_id, HOME, seeded.garage_uuids[HOME.id],
+                    seeded.payer_uuids[version.payer_id], version, now=DAY,
+                )
+        app.rollback()
+        assert refused.value.code == REFUSAL_REGISTRAR_CHANGED
+        assert f"{version.id!r}" in refused.value.detail
+    assert query(app, tenant_id, "SELECT external_id, version FROM agreements ORDER BY 1") == [
+        (mine.id, 1), (OUTSIDE_ID, 1),
+    ]
+    # And the rows both writers had written are exactly where they were.
+    assert _rows(app, tenant_id, seeded, HOME) == sorted(
+        [("ab123", OUTSIDE_ID)] + [(HOME.normalise_identity(v), mine.id) for v in mine.vehicles]
+    )
+
+
+@pytest.mark.guarantee("G42")
+@store_backed
+def test_releasing_an_identity_that_holds_no_row_is_refused_by_name(app, tenant_id):
+    """F4: for a register kept by one writer a silent no-op hides divergence,
+    the one thing the single-writer rule exists to surface."""
+    seeded = _seed(app, tenant_id, outside())
+    _register(app, tenant_id, OUTSIDE_ID, "AB-123")
+    with pytest.raises(Refused) as refused:
+        _release(app, tenant_id, OUTSIDE_ID, "NEVER-1")
+    assert refused.value.code == REFUSAL_VEHICLE_NOT_REGISTERED
+    assert "'NEVER-1'" in refused.value.detail and "2 garage(s)" in refused.value.detail
+    assert _rows(app, tenant_id, seeded, HOME) == [("ab123", OUTSIDE_ID)]
+    # Released once, it is gone; releasing it again is the same refusal.
+    _release(app, tenant_id, OUTSIDE_ID, "AB-123")
+    with pytest.raises(Refused) as again:
+        _release(app, tenant_id, OUTSIDE_ID, "AB-123")
+    assert again.value.code == REFUSAL_VEHICLE_NOT_REGISTERED
+
+
+@pytest.mark.guarantee("G42")
+@store_backed
+def test_the_command_line_renders_the_doors_refusals_and_never_a_traceback(app, tenant_id):
+    """G18 binds the new commands: an identity that normalises to nothing under
+    the folded home is a refusal sentence and exit 2 on both halves."""
+    _seed(app, tenant_id, outside())
+    dsn = f"{DSN} user=monthly_billing_app password={APP_PASSWORD}"
+    for command in ("register-vehicle", "release-vehicle"):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = main([command, "--tenant", str(tenant_id), "--dsn", dsn,
+                         "--agreement", OUTSIDE_ID, "--vehicle=- -"])
+        assert code == 2, (command, err.getvalue())
+        assert err.getvalue().startswith("REFUSED — ") and "normalises to nothing" in err.getvalue()
+        assert "Traceback" not in err.getvalue() + out.getvalue()
+
+
+@pytest.mark.guarantee("G42")
+@store_backed
 def test_the_command_line_registers_and_releases_and_prints_the_stored_forms(
     app, tenant_id
 ):
-    seeded = _seed(app, tenant_id, OUTSIDE, multi_garage_agreement(start_day=date(2026, 1, 5)))
+    seeded = _seed(app, tenant_id, outside(), multi_garage_agreement(start_day=date(2026, 1, 5)))
     # As the APPLICATION role, as the command line is run: the door reads the
     # agreement by its id under the tenant policy, and the owner bypasses it.
     dsn = f"{DSN} user=monthly_billing_app password={APP_PASSWORD}"
-    common = ["--tenant", str(tenant_id), "--dsn", dsn, "--agreement", OUTSIDE.id]
+    common = ["--tenant", str(tenant_id), "--dsn", dsn, "--agreement", OUTSIDE_ID]
 
     out, err = io.StringIO(), io.StringIO()
     with redirect_stdout(out), redirect_stderr(err):
         code = main(["register-vehicle", *common, "--vehicle", "AB-123", "--at", DAY.isoformat()])
     assert code == 0, err.getvalue()
     assert out.getvalue().splitlines() == [
-        f"vehicle registered to agreement {OUTSIDE.id}",
+        f"vehicle registered to agreement {OUTSIDE_ID}",
         f"  at garage {OTHER.id}: AB-123",
         f"  at garage {HOME.id}: ab123",
     ]
@@ -389,7 +517,7 @@ def test_the_command_line_registers_and_releases_and_prints_the_stored_forms(
     with redirect_stdout(out), redirect_stderr(err):
         code = main(["release-vehicle", *common, "--vehicle", "AB-123"])
     assert code == 0, err.getvalue()
-    assert out.getvalue().splitlines()[0] == f"vehicle released from agreement {OUTSIDE.id}"
+    assert out.getvalue().splitlines()[0] == f"vehicle released from agreement {OUTSIDE_ID}"
     assert ("ab123", "ag-outside") not in _rows(app, tenant_id, seeded, HOME)
 
     # The refusal, by code, exit 2 -- and an unknown agreement is NOT FOUND.

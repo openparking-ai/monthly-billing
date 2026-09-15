@@ -31,9 +31,11 @@ from fixtures import first_of_month_garage, month_end_garage, outside_registrar_
 from monthly_billing.store.postgres import set_tenant, tenant
 from monthly_billing.store.records import store_agreement, store_garage, store_payer
 from store_harness import (
+    BLIND_OWNER,
     DSN,
     app_connection,
     apply_migration,
+    as_blind_owner,
     cluster_lock,
     migrate,
     migration_path,
@@ -169,6 +171,48 @@ def test_every_existing_version_states_this_module_asserted_against_the_rows_bef
         app.rollback()
     finally:
         app.close()
+
+
+@pytest.mark.guarantee("G43")
+def test_a_role_that_cannot_see_every_row_is_refused_by_name_and_the_flipped_default_too(
+    schema_0004,
+):
+    """The L3's F-A: under an owner that is neither superuser nor BYPASSRLS the
+    count check compared 0 with 0, and the FLIPPED default applied, leaving
+    every version reading 'outside' on disk. The file now refuses that role by
+    name before its BEGIN -- shipped and flipped alike, because the refusal is
+    about who is reading, not what the default says -- and writes nothing."""
+    import psycopg
+
+    owner = schema_0004
+    tenant_id = new_tenant(owner)
+    _seed_through_0004(owner, tenant_id, versions=(("ag-A", 1, HOME.id), ("ag-B", 1, OTHER.id)))
+    shipped = migration_path("0005").read_text()
+    flipped = shipped.replace("DEFAULT 'this_module'", "DEFAULT 'outside'")
+    assert flipped != shipped
+    with as_blind_owner(owner) as blind:
+        blind.execute("SELECT count(*) FROM agreements")
+        assert blind.fetchone() == (0,), "the control: the blind owner sees no version row"
+        for text in (shipped, flipped):
+            with cluster_lock(DSN), pytest.raises(psycopg.errors.RaiseException) as refused:
+                try:
+                    blind.execute(text)
+                except Exception:
+                    blind.execute("ROLLBACK")
+                    raise
+            message = str(refused.value)
+            assert f"running as role {BLIND_OWNER}" in message and "BYPASSRLS" in message
+            assert "Nothing was written" in message
+    assert _owner_rows(
+        owner,
+        "SELECT count(*) FROM information_schema.columns "
+        "WHERE table_name = 'agreements' AND column_name = 'registrar'",
+    ) == [(0,)]
+    # The real owner sees both rows; the shipped file states both.
+    apply_migration(owner, "0005")
+    assert _owner_rows(
+        owner, "SELECT count(*) FROM agreements WHERE registrar = 'this_module'"
+    ) == [(2,)]
 
 
 @pytest.mark.guarantee("G43")

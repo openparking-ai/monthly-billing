@@ -457,6 +457,14 @@ def main(argv: list[str] | None = None) -> int:
         # A garage, invoice or payment id that names nothing in the store.
         print(f"NOT FOUND — {missing}", file=sys.stderr)
         return 2
+    except ValueError as bad:
+        # The module's own value refusals that carry a sentence rather than a
+        # code -- a vehicle identity that normalises to nothing under the
+        # garage's rule, an instant that is not an ISO instant. G18: a command
+        # renders a refusal, never a traceback; the sentence was written for a
+        # person and is printed as it is.
+        print(f"REFUSED — {bad}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":  # pragma: no cover

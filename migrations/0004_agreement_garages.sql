@@ -1,8 +1,9 @@
 -- 0004 — an agreement is billed at ONE home garage and may COVER others the
 -- owner lists. The covered set gets a table; the home stays where it is.
 --
--- Run as the database OWNER, after 0003. The application never connects as
--- this role. 0001–0003 are not edited: what they created stands, and this
+-- Run as the database OWNER, after 0003, AND AS A ROLE THAT CAN SEE EVERY ROW --
+-- BYPASSRLS or a superuser; the file checks and refuses otherwise, see below.
+-- The application never connects as this role. 0001–0003 are not edited: what they created stands, and this
 -- migration adds to it.
 --
 -- WHAT CHANGES AND WHAT DOES NOT. `agreements.garage_id` is, and remains, the
@@ -35,6 +36,34 @@
 -- B's garage by a raw insert. G37 reads the catalogue and finds this column.
 -- G12 reads the catalogue and finds the tenant column, ENABLE, FORCE and the
 -- policy.
+
+-- ---------------------------------------------------------------------------
+-- THE ROLE THIS RUNS AS MUST SEE EVERY ROW, AND THAT IS CHECKED, NOT ASSUMED.
+-- `agreements` is FORCE ROW LEVEL SECURITY (0001) and `current_tenant_id()`
+-- is NULL in a migration, so a table owner that is not a superuser and has
+-- no BYPASSRLS reads ZERO rows here: a backfill that reads the rows would
+-- write nothing, and a count asserted "against each other" would compare 0
+-- with 0 and pass. Measured, not supposed. So the first statement refuses by
+-- name unless the running role bypasses row security; the counts below are
+-- then real. Refused BEFORE the BEGIN so nothing is left half-applied.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+  sees_every_row boolean;
+BEGIN
+  SELECT rolsuper OR rolbypassrls INTO sees_every_row
+  FROM pg_roles WHERE rolname = current_user;
+  IF NOT coalesce(sees_every_row, false) THEN
+    RAISE EXCEPTION
+      'this migration is running as role %, which cannot see every row of a table '
+      'under FORCE ROW LEVEL SECURITY (neither SUPERUSER nor BYPASSRLS). Its backfill '
+      'reads the agreement rows and its count check compares them, and under this role '
+      'both would read zero and the check would pass with nothing done. Run it as the '
+      'database owner granted BYPASSRLS, or as a superuser. Nothing was written.',
+      current_user;
+  END IF;
+END
+$$;
 
 BEGIN;
 

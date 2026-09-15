@@ -41,7 +41,7 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
-from .entitlement import Answer, is_covered
+from .entitlement import Answer, is_covered, register_of
 from .exceptions_by_owner import (
     ExceptionKind,
     OwnerException,
@@ -90,20 +90,32 @@ def covered_from_store(
         # fact 0003 keeps (one car, one agreement per garage) -- not a scan of every
         # agreement's vehicle list, which would still find the plate on a version
         # that has since released it or on a row written past the module.
-        holder = registration_for(cursor, stored.uuid, garage.normalise_identity(vehicle_identity))
+        normalised = garage.normalise_identity(vehicle_identity)
+        holder = registration_for(cursor, stored.uuid, normalised)
+        # THE REGISTER, STATED: the rows say which agreement this identity is
+        # registered to here, and the pure call is handed exactly that -- so an
+        # outside registrar's agreement, whose document lists no vehicles by
+        # rule, is answered from the rows the door wrote. Stated even when
+        # empty: {} is "nothing registered", None would be "not asked".
+        registrations: dict[str, tuple[str, ...]] = {holder: (normalised,)} if holder else {}
         # The ACCESS door: agreements whose latest version COVERS this garage,
         # billed here or not. The money doors read load_agreements_at_garage.
+        # Which of them the car belongs to is decided where the pure call
+        # decides it (entitlement.register_of), not by a second predicate here.
         mine = [
             item
             for item in load_agreements_covering_garage(cursor, stored.uuid)
             if item.agreement.id == holder
-            and any(garage.identities_match(v, vehicle_identity) for v in item.agreement.vehicles)
+            and any(
+                garage.identities_match(v, vehicle_identity)
+                for v in register_of(item.agreement, garage, registrations)
+            )
         ]
         if not mine:
             connection.rollback()
             return is_covered(
                 garage=garage, agreements=(), vehicle_identity=vehicle_identity, at=at,
-                stay_entered_at=stay_entered_at,
+                stay_entered_at=stay_entered_at, registrations=registrations,
             )
         (chosen,) = mine  # one identity, and the loader already gave its latest version
         # The invoice, the exceptions and the grace live at the agreement's HOME.
@@ -133,6 +145,7 @@ def covered_from_store(
         has_unpaid_invoice_since=unpaid_since,
         blocked_by_owner=is_blocked(exceptions),
         home_garage=replace(home.garage, payment_grace_days=grace),
+        registrations=registrations,
     )
 
 

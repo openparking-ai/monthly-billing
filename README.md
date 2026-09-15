@@ -123,6 +123,12 @@ connected as a role that COULD be stopped before they assert that it was — a
 superuser bypasses row-level security unconditionally, and `FORCE` does not stop
 one.
 
+The migrations run as the database OWNER, and the owner must be able to SEE
+EVERY ROW -- `BYPASSRLS`, or a superuser. `FORCE` binds the owner too, so an
+owner without it reads zero rows of every table; a migration whose backfill
+reads the rows would then write nothing and count nothing, and pass. `0004` and
+`0005` check the running role first and refuse by name, before their `BEGIN`.
+
 ```
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0001_tenants_agreements_and_rls.sql
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0002_billing_run_payments_and_reversals.sql
@@ -163,7 +169,10 @@ never leaves it. **One agreement, one registrar**: an agreement states whether
 this module writes its registrations from the version's own list (the default)
 or an outside registrar writes them through the door, one car at a time -- and
 for the latter the module writes none, the document lists none, and the door
-refuses by name an agreement that is not its to write.
+refuses by name an agreement that is not its to write. The barrier reads the
+agreement's register whoever keeps it -- the list, or the rows the door wrote
+-- and the pure call, which has no database, is handed those rows as a stated
+parameter or refuses by name.
 
 ## What is not here
 
