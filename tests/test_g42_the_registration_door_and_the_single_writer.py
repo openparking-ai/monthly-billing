@@ -136,8 +136,13 @@ def _seed(app, tenant_id, *agreements, now=DAY):
 
 
 def _rows(app, tenant_id, seeded, garage) -> list[tuple[str, str]]:
+    """Sorted HERE, by code point: the store orders by identity_normalised
+    under the database's collation, and 'AB-123' before 'ab123' is true on one
+    machine's collation and false on another's (CI's en_US placed them the
+    other way round). A test that read the database's order was measuring the
+    collation."""
     with tenant(app, tenant_id) as cursor:
-        rows = list(registrations_at_garage(cursor, seeded.garage_uuids[garage.id]))
+        rows = sorted(registrations_at_garage(cursor, seeded.garage_uuids[garage.id]))
     app.rollback()
     return rows
 
@@ -375,9 +380,10 @@ def test_the_command_line_registers_and_releases_and_prints_the_stored_forms(
         f"  at garage {OTHER.id}: AB-123",
         f"  at garage {HOME.id}: ab123",
     ]
-    assert _rows(app, tenant_id, seeded, HOME) == [("ab123", "ag-outside")] + [
-        (HOME.normalise_identity(v), "ag-0001") for v in sorted(multi_garage_agreement().vehicles)
-    ]
+    assert _rows(app, tenant_id, seeded, HOME) == sorted(
+        [("ab123", "ag-outside")]
+        + [(HOME.normalise_identity(v), "ag-0001") for v in multi_garage_agreement().vehicles]
+    )
 
     out, err = io.StringIO(), io.StringIO()
     with redirect_stdout(out), redirect_stderr(err):
