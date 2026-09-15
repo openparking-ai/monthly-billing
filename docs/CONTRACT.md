@@ -30,8 +30,11 @@ Stated first, so nothing here is later read as a promise:
 - **No payment processor.** No card, no bank account, no live key. The interface
   is defined and the implementation is a stub that moves no money and says so.
   Collection is its own module.
-- **No enrolment.** This module holds the vehicle list; it does not decide how a
-  physical car gets onto it.
+- **No enrolment.** This module holds the vehicle list -- or, for an agreement
+  whose registrar is OUTSIDE, holds the registrations an outside registrar
+  writes through the door, one car at a time; it does not decide how a
+  physical car gets onto either. Which outside registrar is not this module's
+  to know: the door is for an outside writer in general.
 - **No customer portal.** No screens of any kind.
 - **No tax.**
 - **No multi-garage MONEY.** An agreement is billed at ONE home garage -- its
@@ -89,8 +92,10 @@ Stated first, so nothing here is later read as a promise:
 | **G39** | An agreement is billed at ONE HOME GARAGE and COVERS the garages the owner lists, the home among them -- stated by listing, never by an 'everywhere' flag or a default, and a document that omits the set is refused by name. The coverage door is MEMBERSHIP of that set; the asking garage still compares the plate under its own rule. The unpaid-invoice read, the owner's exceptions and the grace period -- days AND clock -- follow the agreement's HOME, never the asking garage, and two agreements of one payer homed at two garages are judged independently. Registrations fan out one row per covered garage, each under that garage's own identity rule, all or none: a collision at ANY covered garage refuses the whole registration by name and writes nothing. The entitlement is across the covered set, not per garage. THE HOME NEVER MOVES: a version billed at a different garage from the versions already stored is refused by name and writes nothing, because a move has no stated answer for the month already invoiced, for an unpaid invoice or a block at the old home, or for whose billing day governs next -- so the home-keyed reads are correct for every state the module can store. There is no cross-row database backstop for this; a row written past the module with another home is read at that home only. |
 | **G40** | MONEY IS NOT MULTI-GARAGE. The billing day, the currency, the timezone of the period boundaries, proration, the invoice, the run and the charge are keyed on the agreement's HOME garage only: a run at a garage the agreement merely covers issues nothing for it, the first charge and the period invoice refuse another garage by name whether or not the agreement covers it, and the store refuses to file an agreement under a garage that is not its home. The billing run reads the agreements BILLED at a garage through a loader that never widens to the covered set and that chooses each agreement's LATEST version before it asks where that version is homed; the coverage call reads a second loader. A version that would MOVE the home is refused by name and never stored, so the ordering matters only for a row written past the module -- and for that row the run bills the newest version's home only. The charge reads the agreements the invoice's own lines name, each at its latest version, and the garage does not enter that read: an invoice whose agreement's newest row was written past the module at another home is still charged, and an invoice naming no loadable agreement is refused by name. |
 | **G41** | Migration 0004 gives every EXISTING agreement version a covered set of exactly its home garage, read from agreements.garage_id, and asserts the placed rows against the pre-migration count rather than a literal. A version whose home cannot be placed fails the migration BY NAME -- external id and version -- before a row is written, and the whole migration rolls back. |
+| **G42** | ONE AGREEMENT, ONE REGISTRAR. An agreement STATES who writes its registrations -- this module, the default, or an OUTSIDE registrar -- on its document and on its row, never inferred. For an outside registrar's agreement the module writes NO registration of its own: storing a version registers nothing and releases nothing, the document lists no vehicles (a list it does not own is refused by name) and loads back that way, and the outside registrar registers and releases ONE vehicle identity at a time through the registration door -- which fans out over the covered set under each garage's own rule, refuses at every covered garage before it writes anywhere, takes over a cancelled holder's row on its day, and answers with the identity as stored per garage. Both halves of the door refuse by name an agreement whose registrations this module writes. The door writes the garage's holder claim (vehicle_registrations), never a version's own list (agreement_vehicles). |
+| **G43** | Migration 0005 gives every EXISTING agreement version the registrar it has today -- this module -- and asserts the stated rows against the pre-migration count rather than a literal: a default that left any version stating otherwise fails the migration and the whole file rolls back. No version is left unstated. |
 
-That is 41 guarantees. Every one of them has a fail control that has been proven to fire, and the count above is derived from the registry rather than typed here.
+That is 43 guarantees. Every one of them has a fail control that has been proven to fire, and the count above is derived from the registry rather than typed here.
 <!-- END:guarantees -->
 
 ## The entitlement answer
@@ -183,6 +188,7 @@ guessed.
 | `REFUSAL_NO_MANDATE` | This agreement has no mandate record, so nothing may be charged against it. The mandate records who agreed, when, and to what: the recurring charge, its timing and frequency, how the amount is determined, and how it is cancelled. An invoice may still be issued and sent -- it is the CHARGE that is refused, not the billing. |
 | `REFUSAL_NO_PAYMENT_GRACE` | The garage has not stated how many days past an unpaid invoice an agreement stays covered. There is no default: a guessed grace period either strands a paying customer at a barrier or covers an unpaid one indefinitely. |
 | `REFUSAL_PAUSE_OVERLAPS_A_PAID_PERIOD` | The pause covers days in a period that has already been paid. A paid period is paid, and this module does not decide refunds or credits. The owner records an exception with an amount, or moves the pause. |
+| `REFUSAL_REGISTRAR_IS_THIS_MODULE` | This agreement's registrations are written by this module, from the vehicle list on its own document, and the registration door is for an agreement whose registrar is OUTSIDE. One agreement, one registrar: a second writer of the same rows would race the first, so the door refuses by name instead. To move a car onto this agreement, store a version that lists it; to hand the register to an outside registrar, store a version that says so. |
 | `REFUSAL_RETRIES_EXHAUSTED` | This invoice has reached its maximum charge attempts. The count resets when the caller reports that the payer changed payment method -- this module holds no payment method and cannot observe that for itself. |
 | `REFUSAL_REVERSAL_REASON_MISMATCH` | The reversal's reason does not fit the payment's method: a cheque bounces, an ACH debit is returned, a card payment is charged back or reversed by the processor. A reason from the wrong column is a record somebody assembled wrong, and it is refused rather than stored. |
 | `REFUSAL_VEHICLE_ALREADY_REGISTERED` | This vehicle identity is registered to ANOTHER agreement at this garage. One car, one agreement per garage: the registration names the other agreement and, if that agreement is cancelled, the day it frees the vehicle. Until then the vehicle is not added here. |
@@ -221,7 +227,14 @@ Every one of these is REQUIRED and none has a default.
 
 A kind marked ⊙ but not ▾ -- `refund` -- records the owner's decision and its amount and changes NO total: the invoice stays what it was and stays paid if it was paid. The money going back is a movement, which is a collection record when collection exists, never a billing line. The direction of every amount is the kind's, never the sign's: a negative amount is refused by name (`REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE`).
 
-An agreement document carries exactly these keys: `access_hours`, `additional_fees`, `cancelled_effective_day`, `covered_garage_ids`, `garage_id`, `id`, `mandate`, `monthly_price_minor`, `pauses`, `payer_id`, `spots`, `start_day`, `status`, `vehicles`, `version`. Any other key is refused rather than ignored.
+**Registrar** — who writes an agreement's registrations, stated on the document, defaulting to this module:
+
+- `this_module` (the default)
+- `outside`
+
+Under `this_module` the version's own vehicle list is the register -- it is required, and an agreement listing no vehicle is refused by name because it covers nothing. Under `outside` the list is refused when present and legal when empty, on the way in and on the way back: the outside registrar registers and releases one vehicle identity at a time through the registration door (`register-vehicle`, `release-vehicle`), which fans out over the covered set under each garage's own identity rule, refuses at every covered garage before it writes anywhere, and answers with the identity AS STORED per garage. Both halves of the door refuse by name an agreement whose registrations this module writes (`REFUSAL_REGISTRAR_IS_THIS_MODULE`). A document that says nothing is `this_module`; the mode is never inferred from the list.
+
+An agreement document carries exactly these keys: `access_hours`, `additional_fees`, `cancelled_effective_day`, `covered_garage_ids`, `garage_id`, `id`, `mandate`, `monthly_price_minor`, `pauses`, `payer_id`, `registrar`, `spots`, `start_day`, `status`, `vehicles`, `version`. Any other key is refused rather than ignored.
 
 A charge is attempted at most 3 times before the module refuses, and the count resets only when the caller reports that the payer changed payment method.
 <!-- END:options -->
@@ -369,6 +382,25 @@ DELETE on `vehicle_registrations` (it is current state, not history), so a raw
 delete of a registration by that role leaves a stored agreement listing a car
 the lane answers `NO_AGREEMENT` for. The module never does it, and nothing in
 the database would stop it.
+
+**One agreement, one registrar.** An agreement states who writes its
+registrations (`agreements.registrar`, migration 0005): this module, from the
+version's own vehicle list, or an OUTSIDE registrar through the registration
+door -- `register-vehicle` and `release-vehicle`, one identity at a time, the
+same fan-out, the same per-garage rule, the same refusals in the same order, the
+same handover of a cancelled holder's row on its day. For an outside registrar's
+agreement the module writes and releases NO registration of its own: storing a
+version leaves every row the door wrote exactly where it was, and the document
+lists no vehicles. The door writes `vehicle_registrations` -- the garage's
+holder claim -- and never `agreement_vehicles`, a version's own list, which
+stays empty for such an agreement. The door's answer names the identity AS
+STORED at each covered garage, because two garages fold one plate differently
+and the registrar on the other side reconciles against the stored form, not the
+one it sent. ⚠ Two things the door does **not** do, by design of this round:
+it does not reconcile the two registers -- that is the outside registrar's --
+and it does not reach a garage the agreement's latest version no longer covers,
+so a car left registered at a garage a later version dropped is the outside
+registrar's to release BEFORE the version that drops the garage is stored.
 
 Money history is **append-only by grant**, and the invoice's own lines and the
 owner's recorded decisions are history the same way. What the application role

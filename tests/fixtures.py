@@ -18,6 +18,11 @@ module's decisions actually turn on, read from the code rather than imagined:
   differ on every axis a door decides by: timezone, currency and identity rule.
   A multi-garage fixture whose garages agreed on those would let a test look
   like it crossed the axis while sampling one point on it.
+* the registrar -- this module (every fixture above), and one agreement whose
+  registrar is OUTSIDE: it lists no vehicles and covers the same two garages,
+  so the registration door's per-garage answer can show the two rules
+  disagreeing on one plate. An outside fixture over one rule would let the
+  door's answer look reconciled while sampling one point on it.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ from monthly_billing.agreement import (
     FeeCadence,
     Mandate,
     Pause,
+    Registrar,
 )
 from monthly_billing.garage import BillingDay, Garage, IdentityRule
 from monthly_billing.localday import day_start, hours_between, zone
@@ -149,6 +155,22 @@ def dropping_versions(**overrides: object) -> tuple[Agreement, Agreement]:
         version=2, covered_garage_ids=(MULTI_HOME().id,), **overrides
     )
     return v1, v2
+
+
+def outside_registrar_agreement(**overrides: object) -> Agreement:
+    """One agreement whose registrar is OUTSIDE: billed at the month-end garage
+    (folded) and covering the first-of-month garage too (exact), listing NO
+    vehicles -- its cars arrive one at a time through the registration door.
+    ``assert_the_outside_registrars_agreement_lists_nothing_and_spans_the_rules``
+    is the control that it is what it claims."""
+    fields: dict[str, object] = {
+        "id": "ag-outside",
+        "payer_id": "payer-outside",
+        "registrar": Registrar.OUTSIDE,
+        "vehicles": (),
+    }
+    fields.update(overrides)
+    return multi_garage_agreement(**fields)
 
 
 def agreement_with_everything(garage_id: str = "garage-month-end") -> Agreement:
@@ -317,6 +339,30 @@ def assert_the_dropping_versions_differ_only_on_the_dropped_garage() -> None:
         "v2 did not drop the other garage"
     )
     assert v2.covered_garage_ids == (v1.garage_id,)
+
+
+def assert_the_outside_registrars_agreement_lists_nothing_and_spans_the_rules() -> None:
+    """The outside-registrar fixture is only that fixture if its registrar is
+    OUTSIDE, its list is empty, and its two covered garages disagree on the
+    identity rule in BOTH directions the door's answer exists to show: a plate
+    the exact rule keeps apart and the folded rule joins, and one the exact
+    rule keeps whole that a trailing space splits."""
+    agreement = outside_registrar_agreement()
+    assert agreement.registrar is Registrar.OUTSIDE
+    assert agreement.vehicles == ()
+    home, other = MULTI_HOME(), MULTI_OTHER()
+    assert set(agreement.covered_garage_ids) == {home.id, other.id}
+    assert home.identity_rule is not other.identity_rule
+    folded = home if home.identity_rule.value == "folded_alphanumeric" else other
+    exact = other if folded is home else home
+    # One plate, two rules: the folded garage stores one form for both spellings,
+    # the exact garage stores two.
+    assert len({folded.normalise_identity("AB-123"), folded.normalise_identity("ab123")}) == 1
+    assert len({exact.normalise_identity("AB-123"), exact.normalise_identity("ab123")}) == 2
+    # And the exact rule keeps a trailing space, so 'ABC123' and 'ABC123 ' are
+    # two rows there -- the silent split the door's answer makes visible.
+    assert len({exact.normalise_identity("ABC123"), exact.normalise_identity("ABC123 ")}) == 2
+    assert len({folded.normalise_identity("ABC123"), folded.normalise_identity("ABC123 ")}) == 1
 
 
 def sometime_on(day: date, timezone: str, hour: int = 12) -> datetime:

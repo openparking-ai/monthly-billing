@@ -1004,10 +1004,10 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
             "    cursor.execute(  # PLANTED: the home's release DELETE runs before the refusals",
             '        "DELETE FROM vehicle_registrations WHERE garage_id = %s "',
             '        "AND agreement_external_id = %s AND NOT (identity_normalised = ANY(%s))",',
-            "        (covered[0].uuid, agreement.id,",
+            "        (covered[0].uuid, agreement_id,",
             (
                 "         sorted({covered[0].garage.normalise_identity(v) for v in "
-                "agreement.vehicles})),"
+                "vehicles})),"
             ),
             "    )",
             "    for stored in covered:",
@@ -1215,10 +1215,10 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
     "G39/fanout-rule": (
         "tests/test_g39_coverage_follows_the_covered_set.py",
         "store/records.py",
-        "        listed = {stored.garage.normalise_identity(v) for v in agreement.vehicles}",
+        "        listed = {stored.garage.normalise_identity(v) for v in vehicles}",
         (
             "        listed = {covered[0].garage.normalise_identity(v) for v in "
-            "agreement.vehicles}  "
+            "vehicles}  "
             "# PLANTED"
         ),
         "every garage's row is normalised under the HOME's rule, so at an exact-rule "
@@ -1229,13 +1229,13 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "tests/test_g39_coverage_follows_the_covered_set.py",
         "store/records.py",
         (
-            "        held = _held_elsewhere(cursor, stored.garage, stored.uuid, agreement, listed, "
-            "today)"
+            "        held = _held_elsewhere(cursor, stored.garage, stored.uuid, agreement_id, "
+            "listed, today)"
         ),
         source(
             "        held = (  # PLANTED: collisions checked at the home only",
             (
-                "            _held_elsewhere(cursor, stored.garage, stored.uuid, agreement, "
+                "            _held_elsewhere(cursor, stored.garage, stored.uuid, agreement_id, "
                 "listed, "
                 "today)"
             ),
@@ -1409,7 +1409,7 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
                 "               a.monthly_price_minor, a.start_day, a.status, "
                 "a.cancelled_effective_day,"
             ),
-            "               a.access_entry_from, a.access_exit_by, g.external_id",
+            "               a.access_entry_from, a.access_exit_by, g.external_id, a.registrar",
             "        FROM (",
             "            SELECT DISTINCT ON (external_id) *",
             "            FROM agreements",
@@ -1427,7 +1427,7 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
                 "               a.monthly_price_minor, a.start_day, a.status, "
                 "a.cancelled_effective_day,"
             ),
-            "               a.access_entry_from, a.access_exit_by, g.external_id",
+            "               a.access_entry_from, a.access_exit_by, g.external_id, a.registrar",
             "        FROM agreements a",
             "        JOIN payers p ON p.id = a.payer_id",
             "        JOIN garages g ON g.id = a.garage_id",
@@ -1548,6 +1548,142 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "own count assertion fires on a seeded cluster and the seeded test goes red "
         "on it -- and a plant that also removed the assertion would leave every later "
         "version covering nothing, which the pair-wise comparison catches",
+    ),
+    # -- M4: the registration door and the single-writer switch --
+    "G42/switch": (
+        "tests/test_g42_the_registration_door_and_the_single_writer.py",
+        "store/records.py",
+        "    if agreement.registrar is Registrar.THIS_MODULE:",
+        "    if True:  # PLANTED: the module registers every agreement's list, whoever owns it",
+        "THE SWITCH PLANTED AWAY: storing a version of an outside registrar's agreement "
+        "walks the version path with its empty list, and the per-garage release "
+        "deletes every row the outside registrar put there through the door -- two "
+        "writers of one agreement's rows, and the module's empty list wins",
+    ),
+    "G42/door-any-registrar": (
+        "tests/test_g42_the_registration_door_and_the_single_writer.py",
+        "store/records.py",
+        "    if registrar is not Registrar.OUTSIDE:",
+        "    if False:  # PLANTED: the door takes any agreement",
+        "both halves of the door accept an agreement whose registrations this module "
+        "writes, so a car the version's list does not name is registered beside the "
+        "list and released from under it -- the single-writer rule with no mechanism",
+    ),
+    "G42/list-accepted": (
+        "tests/test_g42_the_registration_door_and_the_single_writer.py",
+        "agreement.py",
+        "        elif self.registrar is Registrar.OUTSIDE:",
+        "        elif False:  # PLANTED: an outside registrar's document may carry a list",
+        "an outside registrar's document carrying a vehicle list is accepted, so the "
+        "document is a second writer's word on rows it does not own -- and, with the "
+        "switch, a list nothing registers",
+    ),
+    "G42/empty-list-refused": (
+        "tests/test_g42_the_registration_door_and_the_single_writer.py",
+        "agreement.py",
+        (
+            "            if not (isinstance(self.vehicles, tuple) and self.registrar is "
+            "Registrar.OUTSIDE):"
+        ),
+        "            if True:  # PLANTED: no mode makes an empty list legal",
+        "the empty-vehicle refusal stops reading the mode, so an outside registrar's "
+        "agreement cannot be written with no vehicles and cannot be loaded back once "
+        "stored: the round trip refuses at both ends",
+    ),
+    "G42/registrar-not-read-back": (
+        "tests/test_g42_the_registration_door_and_the_single_writer.py",
+        "store/records.py",
+        "                    registrar=Registrar(registrar),",
+        "                    # PLANTED: the row's registrar is not read; the default stands",
+        "the hydration site constructs every stored agreement with the default "
+        "registrar whatever the row says, so an outside registrar's version -- stored "
+        "with no vehicles, legally -- refuses to load back through every loader, and "
+        "its row says outside to nobody",
+    ),
+    "G42/document-key-unknown": (
+        "tests/test_g42_the_registration_door_and_the_single_writer.py",
+        "agreement.py",
+        source(
+            '        "additional_fees",',
+            '        "registrar",',
+            "    }",
+        ),
+        source(
+            '        "additional_fees",',
+            "        # PLANTED: the registrar cannot be stated on a document",
+            "    }",
+        ),
+        "a document that states its registrar is refused as carrying an unknown key, "
+        "so the mode can be stated on rows but on no document -- the operator's file "
+        "cannot say what the store will hold",
+    ),
+    "G42/answer-raw": (
+        "tests/test_g42_the_registration_door_and_the_single_writer.py",
+        "store/records.py",
+        "    return _stored_forms((stored, listed) for stored, _at, listed, _held in plan)",
+        source(
+            "    return _stored_forms(  # PLANTED: the answer echoes what was handed in",
+            "        (stored, {identity}) for stored, _at, listed, _held in plan",
+            "    )",
+        ),
+        "the door answers with the identity as the caller spelt it rather than as "
+        "each garage stored it, so the registrar on the other side cannot see that "
+        "the folded garage joined two of its cars or the exact one split one -- the "
+        "module is opaque again",
+    ),
+    "G42/release-home-only": (
+        "tests/test_g42_the_registration_door_and_the_single_writer.py",
+        "store/records.py",
+        "    for stored, listed in forms:",
+        "    for stored, listed in forms[:1]:  # PLANTED: released at the home only",
+        "the release half of the door deletes the row at the home garage alone, so a "
+        "car the outside registrar took off its agreement is still registered -- and "
+        "still another agreement's refusal -- at every other garage the agreement "
+        "covers",
+    ),
+    "G42/door-refusals-skipped": (
+        "tests/test_g42_the_registration_door_and_the_single_writer.py",
+        "store/records.py",
+        "    plan = _plan_registrations(cursor, covered, agreement_id, (identity,), now)",
+        source(
+            "    plan = [  # PLANTED: no refusal walk; straight to the writes",
+            "        (s, now if now is not None else datetime.now(zone(s.garage.timezone)),",
+            "         {s.garage.normalise_identity(identity)}, {})",
+            "        for s in covered",
+            "    ]",
+        ),
+        "the door skips the refusal walk and writes at once: a car another agreement "
+        "holds at a covered garage is refused by the UNIQUE at that garage -- named "
+        "as a race, not as the holder -- after the home's row has already landed in "
+        "the caller's transaction",
+    ),
+    "G42/handover": (
+        "tests/test_g42_the_registration_door_and_the_single_writer.py",
+        "store/records.py",
+        "        if frees_on is None or frees_on > today:",
+        "        if True:  # PLANTED: a cancelled holder never frees the vehicle",
+        "a cancelled holder's row never passes to the outside registrar's agreement, "
+        "on its day or ever: the car that moved from an agreement this module writes "
+        "to one an outside registrar writes is refused at the door forever, naming a "
+        "holder that has already let it go",
+    ),
+    "G43/default-outside": (
+        "tests/test_g43_migration_0005_states_the_registrar.py",
+        "migrations/0005_agreements_registrar.sql",
+        "  ADD COLUMN registrar text NOT NULL DEFAULT 'this_module'",
+        "  ADD COLUMN registrar text NOT NULL DEFAULT 'outside'  -- PLANTED",
+        "every existing version is backfilled as an OUTSIDE registrar's -- an "
+        "agreement whose registrations nothing writes; the migration's own count "
+        "assertion fires on a seeded cluster and the seeded test goes red on it",
+    ),
+    "G43/count-removed": (
+        "tests/test_g43_migration_0005_states_the_registrar.py",
+        "migrations/0005_agreements_registrar.sql",
+        "  IF stated <> versions THEN",
+        "  IF FALSE THEN  -- PLANTED: the backfill is not counted",
+        "the migration no longer asserts the stated rows against the version rows, "
+        "so a wrong default commits silently -- the test that applies a copy with the "
+        "default flipped and requires the count to fail it goes red",
     ),
 }
 

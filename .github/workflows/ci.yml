@@ -191,6 +191,17 @@ jobs:
             --garage tests/documents/garage_downtown.json \
             --agreement tests/documents/agreement_no_mandate.json
 
+          # An agreement whose registrar is OUTSIDE lists no vehicles and still
+          # LOADS and still invoices: the cars come through the store's door,
+          # and money never depended on the list.
+          monthly-billing check-agreement \
+            --agreement tests/documents/agreement_outside_registrar.json \
+            | tee "$RUNNER_TEMP/outside.txt"
+          grep -q "OUTSIDE registrar" "$RUNNER_TEMP/outside.txt"
+          monthly-billing first-charge \
+            --garage tests/documents/garage_downtown.json \
+            --agreement tests/documents/agreement_outside_registrar.json
+
           echo "the module answered, and refused, for the right reasons"
 
   controls:

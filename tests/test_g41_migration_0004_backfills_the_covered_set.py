@@ -137,6 +137,10 @@ def test_every_existing_version_gets_exactly_its_home_asserted_against_the_rows_
     assert _owner_rows(owner, "SELECT count(*) FROM agreement_garages") == [(len(before),)]
     # And the module reads them back: the lane at ag-A's home is answered by
     # ag-A version 2 through the store, covering its home and nothing else.
+    # The module that reads is today's, whose loaders read the schema as it
+    # ships -- 0005's registrar column included -- so the later migration is
+    # applied before the read; 0004's backfill was judged above, on its own.
+    apply_migration(owner, "0005")
     app = app_connection(DSN)
     try:
         answer = covered_from_store(

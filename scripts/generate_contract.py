@@ -46,7 +46,9 @@ sys.path.insert(0, str(ROOT / "tests"))
 from _guarantees import GUARANTEES, guarantee_ids  # noqa: E402
 from monthly_billing.agreement import (  # noqa: E402
     KNOWN_KEYS,
+    Agreement,
     FeeCadence,
+    Registrar,
     load_agreement_file,
 )
 from monthly_billing.billing_run import FAILED_OUTCOMES, RUN_OUTCOME_MEANS, RunOutcome  # noqa: E402
@@ -65,6 +67,7 @@ from monthly_billing.findings import (  # noqa: E402
     REFUSAL_ATTEMPT_UNRESOLVED,
     REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE,
     REFUSAL_NOTHING_OWED,
+    REFUSAL_REGISTRAR_IS_THIS_MODULE,
     REFUSAL_REVERSAL_REASON_MISMATCH,
     REFUSAL_VEHICLE_ON_TWO_AGREEMENTS,
     REFUSALS,
@@ -166,6 +169,7 @@ def block_options() -> str:
             "line. The direction of every amount is the kind's, never the sign's: a negative "
             f"amount is refused by name (`{REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE}`).",
         ]
+    lines += _registrar_lines()
     lines += [
         "",
         "An agreement document carries exactly these keys: "
@@ -177,6 +181,39 @@ def block_options() -> str:
         "payment method.",
     ]
     return "\n".join(lines)
+
+
+def _registrar_lines() -> list[str]:
+    """Who writes an agreement's registrations, DERIVED: the members from the
+    enum, the default from the dataclass field, and the sentence about the
+    vehicle list from which member is the default -- a default moved to the
+    other member changes the sentence rather than leaving it standing."""
+    default = Agreement.__dataclass_fields__["registrar"].default
+    lines = [
+        "",
+        "**Registrar** — who writes an agreement's registrations, stated on the "
+        "document, defaulting to this module:",
+        "",
+    ]
+    for registrar in Registrar:
+        lines.append(f"- `{registrar.value}`" + (" (the default)" if registrar is default else ""))
+    outside = Registrar.OUTSIDE
+    module = Registrar.THIS_MODULE
+    lines += [
+        "",
+        f"Under `{module.value}` the version's own vehicle list is the register -- it is "
+        "required, and an agreement listing no vehicle is refused by name because it "
+        f"covers nothing. Under `{outside.value}` the list is refused when present and "
+        "legal when empty, on the way in and on the way back: the outside registrar "
+        "registers and releases one vehicle identity at a time through the registration "
+        "door (`register-vehicle`, `release-vehicle`), which fans out over the covered "
+        "set under each garage's own identity rule, refuses at every covered garage "
+        "before it writes anywhere, and answers with the identity AS STORED per garage. "
+        "Both halves of the door refuse by name an agreement whose registrations this "
+        f"module writes (`{REFUSAL_REGISTRAR_IS_THIS_MODULE}`). A document that says "
+        f"nothing is `{default.value}`; the mode is never inferred from the list.",
+    ]
+    return lines
 
 
 def block_worked_example() -> str:

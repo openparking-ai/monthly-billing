@@ -68,6 +68,7 @@ REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL = "REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL"
 REFUSAL_HOME_GARAGE_NOT_GIVEN = "REFUSAL_HOME_GARAGE_NOT_GIVEN"
 REFUSAL_INVOICE_NAMES_NO_AGREEMENT = "REFUSAL_INVOICE_NAMES_NO_AGREEMENT"
 REFUSAL_AGREEMENT_HOME_MOVED = "REFUSAL_AGREEMENT_HOME_MOVED"
+REFUSAL_REGISTRAR_IS_THIS_MODULE = "REFUSAL_REGISTRAR_IS_THIS_MODULE"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -205,6 +206,15 @@ REFUSALS: dict[str, str] = {
         "was first stored with for its whole life; a different home is a different "
         "agreement. There is no cross-row database backstop for this: a row written "
         "past the module with another home is read at that home only."
+    ),
+    REFUSAL_REGISTRAR_IS_THIS_MODULE: (
+        "This agreement's registrations are written by this module, from the "
+        "vehicle list on its own document, and the registration door is for an "
+        "agreement whose registrar is OUTSIDE. One agreement, one registrar: a "
+        "second writer of the same rows would race the first, so the door refuses "
+        "by name instead. To move a car onto this agreement, store a version that "
+        "lists it; to hand the register to an outside registrar, store a version "
+        "that says so."
     ),
     REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL: (
         "This adjustment would take the invoice total below zero. A waived fee or "

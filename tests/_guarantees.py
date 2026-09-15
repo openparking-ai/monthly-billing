@@ -339,6 +339,29 @@ GUARANTEES: dict[str, str] = {
         "cannot be placed fails the migration BY NAME -- external id and version -- "
         "before a row is written, and the whole migration rolls back."
     ),
+    "G42": (
+        "ONE AGREEMENT, ONE REGISTRAR. An agreement STATES who writes its "
+        "registrations -- this module, the default, or an OUTSIDE registrar -- on "
+        "its document and on its row, never inferred. For an outside registrar's "
+        "agreement the module writes NO registration of its own: storing a version "
+        "registers nothing and releases nothing, the document lists no vehicles "
+        "(a list it does not own is refused by name) and loads back that way, and "
+        "the outside registrar registers and releases ONE vehicle identity at a "
+        "time through the registration door -- which fans out over the covered set "
+        "under each garage's own rule, refuses at every covered garage before it "
+        "writes anywhere, takes over a cancelled holder's row on its day, and "
+        "answers with the identity as stored per garage. Both halves of the door "
+        "refuse by name an agreement whose registrations this module writes. The "
+        "door writes the garage's holder claim (vehicle_registrations), never a "
+        "version's own list (agreement_vehicles)."
+    ),
+    "G43": (
+        "Migration 0005 gives every EXISTING agreement version the registrar it "
+        "has today -- this module -- and asserts the stated rows against the "
+        "pre-migration count rather than a literal: a default that left any "
+        "version stating otherwise fails the migration and the whole file rolls "
+        "back. No version is left unstated."
+    ),
 }
 
 

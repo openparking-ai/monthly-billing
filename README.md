@@ -22,10 +22,16 @@ $ monthly-billing record-payment --tenant T --invoice garage-downtown/2026-04-30
       --reference "cheque 1043" --recorded-by operator
 $ monthly-billing covered-in-store --tenant T --garage garage-downtown \
       --vehicle ABC-123 --at 2026-05-09T09:00:00-06:00
+$ monthly-billing register-vehicle --tenant T --agreement ag-fleet-0007 --vehicle "ABC 123"
+$ monthly-billing release-vehicle --tenant T --agreement ag-fleet-0007 --vehicle "ABC 123"
 ```
 
 Nothing wakes itself up: the run is a command the operator's platform calls on
-the billing day, and the platform is an ordinary client of it.
+the billing day, and the platform is an ordinary client of it. The last two are
+the REGISTRATION DOOR: for an agreement whose `registrar` is `outside`, an
+outside registrar puts one car on and takes one off, at every garage the
+agreement covers, and is told the identity as stored at each -- this module
+writes none of that agreement's registrations itself.
 
 ## The lane never learns anything about money
 
@@ -121,6 +127,8 @@ one.
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0001_tenants_agreements_and_rls.sql
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0002_billing_run_payments_and_reversals.sql
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0003_invoice_lock_attempt_reservation_and_registrations.sql
+psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0004_agreement_garages.sql
+psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0005_agreements_registrar.sql
 MONTHLY_BILLING_APP_PASSWORD=... python scripts/ensure-app-role.py "$DSN"
 ```
 
@@ -151,11 +159,16 @@ reference is a composite tenant key.** **An agreement is billed at one home
 garage and covers the garages the owner lists** -- coverage is membership of
 that set, registrations fan out one row per covered garage under its own
 identity rule, and the unpaid, exception and grace reads follow the home; money
-never leaves it.
+never leaves it. **One agreement, one registrar**: an agreement states whether
+this module writes its registrations from the version's own list (the default)
+or an outside registrar writes them through the door, one car at a time -- and
+for the latter the module writes none, the document lists none, and the door
+refuses by name an agreement that is not its to write.
 
 ## What is not here
 
-No payment processor. No enrolment or registry. No customer portal. No tax. No
+No payment processor. No enrolment, and no reconciliation of an outside
+registrar's register against this one. No customer portal. No tax. No
 multi-garage money — an agreement is billed at one home garage, whatever other
 garages of the account the owner lists it as good at. No refund decisions — the
 garage owner makes those, and records each one as an exception with an amount, a
