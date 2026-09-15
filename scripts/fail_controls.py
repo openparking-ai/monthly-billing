@@ -625,9 +625,9 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
     "G21/prose": (
         "tests/test_g21_covered_from_the_store.py",
         "entitlement_store.py",
-        "from .entitlement import Answer, is_covered",
+        "from .entitlement import Answer, is_covered, register_of",
         source(
-            "from .entitlement import Answer",
+            "from .entitlement import Answer, register_of",
             "from .entitlement import is_covered as _pure",
             "",
             "",
