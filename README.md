@@ -126,8 +126,10 @@ one.
 The migrations run as the database OWNER, and the owner must be able to SEE
 EVERY ROW -- `BYPASSRLS`, or a superuser. `FORCE` binds the owner too, so an
 owner without it reads zero rows of every table; a migration whose backfill
-reads the rows would then write nothing and count nothing, and pass. `0004` and
-`0005` check the running role first and refuse by name, before their `BEGIN`.
+reads the rows would then write nothing and count nothing, and pass. `0005`
+checks the running role first and refuses by name, before its `BEGIN`; `0004`
+does not, and `0005` carries its repair forward -- the home row `0004` places
+for every version, inserted for any version that lacks one, and nothing else.
 
 ```
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0001_tenants_agreements_and_rls.sql

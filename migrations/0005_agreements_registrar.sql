@@ -3,8 +3,9 @@
 --
 -- Run as the database OWNER, after 0004, AND AS A ROLE THAT CAN SEE EVERY ROW --
 -- BYPASSRLS or a superuser; the file checks and refuses otherwise, see below.
--- The application never connects as this role. 0001–0004 are not edited: what they created stands, and this
--- migration adds to it.
+-- The application never connects as this role. 0001–0004 are not edited: what
+-- they created stands, and this migration adds to it -- and REPAIRS one thing
+-- 0004 may have left undone, see THE FORWARD REPAIR below.
 --
 -- WHAT CHANGES AND WHAT DOES NOT. `vehicle_registrations` (0003) is, and
 -- remains, the garage-wide fact of which agreement a vehicle identity belongs
@@ -32,6 +33,25 @@
 --
 -- The CHECK is the database's backstop for the enum in agreement.py; the
 -- module refuses an unknown value by name before this constraint has to.
+--
+-- THE FORWARD REPAIR. 0004's backfill gives every agreement version one
+-- `agreement_garages` row, its home, by reading the version rows -- and 0004
+-- does not check who is reading. Run as an owner that is neither a superuser
+-- nor BYPASSRLS it reads zero rows (FORCE binds the owner), places zero, and
+-- its count check passes, zero against zero: every version that existed is
+-- left without its home row. Such a version cannot be LOADED at all -- the
+-- module refuses by name a covered set that omits the home (agreement.py) --
+-- so the damage is loud, not a wrong number; but it is damage, and 0004 is
+-- not edited to prevent it (whether it has run anywhere could not be
+-- established, and a migration that has run is not rewritten). So this file,
+-- which DOES check who is reading, inserts the home row for any version that
+-- lacks one, and nothing else: it repairs, it does not audit, and it does not
+-- refuse on finding rows missing, because the guard above already refuses the
+-- only role that leaves them missing. Idempotent by construction -- a second
+-- run finds nothing to insert and writes zero rows. It is counted by the
+-- tests (G43), before and after, not by this file: a count here would be an
+-- audit of 0004, and the insert either places every missing row or fails
+-- loudly on the constraint (a home that is not a garage of its tenant).
 
 -- ---------------------------------------------------------------------------
 -- THE ROLE THIS RUNS AS MUST SEE EVERY ROW, AND THAT IS CHECKED, NOT ASSUMED.
@@ -67,6 +87,18 @@ ALTER TABLE agreements
   ADD COLUMN registrar text NOT NULL DEFAULT 'this_module'
   CONSTRAINT agreements_registrar_is_stated
     CHECK (registrar IN ('this_module', 'outside'));
+
+-- ---------------------------------------------------------------------------
+-- The forward repair: the home row 0004 would have placed, for every version
+-- that lacks one. Zero rows where 0004 ran as a role that saw every row.
+-- ---------------------------------------------------------------------------
+INSERT INTO agreement_garages (tenant_id, agreement_id, garage_id)
+SELECT a.tenant_id, a.id, a.garage_id
+FROM agreements a
+WHERE NOT EXISTS (
+  SELECT 1 FROM agreement_garages ag
+  WHERE ag.tenant_id = a.tenant_id AND ag.agreement_id = a.id AND ag.garage_id = a.garage_id
+);
 
 -- ---------------------------------------------------------------------------
 -- The backfill. Count, never assume.

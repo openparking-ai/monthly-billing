@@ -1687,6 +1687,36 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "so a wrong default commits silently -- the test that applies a copy with the "
         "default flipped and requires the count to fail it goes red",
     ),
+    "G43/repair-removed": (
+        "tests/test_g43_migration_0005_states_the_registrar.py",
+        "migrations/0005_agreements_registrar.sql",
+        source(
+            "FROM agreements a",
+            "WHERE NOT EXISTS (",
+        ),
+        source(
+            "FROM agreements a",
+            "WHERE false AND NOT EXISTS (  -- PLANTED: 0004's missing rows stay missing",
+        ),
+        "the forward repair places nothing: a database where 0004 ran blind keeps its "
+        "versions without a home row, and the module cannot load one of them -- the "
+        "test that seeds that database and counts the rows 0005 placed goes red",
+    ),
+    "G43/repair-widened": (
+        "tests/test_g43_migration_0005_states_the_registrar.py",
+        "migrations/0005_agreements_registrar.sql",
+        source(
+            "FROM agreements a",
+            "WHERE NOT EXISTS (",
+        ),
+        source(
+            "FROM agreements a",
+            "WHERE true OR NOT EXISTS (  -- PLANTED: every version, present or not",
+        ),
+        "the repair places a home row for EVERY version, the ones 0004 already placed "
+        "included, so on a database that needed nothing the unique constraint fails the "
+        "whole file -- the tests that require zero rows placed there go red",
+    ),
     "G43/blind-owner-allowed": (
         "tests/test_g43_migration_0005_states_the_registrar.py",
         "migrations/0005_agreements_registrar.sql",
@@ -1696,16 +1726,6 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "reads zero version rows, the count check compares 0 with 0, and the flipped "
         "default APPLIES with every version reading 'outside' on disk -- the test that "
         "runs the file as that role and requires the refusal by name goes red",
-    ),
-    "G41/blind-owner-allowed": (
-        "tests/test_g41_migration_0004_backfills_the_covered_set.py",
-        "migrations/0004_agreement_garages.sql",
-        "  IF NOT coalesce(sees_every_row, false) THEN",
-        "  IF false THEN  -- PLANTED: any role may run this, blind or not",
-        "THE L3's F-A SIBLING PLANTED BACK: under an owner that cannot see every row "
-        "the backfill places 0 rows for 1 version and its count check passes, 0 = 0 -- "
-        "every pre-existing version left without its home row; the test that runs the "
-        "file as that role and requires the refusal by name goes red",
     ),
     "G42/registrar-change-allowed": (
         "tests/test_g42_the_registration_door_and_the_single_writer.py",
