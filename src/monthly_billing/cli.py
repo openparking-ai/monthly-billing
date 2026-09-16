@@ -27,6 +27,7 @@ Against the store (the `store` extra, `MONTHLY_BILLING_DSN`, `--tenant`):
     monthly-billing register-vehicle --tenant T --agreement AG --vehicle ABC123 \\
         [--at 2026-05-07T09:00:00-06:00]
     monthly-billing release-vehicle --tenant T --agreement AG --vehicle ABC123
+    monthly-billing show-register --tenant T --agreement AG
 
 ``register-vehicle`` and ``release-vehicle`` are THE REGISTRATION DOOR: one
 vehicle identity, on or off an agreement whose registrar is OUTSIDE, at every
@@ -34,6 +35,14 @@ garage the agreement covers. They print the identity as stored at each garage,
 because two garages fold one plate differently and the registrar on the other
 side needs the stored form to reconcile. An agreement whose registrations this
 module writes is refused by name at both.
+
+``show-register`` is THE REGISTER READ, for any reader and either registrar:
+the agreement's latest version -- registrar, status, cancellation day, home
+and covered garages -- and every registration row that names the agreement,
+at any garage, as the identity stored there. JSON with sorted keys on stdout,
+exit 0; it writes nothing, takes no instant and validates nothing it does not
+return, so a version the loaders refuse still shows its register. An
+agreement the store does not hold is NOT FOUND, exit 2.
 
 A pending attempt comes only from the library's ``attempt_charge`` -- the
 platform, as an ordinary client, charges; nothing on this command line does.
@@ -326,6 +335,22 @@ def _release_vehicle(args: argparse.Namespace) -> int:
     return 0
 
 
+def _show_register(args: argparse.Namespace) -> int:
+    from .store.postgres import tenant
+    from .store.records import show_register
+
+    connection = _connection(args)
+    try:
+        with tenant(connection, args.tenant) as cursor:
+            register = show_register(cursor, args.tenant, args.agreement)
+    finally:
+        # A read: there is nothing to commit, and the transaction the tenant
+        # context opened is ended either way.
+        connection.rollback()
+    print(json.dumps(register.as_document(), sort_keys=True, indent=2))
+    return 0
+
+
 def _print_stored_forms(entries) -> None:
     """Per covered garage, the identity in the form that garage stores it --
     the caller's means of reconciling, and the whole of the door's answer."""
@@ -440,6 +465,14 @@ def main(argv: list[str] | None = None) -> int:
     release.add_argument("--agreement", required=True, help="the agreement id")
     release.add_argument("--vehicle", required=True)
     release.set_defaults(run=_release_vehicle)
+
+    show = sub.add_parser(
+        "show-register",
+        help="an agreement's registrations and the covered set they are kept against, as JSON",
+    )
+    _store_arguments(show)
+    show.add_argument("--agreement", required=True, help="the agreement id")
+    show.set_defaults(run=_show_register)
 
     args = parser.parse_args(argv)
     try:
