@@ -1838,6 +1838,160 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "registered is REFUSED by name at the barrier rather than answered -- fail "
         "closed, and still not the answer the lane needs",
     ),
+    "G45/own-version-rule": (
+        "tests/test_g45_the_register_can_be_read.py",
+        "store/records.py",
+        source(
+            "    latest = _latest_version_of(cursor, tenant_id, agreement_id)",
+            "    _registrar_must_be(agreement_id, Registrar(latest.registrar), Registrar.OUTSIDE)",
+        ),
+        source(
+            "    cursor.execute(  # PLANTED: the door picks its version on its own",
+            '        "SELECT id, registrar FROM agreements WHERE external_id = %s "',
+            '        "ORDER BY version DESC LIMIT 1",',
+            "        (agreement_id,),",
+            "    )",
+            "    row = cursor.fetchone()",
+            "    if row is None:",
+            '        raise AgreementNotFound(f"no agreement {agreement_id!r}")',
+            "    latest = _LatestVersion(as_uuid(row[0]), 0, row[1], \"\", None, as_uuid(row[0]))",
+            "    _registrar_must_be(agreement_id, Registrar(latest.registrar), Registrar.OUTSIDE)",
+        ),
+        "the door and the read each pick 'the latest version' with a SELECT of their "
+        "own -- two rules that agree today and can drift apart the day one is edited, "
+        "which is R5's whole point",
+    ),
+    "G45/read-writes": (
+        "tests/test_g45_the_register_can_be_read.py",
+        "store/records.py",
+        "    home_garage = _garage_external_id(cursor, latest.home_uuid)",
+        source(
+            "    cursor.execute(  # PLANTED: a read that writes -- no value changes, xmin does",
+            '        "UPDATE vehicle_registrations SET registered_at = registered_at "',
+            '        "WHERE agreement_external_id = %s", (agreement_id,),',
+            "    )",
+            "    home_garage = _garage_external_id(cursor, latest.home_uuid)",
+        ),
+        "the read touches a row on its way through: no value changes, so a count or "
+        "a digest of the values would stay green -- the xmin in the digest and the "
+        "cluster's tuple counters are what see it",
+    ),
+    "G45/tenant-predicate": (
+        "tests/test_g45_the_register_can_be_read.py",
+        "store/records.py",
+        '        "FROM agreements WHERE tenant_id = %s AND external_id = %s "',
+        '        "FROM agreements WHERE %s::uuid IS NOT NULL AND external_id = %s "  # PLANTED',
+        "the version helper scopes by the row policy alone: with the policy off, "
+        "LIMIT 1 hands the read another tenant's higher version of the same id, "
+        "and the read shows that tenant's register under this tenant's name",
+    ),
+    "G45/rows-tenant-predicate": (
+        "tests/test_g45_the_register_can_be_read.py",
+        "store/records.py",
+        '        "WHERE r.tenant_id = %s AND r.agreement_external_id = %s",',
+        '        "WHERE %s::uuid IS NOT NULL AND r.agreement_external_id = %s",  # PLANTED',
+        "the registrations are read by the agreement id alone, which is text shared "
+        "across tenants: with the policy off, another tenant's cars appear on this "
+        "tenant's register",
+    ),
+    "G45/outside-rows-hidden": (
+        "tests/test_g45_the_register_can_be_read.py",
+        "store/records.py",
+        "    not_covered = tuple(sorted({e.garage_id for e in registrations} - set(covered)))",
+        source(
+            "    registrations = tuple(  # PLANTED: only rows inside the covered set are shown",
+            "        e for e in registrations if e.garage_id in covered",
+            "    )",
+            "    not_covered = ()",
+        ),
+        "a row at a garage the latest version does not cover is dropped from the "
+        "answer and its garage never named -- exactly the row a reconciliation "
+        "exists to find, hidden by the read that exists to show it",
+    ),
+    "G45/through-load-garage": (
+        "tests/test_g45_the_register_can_be_read.py",
+        "store/records.py",
+        "    covered = tuple(sorted(_covered_garage_ids(cursor, latest.uuid)))",
+        source(
+            "    covered = tuple(sorted(  # PLANTED: the covered set built as Garage values",
+            "        load_garage(cursor, g).garage.id",
+            "        for g in _covered_garage_ids(cursor, latest.uuid)",
+            "    ))",
+        ),
+        "the read builds each covered garage through the loader, which validates "
+        "the garage's options: a garage stored with an unreadable timezone makes "
+        "the read refuse, and the register is hidden from the one reader that "
+        "needs it",
+    ),
+    "G45/covered-unsorted": (
+        "tests/test_g45_the_register_can_be_read.py",
+        "store/records.py",
+        "    covered = tuple(sorted(_covered_garage_ids(cursor, latest.uuid)))",
+        "    covered = tuple(_covered_garage_ids(cursor, latest.uuid))  # PLANTED: store order",
+        "the covered set is published in the order the store returns it -- the home "
+        "first, then the database's collation -- which is one order on this machine "
+        "and another in CI",
+    ),
+    "G45/rows-unsorted": (
+        "tests/test_g45_the_register_can_be_read.py",
+        "store/records.py",
+        "            key=lambda entry: (entry.identity_normalised, entry.garage_id),",
+        "            key=lambda entry: 0,  # PLANTED: the heap's order, whatever it is",
+        "the registrations are published in the order they came off the heap; the "
+        "fixture's premise assertion is that this is not the published order",
+    ),
+    "G45/tenth-key": (
+        "tests/test_g45_the_register_can_be_read.py",
+        "store/records.py",
+        "        return document",
+        source(
+            '        document["monthly_price_minor"] = 0  # PLANTED: a tenth key, the price',
+            "        return document",
+        ),
+        "the answer carries a tenth key -- the price -- and the field-set test, which "
+        "derives the nine from the class and reads the document's keys, sees it",
+    ),
+    "G45/refusal-swallowed": (
+        "tests/test_g45_the_register_can_be_read.py",
+        "store/records.py",
+        source(
+            "    latest = _latest_version_of(cursor, tenant_id, agreement_id)",
+            "    home_garage = _garage_external_id(cursor, latest.home_uuid)",
+        ),
+        source(
+            "    try:",
+            "        latest = _latest_version_of(cursor, tenant_id, agreement_id)",
+            "    except AgreementNotFound:  # PLANTED: an unknown agreement is an empty register",
+            '        return AgreementRegister(agreement_id, 0, "", "", None, "", (), (), ())',
+            "    home_garage = _garage_external_id(cursor, latest.home_uuid)",
+        ),
+        "an agreement the store does not hold answers an empty register, exit 0, "
+        "instead of NOT FOUND -- a typo in the id reads as 'no cars registered'",
+    ),
+    "G45/registrar-refused": (
+        "tests/test_g45_the_register_can_be_read.py",
+        "store/records.py",
+        "    covered = tuple(sorted(_covered_garage_ids(cursor, latest.uuid)))",
+        source(
+            "    _registrar_must_be(  # PLANTED: the read refuses on the single-writer rule",
+            "        agreement_id, Registrar(latest.registrar), Registrar.OUTSIDE",
+            "    )",
+            "    covered = tuple(sorted(_covered_garage_ids(cursor, latest.uuid)))",
+        ),
+        "the read refuses a self-written agreement by the door's name: the "
+        "single-writer rule, which governs writes, applied to a read",
+    ),
+    "G45/stderr": (
+        "tests/test_g45_the_register_can_be_read.py",
+        "cli.py",
+        "    print(json.dumps(register.as_document(), sort_keys=True, indent=2))",
+        source(
+            '    print(f"register of {args.agreement}", file=sys.stderr)  # PLANTED',
+            "    print(json.dumps(register.as_document(), sort_keys=True, indent=2))",
+        ),
+        "the verb writes a line to stderr on success, so a program reading the "
+        "answer sees noise where the contract says nothing",
+    ),
 }
 
 

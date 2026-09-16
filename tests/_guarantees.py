@@ -384,6 +384,28 @@ GUARANTEES: dict[str, str] = {
         "door-registered car at every door it covers; and the money doors read none "
         "of this."
     ),
+    "G45": (
+        "THE REGISTER CAN BE READ, BY ANY READER. `show-register` -- and "
+        "`show_register` beneath it, the same code, exported beside the door -- "
+        "answers for an agreement of EITHER registrar and says which, from its "
+        "LATEST version, chosen by the one helper the registration door chooses its "
+        "own with: the agreement id, the version, the registrar, the status, the "
+        "cancellation day, the home garage, the covered garages, every registration "
+        "row naming the agreement at ANY garage as the garage and the identity AS "
+        "STORED there, and the garages of rows the latest version does not cover. "
+        "Nine keys, derived from the answer class, and nothing more travels: no "
+        "price, payer, spots, fee, pause, mandate, access hours, start day, version "
+        "vehicle list, registration instant, invoice or payment. It takes no instant "
+        "and derives nothing; it validates nothing it does not return -- every field "
+        "is a column's own value under that column's constraint, no Agreement and no "
+        "Garage is built -- so a garage stored with an unreadable option or a version "
+        "the loaders refuse still shows its register in full; it writes nothing; "
+        "another tenant's agreement of the same id is not shown, with the row policy "
+        "on or off; every list is sorted in Python by code point, never by the "
+        "database's collation; an agreement the store does not hold is NOT FOUND "
+        "(stderr, exit 2) and one with no rows answers an empty register. JSON with "
+        "sorted keys on stdout, exit 0, nothing on stderr."
+    ),
 }
 
 

@@ -82,6 +82,17 @@ the door reads back is ``vehicle_registrations`` -- the garage's holder claim
 -- never ``agreement_vehicles``, which is a version's own list and stays empty
 for an outside registrar's agreement.
 
+**AND THE REGISTER CAN BE READ, BY ANY READER.** ``show_register`` answers,
+for an agreement of either registrar, what the store holds: the latest
+version's registrar, status, cancellation day, home and covered garages, and
+every ``vehicle_registrations`` row naming the agreement at ANY garage as the
+identity stored there -- the rows a reconciliation reads, including one at a
+garage the latest version no longer covers, which it names. It picks the
+latest version with the same helper the door does (``_latest_version_of``),
+builds no ``Agreement`` and no ``Garage`` -- every field it returns is a
+column's own value under that column's constraint -- so a version the loaders
+refuse still shows its register; it takes no instant and writes nothing.
+
 **THE STORE'S IDS AND THE ENGINE'S IDS ARE DIFFERENT THINGS.** The engine
 compares opaque strings -- a garage id, a payer id, an agreement id -- and never
 parses them. The store keys rows by uuid and carries those strings as
@@ -680,7 +691,7 @@ def register_from_outside(
     garage's id.
     """
     tenant_id = as_uuid(tenant_id)
-    covered = _outside_registrars_covered_set(cursor, agreement_id)
+    covered = _outside_registrars_covered_set(cursor, tenant_id, agreement_id)
     plan = _plan_registrations(cursor, covered, agreement_id, (identity,), now)
     for stored, at, listed, held in plan:
         _write_registrations(cursor, tenant_id, stored, at, listed, held, agreement_id)
@@ -708,8 +719,8 @@ def release_from_outside(
     by one writer a silent no-op would hide that the two registers have
     diverged, and nothing is written.
     """
-    as_uuid(tenant_id)  # the tenant policy scopes the write; typed for the same reason
-    covered = _outside_registrars_covered_set(cursor, agreement_id)
+    tenant_id = as_uuid(tenant_id)  # the tenant policy scopes the write; typed for the same reason
+    covered = _outside_registrars_covered_set(cursor, tenant_id, agreement_id)
     # Every garage's form first, then the deletes: an identity that normalises
     # to nothing at one garage refuses before any garage's row has gone.
     forms = [(stored, {stored.garage.normalise_identity(identity)}) for stored in covered]
@@ -749,22 +760,61 @@ def _stored_forms(
     )
 
 
-def _outside_registrars_covered_set(cursor: Any, agreement_id: str) -> tuple[StoredGarage, ...]:
-    """The covered set of the agreement's LATEST version, home first, for an
-    agreement whose registrar is OUTSIDE -- and the two refusals on the way:
-    no version in the store, and a registrar that is this module."""
+@dataclass(frozen=True)
+class _LatestVersion:
+    """The agreement's latest version row, as stored: the columns a reader by
+    agreement identity needs and no conversion beyond the uuid's. The
+    registrar and the status are the row's own text, constrained by the CHECKs
+    of 0005 and 0001; a caller that needs the enum makes it."""
+
+    uuid: UUID
+    version: int
+    registrar: str
+    status: str
+    cancelled_effective_day: date | None
+    home_uuid: UUID
+
+
+def _latest_version_of(cursor: Any, tenant_id: UUID, agreement_id: str) -> _LatestVersion:
+    """THE ONE LATEST-VERSION RULE for a read by agreement identity: the
+    highest version the tenant holds under this id, or ``AgreementNotFound``.
+    The registration door and the register read both pick their row here, so
+    the two cannot disagree on which version is current. The tenant is stated
+    in the predicate as well as by the policy: the read that shows a register
+    proves its own scoping with the row policy off, and a ``LIMIT 1`` across
+    tenants would otherwise pick another tenant's higher version."""
     cursor.execute(
-        "SELECT id, registrar FROM agreements WHERE external_id = %s "
+        "SELECT id, version, registrar, status, cancelled_effective_day, garage_id "
+        "FROM agreements WHERE tenant_id = %s AND external_id = %s "
         "ORDER BY version DESC LIMIT 1",
-        (agreement_id,),
+        (tenant_id, agreement_id),
     )
     row = cursor.fetchone()
     if row is None:
         raise AgreementNotFound(f"no agreement with id {agreement_id!r} in the store.")
-    latest_uuid, registrar = as_uuid(row[0]), Registrar(row[1])
-    _registrar_must_be(agreement_id, registrar, Registrar.OUTSIDE)
+    uuid, version, registrar, status, cancelled_day, home_uuid = row
+    return _LatestVersion(
+        uuid=as_uuid(uuid),
+        version=version,
+        registrar=registrar,
+        status=status,
+        cancelled_effective_day=cancelled_day,
+        home_uuid=as_uuid(home_uuid),
+    )
+
+
+def _outside_registrars_covered_set(
+    cursor: Any, tenant_id: UUID, agreement_id: str
+) -> tuple[StoredGarage, ...]:
+    """The covered set of the agreement's LATEST version, home first, for an
+    agreement whose registrar is OUTSIDE -- and the two refusals on the way:
+    no version in the store, and a registrar that is this module. The version
+    is the one ``_latest_version_of`` picks; the door reads its uuid and its
+    registrar from it and nothing else."""
+    latest = _latest_version_of(cursor, tenant_id, agreement_id)
+    _registrar_must_be(agreement_id, Registrar(latest.registrar), Registrar.OUTSIDE)
     out = []
-    for garage_id in _covered_garage_ids(cursor, latest_uuid):
+    for garage_id in _covered_garage_ids(cursor, latest.uuid):
         stored = load_garage(cursor, garage_id)
         if stored is None:  # pragma: no cover - 0004's key makes this unreachable
             raise GarageNotFound(
@@ -773,6 +823,148 @@ def _outside_registrars_covered_set(cursor: Any, agreement_id: str) -> tuple[Sto
             )
         out.append(stored)
     return tuple(out)
+
+
+# ---------------------------------------------------------------------------
+# The register read: an agreement's registrations, for ANY reader
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AgreementRegister:
+    """An agreement's register as the store holds it, and the set it is kept
+    against: the latest version's registrar, status, cancellation day, home and
+    covered garages; every ``vehicle_registrations`` row naming the agreement,
+    at ANY garage, as {garage, identity as stored}; and the garages of rows the
+    latest version does not cover. NOTHING ELSE TRAVELS -- not the price, the
+    payer, the spots, the fees, the pauses, the mandate, the access hours, the
+    start day, the version's own vehicle list or a registration's instant --
+    and the field set is derived from this class, so a field added here is a
+    field the test that says so sees the day it exists.
+
+    Every field is a column's own value, backed by that column's constraint,
+    or is derived in Python from two of them:
+
+    * ``agreement`` -- ``agreements.external_id``: text NOT NULL,
+      UNIQUE (tenant_id, external_id, version) (0001).
+    * ``version`` -- ``agreements.version``: integer NOT NULL CHECK (version >= 1).
+    * ``registrar`` -- ``agreements.registrar``: CHECK (registrar IN
+      ('this_module', 'outside')) (0005).
+    * ``status`` -- ``agreements.status``: CHECK (status IN ('active', 'cancelled')).
+    * ``cancelled_effective_day`` -- ``agreements.cancelled_effective_day``: date,
+      present iff cancelled (``agreements_cancellation_has_a_date``).
+    * ``home_garage`` -- ``garages.external_id`` via ``agreements.garage_id``: text
+      NOT NULL, UNIQUE (tenant_id, external_id); ``agreements_garage_in_tenant`` (0003).
+    * ``covered_garages`` -- ``garages.external_id`` via ``agreement_garages``:
+      ``agreement_garages_garage_in_tenant`` (0004).
+    * ``registrations[].garage`` -- ``garages.external_id`` via
+      ``vehicle_registrations.garage_id``: ``vehicle_registrations_garage_in_tenant`` (0003).
+    * ``registrations[].identity_normalised`` -- ``vehicle_registrations.identity_normalised``:
+      text NOT NULL CHECK (length(btrim(..)) > 0) (0003).
+    * ``garages_not_covered`` -- derived: the registrations' garages minus the covered set.
+
+    So the read validates nothing: no ``Agreement``, no ``Garage`` is built,
+    and a version the loaders refuse or a garage stored with an unreadable
+    option still shows its register in full -- the one reader that needs the
+    register is the one reconciling, and a read that refused would hide it.
+    """
+
+    agreement: str
+    version: int
+    registrar: str
+    status: str
+    cancelled_effective_day: date | None
+    home_garage: str
+    covered_garages: tuple[str, ...]
+    registrations: tuple[RegisteredIdentity, ...]
+    garages_not_covered: tuple[str, ...]
+
+    def as_document(self) -> dict[str, Any]:
+        """The JSON shape: the nine keys above, every list sorted by code
+        point in Python (never by the database's collation), the day as an
+        ISO date or null. The command line prints exactly this."""
+        document: dict[str, Any] = {
+            "agreement": self.agreement,
+            "version": self.version,
+            "registrar": self.registrar,
+            "status": self.status,
+            "cancelled_effective_day": (
+                None
+                if self.cancelled_effective_day is None
+                else self.cancelled_effective_day.isoformat()
+            ),
+            "home_garage": self.home_garage,
+            "covered_garages": list(self.covered_garages),
+            "registrations": [
+                {"garage": entry.garage_id, "identity_normalised": entry.identity_normalised}
+                for entry in self.registrations
+            ],
+            "garages_not_covered": list(self.garages_not_covered),
+        }
+        return document
+
+
+def _garage_external_id(cursor: Any, garage_uuid: UUID) -> str:
+    """The garage's id as the engine knows it, by the store's uuid -- the one
+    column, and nothing of the garage that could fail to load."""
+    cursor.execute("SELECT external_id FROM garages WHERE id = %s", (garage_uuid,))
+    (external_id,) = cursor.fetchone()
+    return external_id
+
+
+def show_register(cursor: Any, tenant_id: Any, agreement_id: str) -> AgreementRegister:
+    """An agreement's register, for ANY reader, from its LATEST version --
+    the version ``_latest_version_of`` picks, the same rule the registration
+    door applies. Answers for either registrar and says which in
+    ``registrar``: the single-writer rule governs WRITES, and a read refuses
+    nobody on it. Takes no instant and derives nothing: a cancelled agreement
+    whose day has passed is shown ``cancelled`` with its day and with whatever
+    rows are still stored. Writes nothing. An agreement the store does not
+    hold -- or one only another tenant holds -- raises ``AgreementNotFound``;
+    one with no rows answers an empty register, which is not a refusal.
+
+    Every ``vehicle_registrations`` row naming the agreement is shown, at ANY
+    garage -- including one the latest version no longer covers, which is
+    named again in ``garages_not_covered``. The module releases such rows when
+    the version that drops the garage is stored and nothing in the schema
+    forbids one (there is no key from ``vehicle_registrations`` to
+    ``agreement_garages``), so a row written past the module can sit there,
+    and it is exactly the row a reconciliation exists to find.
+
+    Sorted here, by code point: ``covered_garages`` and ``garages_not_covered``
+    by garage id, ``registrations`` by (identity, garage). The database's
+    ``ORDER BY`` on text is the machine's collation and differs between
+    machines; a program reading this needs one order.
+    """
+    tenant_id = as_uuid(tenant_id)
+    latest = _latest_version_of(cursor, tenant_id, agreement_id)
+    home_garage = _garage_external_id(cursor, latest.home_uuid)
+    covered = tuple(sorted(_covered_garage_ids(cursor, latest.uuid)))
+    cursor.execute(
+        "SELECT g.external_id, r.identity_normalised "
+        "FROM vehicle_registrations r JOIN garages g ON g.id = r.garage_id "
+        "WHERE r.tenant_id = %s AND r.agreement_external_id = %s",
+        (tenant_id, agreement_id),
+    )
+    registrations = tuple(
+        sorted(
+            (RegisteredIdentity(garage_id=garage, identity_normalised=identity)
+             for garage, identity in cursor.fetchall()),
+            key=lambda entry: (entry.identity_normalised, entry.garage_id),
+        )
+    )
+    not_covered = tuple(sorted({e.garage_id for e in registrations} - set(covered)))
+    return AgreementRegister(
+        agreement=agreement_id,
+        version=latest.version,
+        registrar=latest.registrar,
+        status=latest.status,
+        cancelled_effective_day=latest.cancelled_effective_day,
+        home_garage=home_garage,
+        covered_garages=covered,
+        registrations=registrations,
+        garages_not_covered=not_covered,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1072,6 +1264,7 @@ def payer_uuid_for(cursor: Any, external_id: str) -> UUID | None:
 
 __all__ = [
     "AgreementNotFound",
+    "AgreementRegister",
     "GarageNotFound",
     "RegisteredIdentity",
     "StoredAgreement",
@@ -1088,6 +1281,7 @@ __all__ = [
     "registration_for",
     "registrations_at_garage",
     "release_from_outside",
+    "show_register",
     "store_agreement",
     "store_garage",
     "store_payer",
