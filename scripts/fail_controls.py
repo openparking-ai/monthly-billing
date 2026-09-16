@@ -1873,8 +1873,46 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
             "    home_garage = _garage_external_id(cursor, latest.home_uuid)",
         ),
         "the read touches a row on its way through: no value changes, so a count or "
-        "a digest of the values would stay green -- the xmin in the digest is what "
-        "sees it",
+        "a digest of the values would stay green -- the xmin in the digest sees it, "
+        "and so do the app backend's own tuple counters",
+    ),
+    "G45/read-writes-netted": (
+        "tests/test_g45_the_register_can_be_read.py",
+        "store/records.py",
+        "    home_garage = _garage_external_id(cursor, latest.home_uuid)",
+        source(
+            "    cursor.execute(  # PLANTED: insert then delete, net zero rows",
+            '        "INSERT INTO vehicle_registrations (tenant_id, garage_id, '
+            'identity_normalised, "',
+            '        "agreement_external_id, registered_at) VALUES (%s, %s, \'planted-row\', "',
+            '        "\'planted-agreement\', now())", (tenant_id, latest.home_uuid),',
+            "    )",
+            '    cursor.execute("DELETE FROM vehicle_registrations '
+            'WHERE identity_normalised = \'planted-row\'")',
+            "    home_garage = _garage_external_id(cursor, latest.home_uuid)",
+        ),
+        "the read inserts a row and deletes it again before it commits: no committed "
+        "row change, so the digest -- xmin included -- stays green; the app backend's "
+        "own tuple counters, read inside the read's transaction, are what see it",
+    ),
+    "G45/read-writes-undone": (
+        "tests/test_g45_the_register_can_be_read.py",
+        "store/records.py",
+        "    home_garage = _garage_external_id(cursor, latest.home_uuid)",
+        source(
+            '    cursor.execute("SAVEPOINT planted")  # PLANTED: a write, then undone',
+            "    cursor.execute(",
+            '        "UPDATE vehicle_registrations SET registered_at = registered_at '
+            '+ interval \'1 second\' "',
+            '        "WHERE agreement_external_id = %s", (agreement_id,),',
+            "    )",
+            '    cursor.execute("ROLLBACK TO SAVEPOINT planted")',
+            "    home_garage = _garage_external_id(cursor, latest.home_uuid)",
+        ),
+        "the read updates rows and rolls the update back to a savepoint inside its "
+        "own transaction: nothing is committed, so the digest -- xmin included -- "
+        "stays green; the backend counted the attempted change and a rolled-back "
+        "row stays counted, so its own tuple counters are what see it",
     ),
     "G45/tenant-predicate": (
         "tests/test_g45_the_register_can_be_read.py",

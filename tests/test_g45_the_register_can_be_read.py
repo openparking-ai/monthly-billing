@@ -24,11 +24,13 @@ door DO refuse on the same rows. It takes no instant, derives nothing, writes
 nothing, and sorts in Python by code point because the database's order on
 text is the machine's collation (the G42 lesson: green here, red in CI).
 
-Controls: the read given its own version rule; a write planted into the read;
-the tenant predicate planted away (the policy off shows another tenant's
-version); the registrations' tenant predicate planted away; rows outside the
-covered set hidden; the read routed through ``load_garage``; the Python sort
-removed; a tenth key; the refusal swallowed.
+Controls: the read given its own version rule; a write planted into the read
+in three shapes (an update that changes no value; a row inserted and deleted
+again before the commit; an update rolled back to a savepoint); the tenant
+predicate planted away (the policy off shows another tenant's version); the
+registrations' tenant predicate planted away; rows outside the covered set
+hidden; the read routed through ``load_garage``; the Python sort removed; a
+tenth key; the refusal swallowed.
 """
 
 from __future__ import annotations
@@ -571,24 +573,84 @@ def test_the_lists_are_sorted_by_code_point_in_python_and_not_by_the_database(ap
 @pytest.mark.guarantee("G45")
 @store_backed
 def test_the_read_writes_nothing(app, owner, tenant_id):
-    """T1: the row count and a digest of every row of EVERY table -- xmin
+    """T1, two instruments, and neither reads a figure another backend can
+    move. (1) The row count and a digest of every row of EVERY table -- xmin
     included, so an update that changed no value is still a change -- before
-    and after the library read (committed) and the command line. The positive
-    control first: the same instrument sees the door's write."""
+    and after the library read (committed) and the command line: every write
+    that leaves a committed row change. (2) The app backend's OWN tuple
+    counters, inserted + updated + deleted over every table, read before and
+    after the library read INSIDE the read's transaction: the writes the digest
+    cannot see -- a row inserted and deleted again, an update rolled back to a
+    savepoint -- because a backend counts every row change it attempted and a
+    rolled-back one stays counted. The owner's pending statistics (the tenant
+    row each fixture inserts, landing in the cluster's view at whichever owner
+    transaction end first falls past PGSTAT_MIN_INTERVAL) are not in that
+    figure, which is what moved the cluster-wide statistics sum this replaces
+    by eleven on a slow runner. The positive control first: the door's
+    write is seen by both. The command line runs in its own connection, so
+    the counters here are not its: its coverage is the digest, and the tests
+    above that its document is the library read's ``as_document()``."""
     _seed(app, tenant_id, outside())
     before = _digests(owner)
-    _register(app, tenant_id, OUTSIDE_ID, "AB-123")
+    _stored, moved = _own_writes(
+        app, tenant_id,
+        lambda cursor: register_from_outside(cursor, tenant_id, OUTSIDE_ID, "AB-123", now=DAY),
+    )
     after_write = _digests(owner)
-    assert after_write != before, "the premise: the instrument sees a write"
+    assert after_write != before, "the premise: the digest sees a write"
     assert after_write["vehicle_registrations"][0] == before["vehicle_registrations"][0] + 2
+    assert moved == 2, "the premise: the backend's own counters see the door's two rows"
 
     still = _digests(owner)
-    register = _read(app, tenant_id)
+    register, moved = _own_writes(
+        app, tenant_id, lambda cursor: show_register(cursor, tenant_id, OUTSIDE_ID),
+    )
     assert register.registrations == entries((OTHER.id, "AB-123"), (HOME.id, "ab123"))
+    assert moved == 0, "the read inserted, updated or deleted a row, committed or not"
     assert _digests(owner) == still
     code, _out, err = _cli(tenant_id, OUTSIDE_ID)
     assert (code, err) == (0, "")
     assert _digests(owner) == still
+
+
+def _own_writes(app, tenant_id, action):
+    """``action(cursor)`` inside one tenant transaction on the app connection,
+    COMMITTED afterwards, with the backend's own tuple counters read before
+    and after it in that same transaction. Returns the action's result and the
+    rows it inserted + updated + deleted, rolled back or not.
+
+    In the transaction on purpose. ``pg_stat_get_xact_tuples_*`` is the
+    backend's pending count plus its live transaction's, and the pending part
+    is flushed to the cluster only between transactions, once
+    PGSTAT_MIN_INTERVAL has passed -- so a figure taken AFTER the commit reads
+    zero when the action took longer than a second (measured), which is the
+    slow runner the counter instrument this replaces flaked on. Between two
+    reads inside one transaction nothing is flushed and no other backend is
+    consulted: the delta is this action's own, exactly."""
+    with tenant(app, tenant_id) as cursor:
+        try:
+            before = _own_tuples(cursor)
+            result = action(cursor)
+            after = _own_tuples(cursor)
+        except BaseException:
+            app.rollback()
+            raise
+    app.commit()
+    return result, after - before
+
+
+def _own_tuples(cursor) -> int:
+    """This backend's inserted + updated + deleted tuples over every table of
+    the schema -- its own, never another backend's."""
+    cursor.execute(
+        "SELECT coalesce(sum(pg_stat_get_xact_tuples_inserted(c.oid) "
+        "+ pg_stat_get_xact_tuples_updated(c.oid) "
+        "+ pg_stat_get_xact_tuples_deleted(c.oid)), 0)::bigint "
+        "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')"
+    )
+    (total,) = cursor.fetchone()
+    return int(total)
 
 
 def _digests(owner) -> dict[str, tuple[int, str]]:
