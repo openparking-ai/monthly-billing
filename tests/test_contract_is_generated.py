@@ -317,14 +317,38 @@ def test_the_options_block_follows_the_enums():
     Derived from the enums themselves rather than from a list in this test, so a
     member added next round is covered without anybody editing this file.
     """
-    from monthly_billing.agreement import FeeCadence
+    from monthly_billing.agreement import FeeCadence, Registrar
     from monthly_billing.exceptions_by_owner import ExceptionKind
     from monthly_billing.garage import BillingDay, IdentityRule
 
     block = gen.block_options()
-    for enum in (BillingDay, IdentityRule, FeeCadence, ExceptionKind):
+    for enum in (BillingDay, IdentityRule, FeeCadence, ExceptionKind, Registrar):
         for member in enum:
             assert f"`{member.value}`" in block, f"{member} is missing from the contract"
+
+
+@pytest.mark.guarantee("G15")
+def test_the_registrar_sentence_follows_the_default():
+    """The registrar block says which member is the default and what a document
+    that says nothing gets, DERIVED from the dataclass field. Plant the default
+    on the other member and require the sentence to move with it."""
+    import dataclasses
+
+    from monthly_billing.agreement import Agreement, Registrar
+
+    field = Agreement.__dataclass_fields__["registrar"]
+    before = gen.block_options()
+    assert "`this_module` (the default)" in before and "`outside` (the default)" not in before
+    assert "A document that says nothing is `this_module`" in before
+    real = field.default
+    field.default = Registrar.OUTSIDE
+    try:
+        after = gen.block_options()
+    finally:
+        field.default = real
+    assert field.default is dataclasses.fields(Agreement)[-1].default, "restored"
+    assert "`outside` (the default)" in after and "`this_module` (the default)" not in after
+    assert "A document that says nothing is `outside`" in after
 
 
 @pytest.mark.parametrize("phrase", ["never means refuse exit", "no default"])

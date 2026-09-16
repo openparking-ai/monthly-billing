@@ -24,6 +24,16 @@ Against the store (the `store` extra, `MONTHLY_BILLING_DSN`, `--tenant`):
     monthly-billing pending-attempts --tenant T --invoice REF
     monthly-billing resolve-attempt --tenant T --attempt ID --outcome success \\
         --at 2026-05-07T09:05:00-06:00 --recorded-by operator [--reference AUTH]
+    monthly-billing register-vehicle --tenant T --agreement AG --vehicle ABC123 \\
+        [--at 2026-05-07T09:00:00-06:00]
+    monthly-billing release-vehicle --tenant T --agreement AG --vehicle ABC123
+
+``register-vehicle`` and ``release-vehicle`` are THE REGISTRATION DOOR: one
+vehicle identity, on or off an agreement whose registrar is OUTSIDE, at every
+garage the agreement covers. They print the identity as stored at each garage,
+because two garages fold one plate differently and the registrar on the other
+side needs the stored form to reconcile. An agreement whose registrations this
+module writes is refused by name at both.
 
 A pending attempt comes only from the library's ``attempt_charge`` -- the
 platform, as an ordinary client, charges; nothing on this command line does.
@@ -45,7 +55,7 @@ import os
 import sys
 from datetime import date, datetime
 
-from .agreement import InvalidAgreement, load_agreement_file
+from .agreement import InvalidAgreement, Registrar, load_agreement_file
 from .currency import UnpriceableCurrency
 from .entitlement import is_covered
 from .findings import Refused
@@ -103,7 +113,13 @@ def _covered(args: argparse.Namespace) -> int:
 def _check_agreement(args: argparse.Namespace) -> int:
     agreement = load_agreement_file(args.agreement)
     print(f"{agreement.id} version {agreement.version}: loads cleanly.")
-    print(f"  {agreement.spots} spots, {len(agreement.vehicles)} vehicles listed")
+    if agreement.registrar is Registrar.OUTSIDE:
+        print(
+            f"  {agreement.spots} spots; vehicles registered by an OUTSIDE registrar, "
+            "none listed here"
+        )
+    else:
+        print(f"  {agreement.spots} spots, {len(agreement.vehicles)} vehicles listed")
     others = [g for g in agreement.covered_garage_ids if g != agreement.garage_id]
     print(
         f"  billed at garage {agreement.garage_id}"
@@ -273,6 +289,50 @@ def _pending_attempts(args: argparse.Namespace) -> int:
     return 0
 
 
+def _register_vehicle(args: argparse.Namespace) -> int:
+    from .store.postgres import tenant
+    from .store.records import register_from_outside
+
+    connection = _connection(args)
+    with tenant(connection, args.tenant) as cursor:
+        try:
+            stored = register_from_outside(
+                cursor, args.tenant, args.agreement, args.vehicle,
+                now=datetime.fromisoformat(args.at) if args.at else None,
+            )
+        except BaseException:
+            connection.rollback()
+            raise
+    connection.commit()
+    print(f"vehicle registered to agreement {args.agreement}")
+    _print_stored_forms(stored)
+    return 0
+
+
+def _release_vehicle(args: argparse.Namespace) -> int:
+    from .store.postgres import tenant
+    from .store.records import release_from_outside
+
+    connection = _connection(args)
+    with tenant(connection, args.tenant) as cursor:
+        try:
+            released = release_from_outside(cursor, args.tenant, args.agreement, args.vehicle)
+        except BaseException:
+            connection.rollback()
+            raise
+    connection.commit()
+    print(f"vehicle released from agreement {args.agreement}")
+    _print_stored_forms(released)
+    return 0
+
+
+def _print_stored_forms(entries) -> None:
+    """Per covered garage, the identity in the form that garage stores it --
+    the caller's means of reconciling, and the whole of the door's answer."""
+    for entry in entries:
+        print(f"  at garage {entry.garage_id}: {entry.identity_normalised}")
+
+
 def _outcomes():
     """The outcome enum's values and nothing else -- the CLI accepts no other spelling."""
     from .payment import Outcome
@@ -362,6 +422,25 @@ def main(argv: list[str] | None = None) -> int:
     resolve.add_argument("--detail", help="what the processor said, for a person")
     resolve.set_defaults(run=_resolve_attempt)
 
+    register = sub.add_parser(
+        "register-vehicle",
+        help="register one vehicle to an agreement whose registrar is OUTSIDE",
+    )
+    _store_arguments(register)
+    register.add_argument("--agreement", required=True, help="the agreement id")
+    register.add_argument("--vehicle", required=True)
+    register.add_argument("--at", help="the registration instant (ISO with offset); default: now")
+    register.set_defaults(run=_register_vehicle)
+
+    release = sub.add_parser(
+        "release-vehicle",
+        help="release one vehicle from an agreement whose registrar is OUTSIDE",
+    )
+    _store_arguments(release)
+    release.add_argument("--agreement", required=True, help="the agreement id")
+    release.add_argument("--vehicle", required=True)
+    release.set_defaults(run=_release_vehicle)
+
     args = parser.parse_args(argv)
     try:
         return args.run(args)
@@ -377,6 +456,14 @@ def main(argv: list[str] | None = None) -> int:
     except LookupError as missing:
         # A garage, invoice or payment id that names nothing in the store.
         print(f"NOT FOUND — {missing}", file=sys.stderr)
+        return 2
+    except ValueError as bad:
+        # The module's own value refusals that carry a sentence rather than a
+        # code -- a vehicle identity that normalises to nothing under the
+        # garage's rule, an instant that is not an ISO instant. G18: a command
+        # renders a refusal, never a traceback; the sentence was written for a
+        # person and is printed as it is.
+        print(f"REFUSED — {bad}", file=sys.stderr)
         return 2
 
 

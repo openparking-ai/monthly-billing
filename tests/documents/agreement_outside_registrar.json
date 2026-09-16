@@ -1,0 +1,20 @@
+{
+  "id": "ag-fleet-0007",
+  "version": 1,
+  "garage_id": "garage-downtown",
+  "covered_garage_ids": ["garage-downtown"],
+  "payer_id": "payer-fleet",
+  "spots": 4,
+  "vehicles": [],
+  "registrar": "outside",
+  "monthly_price_minor": 48000,
+  "start_day": "2026-03-10",
+  "mandate": {
+    "agreed_by": "the fleet manager",
+    "agreed_at_iso": "2026-03-09T16:20:00-07:00",
+    "terms_shown": "A recurring monthly charge for monthly parking at this garage.",
+    "frequency_shown": "Monthly, on the last day of each month.",
+    "amount_basis_shown": "The stated monthly price plus any stated additional fees.",
+    "cancellation_shown": "Cancel in writing; the paid period runs to its end."
+  }
+}

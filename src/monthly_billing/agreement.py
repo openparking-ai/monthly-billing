@@ -35,6 +35,17 @@ ten at each. His ruling, 2026-09-15.
 that suspended billing while still opening the barrier would be a free month, and
 one that suspended coverage while still billing would be theft. It is one field
 with one meaning.
+
+**AN AGREEMENT STATES WHO WRITES ITS REGISTRATIONS, AND IT IS NEVER INFERRED.**
+``registrar`` is this module (the default, so every agreement written before the
+field existed is unchanged) or an OUTSIDE registrar -- some system of the
+owner's that keeps the garage's register of which car belongs to which
+agreement and writes it here through the registration door, one vehicle at a
+time. One agreement, one registrar: an outside registrar's agreement lists NO
+vehicles on its document -- a list it does not own is refused by name -- and the
+module writes none of its registrations itself. Stated on the document, never
+inferred from anything else, for the reason the covered set is listed rather
+than defaulted: a mode nobody wrote down cannot be audited and cannot be refused.
 """
 
 from __future__ import annotations
@@ -60,6 +71,21 @@ class FeeCadence(Enum):
 class Status(Enum):
     ACTIVE = "active"
     CANCELLED = "cancelled"
+
+
+class Registrar(Enum):
+    """Who writes an agreement's vehicle registrations -- the garage-wide fact
+    of which agreement a vehicle identity belongs to (migration 0003).
+
+    ``THIS_MODULE`` keeps them in step with the version's own vehicle list.
+    ``OUTSIDE`` means an outside registrar owns them: it registers and releases
+    one vehicle identity at a time through the store's registration door, the
+    document lists none, and the module writes none. The word is general on
+    purpose -- nothing here knows which outside system, and nothing may.
+    """
+
+    THIS_MODULE = "this_module"
+    OUTSIDE = "outside"
 
 
 @dataclass(frozen=True)
@@ -227,6 +253,10 @@ class Agreement:
     access_hours: AccessHours | None = None
     pauses: tuple[Pause, ...] = ()
     additional_fees: tuple[AdditionalFee, ...] = ()
+    #: Who writes this agreement's registrations. Defaults to this module, so
+    #: every existing document, row and test is unchanged; see the module
+    #: docstring and ``Registrar``.
+    registrar: Registrar = Registrar.THIS_MODULE
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -246,13 +276,34 @@ class Agreement:
             )
         as_non_negative_minor(self.monthly_price_minor, f"agreement[{self.id}].monthly_price_minor")
 
-        if not isinstance(self.vehicles, tuple) or not self.vehicles:
+        if not isinstance(self.registrar, Registrar):
             raise InvalidAgreement(
-                f"agreement {self.id!r} lists no vehicles. The list size is "
-                "independent of the spots bought -- twenty registered against ten "
-                "bought is ordinary -- but an agreement covering no vehicle at all "
-                "covers nothing, and would answer 'not covered' for every car "
-                "forever without saying why."
+                f"agreement {self.id!r} has registrar {self.registrar!r}; it is one of "
+                f"{[r.value for r in Registrar]}. Who writes the registrations is stated, "
+                "never inferred."
+            )
+        # The vehicle list belongs to whoever writes the registrations. Under
+        # this module it is required: an agreement covering no vehicle covers
+        # nothing. Under an OUTSIDE registrar it is refused when present: the
+        # cars arrive one at a time through the registration door, and a
+        # document that carried a list it does not own would be a second writer.
+        # Both halves read the mode; neither infers it.
+        if not isinstance(self.vehicles, tuple) or not self.vehicles:
+            if not (isinstance(self.vehicles, tuple) and self.registrar is Registrar.OUTSIDE):
+                raise InvalidAgreement(
+                    f"agreement {self.id!r} lists no vehicles. The list size is "
+                    "independent of the spots bought -- twenty registered against ten "
+                    "bought is ordinary -- but an agreement covering no vehicle at all "
+                    "covers nothing, and would answer 'not covered' for every car "
+                    "forever without saying why."
+                )
+        elif self.registrar is Registrar.OUTSIDE:
+            raise InvalidAgreement(
+                f"agreement {self.id!r} lists {len(self.vehicles)} vehicle(s) and names an "
+                "outside registrar. An outside registrar's agreement lists no vehicles: "
+                "its registrations are written one at a time through the registration "
+                "door by the registrar that owns them, and a document that carried a "
+                "list of its own would be a second writer of the same rows."
             )
         for i, identity in enumerate(self.vehicles):
             if not isinstance(identity, str) or not identity.strip():
@@ -386,6 +437,7 @@ KNOWN_KEYS: frozenset[str] = frozenset(
         "access_hours",
         "pauses",
         "additional_fees",
+        "registrar",
     }
 )
 
@@ -517,6 +569,15 @@ def load_agreement(document: dict[str, Any]) -> Agreement:
             f"{[s.value for s in Status]}."
         ) from exc
 
+    try:
+        registrar = Registrar(document.get("registrar", Registrar.THIS_MODULE.value))
+    except ValueError as exc:
+        raise InvalidAgreement(
+            f"agreement.registrar is {document.get('registrar')!r}; it is one of "
+            f"{[r.value for r in Registrar]}. Absent means this module writes the "
+            "registrations."
+        ) from exc
+
     cancelled_day = document.get("cancelled_effective_day")
     return Agreement(
         id=document["id"],
@@ -546,6 +607,7 @@ def load_agreement(document: dict[str, Any]) -> Agreement:
         access_hours=access_hours,
         pauses=tuple(pauses),
         additional_fees=tuple(fees),
+        registrar=registrar,
     )
 
 
@@ -563,6 +625,7 @@ __all__ = [
     "KNOWN_KEYS",
     "Mandate",
     "Pause",
+    "Registrar",
     "Status",
     "load_agreement",
     "load_agreement_file",
