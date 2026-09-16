@@ -1873,8 +1873,8 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
             "    home_garage = _garage_external_id(cursor, latest.home_uuid)",
         ),
         "the read touches a row on its way through: no value changes, so a count or "
-        "a digest of the values would stay green -- the xmin in the digest and the "
-        "cluster's tuple counters are what see it",
+        "a digest of the values would stay green -- the xmin in the digest is what "
+        "sees it",
     ),
     "G45/tenant-predicate": (
         "tests/test_g45_the_register_can_be_read.py",

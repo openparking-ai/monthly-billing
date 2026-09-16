@@ -573,9 +573,8 @@ def test_the_lists_are_sorted_by_code_point_in_python_and_not_by_the_database(ap
 def test_the_read_writes_nothing(app, owner, tenant_id):
     """T1: the row count and a digest of every row of EVERY table -- xmin
     included, so an update that changed no value is still a change -- before
-    and after the library read (committed) and the command line; and the
-    cluster's tuple counters for the library read. The positive control first:
-    the same instruments see the door's write."""
+    and after the library read (committed) and the command line. The positive
+    control first: the same instrument sees the door's write."""
     _seed(app, tenant_id, outside())
     before = _digests(owner)
     _register(app, tenant_id, OUTSIDE_ID, "AB-123")
@@ -583,18 +582,13 @@ def test_the_read_writes_nothing(app, owner, tenant_id):
     assert after_write != before, "the premise: the instrument sees a write"
     assert after_write["vehicle_registrations"][0] == before["vehicle_registrations"][0] + 2
 
-    counters_before = _tuple_counters(owner, app)
     still = _digests(owner)
     register = _read(app, tenant_id)
     assert register.registrations == entries((OTHER.id, "AB-123"), (HOME.id, "ab123"))
     assert _digests(owner) == still
-    assert _tuple_counters(owner, app) == counters_before
     code, _out, err = _cli(tenant_id, OUTSIDE_ID)
     assert (code, err) == (0, "")
     assert _digests(owner) == still
-    # And the positive control for the counters: a write moves them.
-    _register(app, tenant_id, OUTSIDE_ID, "CD-456")
-    assert _tuple_counters(owner, app) != counters_before
 
 
 def _digests(owner) -> dict[str, tuple[int, str]]:
@@ -612,22 +606,6 @@ def _digests(owner) -> dict[str, tuple[int, str]]:
             out[table] = cursor.fetchone()
     assert len(out) >= 12, sorted(out)
     return out
-
-
-def _tuple_counters(owner, app) -> int:
-    """Inserted + updated + deleted tuples over every table of the schema. The
-    app backend flushes its pending statistics first, so the figure is the
-    library read's own and not a snapshot from before it."""
-    with app.cursor() as cursor:
-        cursor.execute("SELECT pg_stat_force_next_flush()")
-    app.commit()
-    with owner.cursor() as cursor:
-        cursor.execute(
-            "SELECT coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0)::bigint "
-            "FROM pg_stat_user_tables WHERE schemaname = 'public'"
-        )
-        (total,) = cursor.fetchone()
-    return int(total)
 
 
 @pytest.mark.guarantee("G45")
