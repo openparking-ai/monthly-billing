@@ -73,6 +73,7 @@ REFUSAL_REGISTRAR_IS_OUTSIDE = "REFUSAL_REGISTRAR_IS_OUTSIDE"
 REFUSAL_REGISTRAR_CHANGED = "REFUSAL_REGISTRAR_CHANGED"
 REFUSAL_REGISTRATIONS_NOT_GIVEN = "REFUSAL_REGISTRATIONS_NOT_GIVEN"
 REFUSAL_VEHICLE_NOT_REGISTERED = "REFUSAL_VEHICLE_NOT_REGISTERED"
+REFUSAL_GARAGE_NOT_COVERED = "REFUSAL_GARAGE_NOT_COVERED"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -250,10 +251,20 @@ REFUSALS: dict[str, str] = {
     ),
     REFUSAL_VEHICLE_NOT_REGISTERED: (
         "This vehicle identity is registered to this agreement at no garage the "
-        "agreement covers, so there is nothing to release. For a register kept by "
-        "one writer a release that finds no row means the two registers have "
-        "diverged, which is the one thing the single-writer rule exists to "
-        "surface -- so it is refused by name rather than reported as done."
+        "release reached -- every garage the agreement covers, or the one covered "
+        "garage the release named -- so there is nothing to release. For a "
+        "register kept by one writer a release that finds no row means the two "
+        "registers have diverged, which is the one thing the single-writer rule "
+        "exists to surface -- so it is refused by name rather than reported as done."
+    ),
+    REFUSAL_GARAGE_NOT_COVERED: (
+        "A release named a garage the agreement's LATEST version does not cover. "
+        "The door reaches the covered set and nothing outside it: a row this "
+        "agreement left at a garage a later version dropped is released by the "
+        "version that dropped it, not by name, and a garage the agreement never "
+        "covered holds no row of it to release. The garage exists for this tenant "
+        "-- one it does not hold is NOT FOUND, before this -- it is simply not on "
+        "the agreement."
     ),
     REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL: (
         "This adjustment would take the invoice total below zero. A waived fee or "

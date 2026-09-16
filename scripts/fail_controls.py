@@ -2030,6 +2030,138 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "the verb writes a line to stderr on success, so a program reading the "
         "answer sees noise where the contract says nothing",
     ),
+    "G46/option-dropped": (
+        "tests/test_g46_a_release_can_name_one_garage.py",
+        "cli.py",
+        "                cursor, args.tenant, args.agreement, args.vehicle, garage_id=args.garage",
+        "                cursor, args.tenant, args.agreement, args.vehicle, garage_id=None  "
+        "# PLANTED: parsed and dropped",
+        "the command line accepts --garage and hands the library nothing: the verb fans "
+        "out as before, prints a line per garage, and the stale row's live twin at the "
+        "folded garage goes with it",
+    ),
+    "G46/fan-out-kept": (
+        "tests/test_g46_a_release_can_name_one_garage.py",
+        "store/records.py",
+        "        reached = (_covered_garage_named(cursor, tenant_id, agreement_id, covered, "
+        "garage_id),)",
+        "        reached = covered  # PLANTED: the garage is named, the fan-out is kept",
+        "the library reads the option and releases at every covered garage anyway -- the "
+        "L3's defect exactly, with the option in place",
+    ),
+    "G46/lookup-tenant-predicate": (
+        "tests/test_g46_a_release_can_name_one_garage.py",
+        "store/records.py",
+        source(
+            '        "SELECT id FROM garages WHERE tenant_id = %s AND external_id = %s",',
+            "        (tenant_id, garage_id),",
+        ),
+        source(
+            '        "SELECT id FROM garages WHERE external_id = %s",  # PLANTED: policy only',
+            "        (garage_id,),",
+        ),
+        "the named-garage lookup is scoped by the row policy alone, as load_garage is: "
+        "with the policy off another tenant's garage of that id is FOUND, and the release "
+        "then refuses it as 'not covered' -- the wrong name for the fact",
+    ),
+    "G46/not-found-renamed": (
+        "tests/test_g46_a_release_can_name_one_garage.py",
+        "store/records.py",
+        '        raise GarageNotFound(f"no garage with id {garage_id!r} in the store.")',
+        source(
+            "        raise Refused(  # PLANTED: an unknown garage under the covered-set code",
+            "            REFUSAL_GARAGE_NOT_COVERED,",
+            '            f"no garage with id {garage_id!r} in the store.",',
+            "        )",
+        ),
+        "a garage the tenant does not hold is refused under REFUSAL_GARAGE_NOT_COVERED "
+        "instead of NOT FOUND: the third refusal and the fourth collapse into one, and "
+        "an operator reading the code cannot tell a typo from a garage off the agreement",
+    ),
+    "G46/not-covered-accepted": (
+        "tests/test_g46_a_release_can_name_one_garage.py",
+        "store/records.py",
+        source(
+            "    for stored in covered:",
+            "        if stored.uuid == garage_uuid:",
+            "            return stored",
+            "    raise Refused(",
+            "        REFUSAL_GARAGE_NOT_COVERED,",
+        ),
+        source(
+            "    for stored in covered:",
+            "        if stored.uuid == garage_uuid:",
+            "            return stored",
+            "    return load_garage(cursor, garage_id)  # PLANTED: any garage the tenant holds",
+            "    raise Refused(",
+            "        REFUSAL_GARAGE_NOT_COVERED,",
+        ),
+        "a garage the tenant holds but the latest version does not cover is reached by "
+        "name: a row left there raw is deleted by a door the contract says stops at the "
+        "covered set, and the refusal is never raised",
+    ),
+    "G46/garage-before-agreement": (
+        "tests/test_g46_a_release_can_name_one_garage.py",
+        "store/records.py",
+        "    covered = _outside_registrars_covered_set(cursor, tenant_id, agreement_id)\n"
+        "    reached = covered",
+        source(
+            "    if garage_id is not None:  # PLANTED: the garage before the agreement",
+            "        cursor.execute(",
+            '            "SELECT id FROM garages WHERE tenant_id = %s AND external_id = %s",',
+            "            (tenant_id, garage_id),",
+            "        )",
+            "        if cursor.fetchone() is None:",
+            '            raise GarageNotFound(f"no garage with id {garage_id!r} in the store.")',
+            "    covered = _outside_registrars_covered_set(cursor, tenant_id, agreement_id)",
+            "    reached = covered",
+        ),
+        "the refusals come out of order: an unknown agreement named with an unknown "
+        "garage is NOT FOUND for the garage, and a self-written agreement's refusal by "
+        "name is hidden behind the garage's",
+    ),
+    "G46/delete-before-refusals": (
+        "tests/test_g46_a_release_can_name_one_garage.py",
+        "store/records.py",
+        "    if garage_id is not None:\n"
+        "        reached = (_covered_garage_named(",
+        source(
+            "    if garage_id is not None:",
+            "        cursor.execute(  # PLANTED: the rows go before the garage is judged",
+            '            "DELETE FROM vehicle_registrations WHERE agreement_external_id = %s",',
+            "            (agreement_id,),",
+            "        )",
+            "        reached = (_covered_garage_named(",
+        ),
+        "a named release writes before it refuses: a garage the tenant does not hold or "
+        "the version does not cover is still refused by name, and every row of the "
+        "agreement is gone in the caller's transaction -- which the row digests around "
+        "each refusal see",
+    ),
+    "G46/homes-rule": (
+        "tests/test_g46_a_release_can_name_one_garage.py",
+        "store/records.py",
+        "    forms = [(stored, {stored.garage.normalise_identity(identity)}) "
+        "for stored in reached]",
+        "    forms = [(stored, {covered[0].garage.normalise_identity(identity)}) "
+        "for stored in reached]  # PLANTED: the home's rule everywhere",
+        "the identity is normalised under the HOME's rule instead of the named garage's: "
+        "at the exact garage 'AB-123' becomes 'ab123', which is the LIVE row there in the "
+        "L3's second direction -- the stale row stays and the live one goes",
+    ),
+    "G46/per-garage-no-row-silent": (
+        "tests/test_g46_a_release_can_name_one_garage.py",
+        "store/records.py",
+        "    if not released:\n"
+        "        raise Refused(\n"
+        "            REFUSAL_VEHICLE_NOT_REGISTERED,",
+        "    if not released and garage_id is None:  # PLANTED: named, a no-op is 'done'\n"
+        "        raise Refused(\n"
+        "            REFUSAL_VEHICLE_NOT_REGISTERED,",
+        "a named release that found no row answers an empty tuple and exit 0 -- the "
+        "fan-out's refusal (G42) still fires, so only the per-garage case hides the "
+        "divergence the single-writer rule exists to surface",
+    ),
 }
 
 

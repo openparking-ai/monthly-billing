@@ -66,6 +66,7 @@ from monthly_billing.findings import (  # noqa: E402
     REFUSAL_ATTEMPT_ALREADY_RESOLVED,
     REFUSAL_ATTEMPT_UNRESOLVED,
     REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE,
+    REFUSAL_GARAGE_NOT_COVERED,
     REFUSAL_NOTHING_OWED,
     REFUSAL_REGISTRAR_CHANGED,
     REFUSAL_REGISTRAR_IS_OUTSIDE,
@@ -213,6 +214,13 @@ def _registrar_lines() -> list[str]:
         "door (`register-vehicle`, `release-vehicle`), which fans out over the covered "
         "set under each garage's own identity rule, refuses at every covered garage "
         "before it writes anywhere, and answers with the identity AS STORED per garage. "
+        "A release may instead name ONE covered garage (`release-vehicle --garage G`, "
+        "the same parameter on the library call) and reaches that garage alone, under "
+        "its rule, answering the one line -- for the stale row two garages that fold a "
+        "plate differently can hold under the live car's text, which the fan-out cannot "
+        "take without the live row; a garage the tenant does not hold is NOT FOUND, and "
+        "one the latest version does not cover is refused by name "
+        f"(`{REFUSAL_GARAGE_NOT_COVERED}`), each before any write. "
         "Both halves of the door refuse by name an agreement whose registrations this "
         f"module writes (`{REFUSAL_REGISTRAR_IS_THIS_MODULE}`), and the version path's "
         "writer refuses by name an agreement an outside registrar writes "
@@ -233,7 +241,8 @@ def _registrar_lines() -> list[str]:
         "parameter existed. Storing a version that drops a covered garage releases "
         "the agreement's rows there under either registrar (the covered set is the "
         "version's own fact), and releasing an identity that holds no row at any "
-        f"covered garage is refused by name (`{REFUSAL_VEHICLE_NOT_REGISTERED}`).",
+        "garage the release reached -- every covered garage, or the one it named -- "
+        f"is refused by name (`{REFUSAL_VEHICLE_NOT_REGISTERED}`).",
     ]
     return lines
 

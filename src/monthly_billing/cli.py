@@ -26,7 +26,7 @@ Against the store (the `store` extra, `MONTHLY_BILLING_DSN`, `--tenant`):
         --at 2026-05-07T09:05:00-06:00 --recorded-by operator [--reference AUTH]
     monthly-billing register-vehicle --tenant T --agreement AG --vehicle ABC123 \\
         [--at 2026-05-07T09:00:00-06:00]
-    monthly-billing release-vehicle --tenant T --agreement AG --vehicle ABC123
+    monthly-billing release-vehicle --tenant T --agreement AG --vehicle ABC123 [--garage G]
     monthly-billing show-register --tenant T --agreement AG
 
 ``register-vehicle`` and ``release-vehicle`` are THE REGISTRATION DOOR: one
@@ -34,7 +34,12 @@ vehicle identity, on or off an agreement whose registrar is OUTSIDE, at every
 garage the agreement covers. They print the identity as stored at each garage,
 because two garages fold one plate differently and the registrar on the other
 side needs the stored form to reconcile. An agreement whose registrations this
-module writes is refused by name at both.
+module writes is refused by name at both. ``release-vehicle --garage G``
+releases at that ONE covered garage alone, under its rule -- the same header,
+then exactly one ``at garage`` line -- for the row the fan-out cannot take
+without taking a live one with it; a garage the tenant does not hold is NOT
+FOUND, and one the agreement's latest version does not cover is refused by
+name. Without ``--garage`` the verb is what it was.
 
 ``show-register`` is THE REGISTER READ, for any reader and either registrar:
 the agreement's latest version -- registrar, status, cancellation day, home
@@ -325,7 +330,9 @@ def _release_vehicle(args: argparse.Namespace) -> int:
     connection = _connection(args)
     with tenant(connection, args.tenant) as cursor:
         try:
-            released = release_from_outside(cursor, args.tenant, args.agreement, args.vehicle)
+            released = release_from_outside(
+                cursor, args.tenant, args.agreement, args.vehicle, garage_id=args.garage
+            )
         except BaseException:
             connection.rollback()
             raise
@@ -464,6 +471,9 @@ def main(argv: list[str] | None = None) -> int:
     _store_arguments(release)
     release.add_argument("--agreement", required=True, help="the agreement id")
     release.add_argument("--vehicle", required=True)
+    release.add_argument(
+        "--garage", help="release at this ONE covered garage only (the garage id); default: all"
+    )
     release.set_defaults(run=_release_vehicle)
 
     show = sub.add_parser(

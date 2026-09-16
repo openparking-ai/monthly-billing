@@ -66,8 +66,11 @@ outside registrar registers and releases ONE vehicle identity at a time
 through ``register_from_outside`` and ``release_from_outside``, which walk the
 same path a version's list walks: the same fan-out over the covered set, the
 same per-garage normalisation, every refusal at every garage first, then the
-writes, and the same handover of a cancelled holder's row on its day. Both
-doors refuse by name (``REFUSAL_REGISTRAR_IS_THIS_MODULE``) an agreement whose
+writes, and the same handover of a cancelled holder's row on its day. A
+release may name ONE covered garage and reach that garage alone (G46): two
+garages that fold one plate differently can hold a stale row and a live one
+under the same text, and the fan-out cannot take the one without the other.
+Both doors refuse by name (``REFUSAL_REGISTRAR_IS_THIS_MODULE``) an agreement whose
 registrations this module writes, and the version path's writer refuses by
 name (``REFUSAL_REGISTRAR_IS_OUTSIDE``) an agreement an outside registrar
 writes -- ONE check, ``_registrar_must_be``, reached from both: two writers of
@@ -122,6 +125,7 @@ from ..agreement import (
 from ..findings import (
     REFUSAL_AGREEMENT_HOME_MOVED,
     REFUSAL_GARAGE_MISMATCH,
+    REFUSAL_GARAGE_NOT_COVERED,
     REFUSAL_REGISTRAR_CHANGED,
     REFUSAL_REGISTRAR_IS_OUTSIDE,
     REFUSAL_REGISTRAR_IS_THIS_MODULE,
@@ -703,27 +707,49 @@ def release_from_outside(
     tenant_id: Any,
     agreement_id: str,
     identity: str,
+    garage_id: str | None = None,
 ) -> tuple[RegisteredIdentity, ...]:
     """Release ONE vehicle identity from an agreement whose registrar is
-    OUTSIDE, at every garage its latest version covers: the row is deleted, as
+    OUTSIDE, at every garage its latest version covers -- or, given
+    ``garage_id``, at THAT covered garage alone (G46): the row is deleted, as
     a version that drops a car deletes it -- there is no end date on a
     registration. The same mode check as the other half: an agreement whose
     registrations this module writes is refused by name.
 
-    Returns the normalised identity released per covered garage AT WHICH A ROW
-    WAS RELEASED, in the same shape as a registration, ordered by the garage's
+    Returns the normalised identity released per garage AT WHICH A ROW WAS
+    RELEASED, in the same shape as a registration, ordered by the garage's
     id. A garage where this agreement held no row for the identity is absent
     from the answer -- a version may have added a garage after the car was
-    registered -- and an identity that held no row at ANY covered garage is
-    refused by name (``REFUSAL_VEHICLE_NOT_REGISTERED``): for a register kept
-    by one writer a silent no-op would hide that the two registers have
-    diverged, and nothing is written.
+    registered -- and an identity that held no row at ANY garage the release
+    reached is refused by name (``REFUSAL_VEHICLE_NOT_REGISTERED``): for a
+    register kept by one writer a silent no-op would hide that the two
+    registers have diverged, and nothing is written.
+
+    **Why a release can name a garage.** Two covered garages that disagree on
+    the identity rule can hold, under one text, a STALE row at the exact-rule
+    garage and the LIVE car's row at the folded one -- the car was re-registered
+    under a plate that differs only in formatting, and at the folded garage the
+    two plates are one row. The fan-out releases both; the only text that reaches
+    the stale row is its own, and that text folds to the live form. So the
+    caller names the garage, and the refusals come in this order, every one
+    before any write: no such agreement (``AgreementNotFound``); a registrar
+    that is this module; a garage the tenant does not hold (``GarageNotFound``,
+    found by tenant AND id in this path's own lookup, so the tenant policy on
+    or off makes no difference); a garage the agreement's LATEST version does
+    not cover (``REFUSAL_GARAGE_NOT_COVERED`` -- a row left at a garage a
+    version dropped is not reachable this way; the version that dropped it
+    released it); no row of this agreement for this identity there
+    (``REFUSAL_VEHICLE_NOT_REGISTERED``). Without ``garage_id`` nothing here
+    behaves differently from before the parameter existed.
     """
     tenant_id = as_uuid(tenant_id)  # the tenant policy scopes the write; typed for the same reason
     covered = _outside_registrars_covered_set(cursor, tenant_id, agreement_id)
+    reached = covered
+    if garage_id is not None:
+        reached = (_covered_garage_named(cursor, tenant_id, agreement_id, covered, garage_id),)
     # Every garage's form first, then the deletes: an identity that normalises
     # to nothing at one garage refuses before any garage's row has gone.
-    forms = [(stored, {stored.garage.normalise_identity(identity)}) for stored in covered]
+    forms = [(stored, {stored.garage.normalise_identity(identity)}) for stored in reached]
     released = []
     for stored, listed in forms:
         cursor.execute(
@@ -737,9 +763,51 @@ def release_from_outside(
         raise Refused(
             REFUSAL_VEHICLE_NOT_REGISTERED,
             f"vehicle {identity!r} is registered to agreement {agreement_id!r} at none of "
-            f"the {len(covered)} garage(s) it covers; nothing to release.",
+            f"the {len(covered)} garage(s) it covers; nothing to release."
+            if garage_id is None else
+            f"vehicle {identity!r} holds no row of agreement {agreement_id!r} at garage "
+            f"{garage_id!r}, the one garage this release named; nothing to release.",
         )
     return _stored_forms(released)
+
+
+def _covered_garage_named(
+    cursor: Any,
+    tenant_id: UUID,
+    agreement_id: str,
+    covered: tuple[StoredGarage, ...],
+    garage_id: str,
+) -> StoredGarage:
+    """The one covered garage a release names, or the two refusals in the
+    order G46 states them: a garage this TENANT does not hold, then a garage
+    the agreement's latest version does not cover.
+
+    The lookup is by ``tenant_id AND external_id`` in this path's own SQL --
+    the ``_latest_version_of`` precedent -- rather than through ``load_garage``,
+    which the money doors read and which is scoped by the tenant policy alone:
+    with the policy off, ``load_garage`` would find another tenant's garage of
+    the same id and this function would then refuse it as 'not covered', a
+    different sentence for the same fact. Only the uuid is read: the garage's
+    options and rule come from the covered set, already loaded, so nothing
+    here builds a ``Garage`` a second time.
+    """
+    cursor.execute(
+        "SELECT id FROM garages WHERE tenant_id = %s AND external_id = %s",
+        (tenant_id, garage_id),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        raise GarageNotFound(f"no garage with id {garage_id!r} in the store.")
+    garage_uuid = as_uuid(row[0])
+    for stored in covered:
+        if stored.uuid == garage_uuid:
+            return stored
+    raise Refused(
+        REFUSAL_GARAGE_NOT_COVERED,
+        f"agreement {agreement_id!r} covers "
+        f"{', '.join(repr(stored.garage.id) for stored in covered)} in its latest version, "
+        f"and the release named garage {garage_id!r}; nothing to release there.",
+    )
 
 
 def _stored_forms(

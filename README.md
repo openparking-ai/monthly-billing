@@ -24,6 +24,8 @@ $ monthly-billing covered-in-store --tenant T --garage garage-downtown \
       --vehicle ABC-123 --at 2026-05-09T09:00:00-06:00
 $ monthly-billing register-vehicle --tenant T --agreement ag-fleet-0007 --vehicle "ABC 123"
 $ monthly-billing release-vehicle --tenant T --agreement ag-fleet-0007 --vehicle "ABC 123"
+$ monthly-billing release-vehicle --tenant T --agreement ag-fleet-0007 --vehicle "ABC 123" \
+      --garage garage-downtown
 $ monthly-billing show-register --tenant T --agreement ag-fleet-0007
 ```
 
@@ -31,8 +33,9 @@ Nothing wakes itself up: the run is a command the operator's platform calls on
 the billing day, and the platform is an ordinary client of it. `register-vehicle`
 and `release-vehicle` are the REGISTRATION DOOR: for an agreement whose
 `registrar` is `outside`, an outside registrar puts one car on and takes one
-off, at every garage the agreement covers, and is told the identity as stored
-at each -- this module writes none of that agreement's registrations itself.
+off, at every garage the agreement covers -- or, with `--garage`, off at that
+one covered garage alone -- and is told the identity as stored at each; this
+module writes none of that agreement's registrations itself.
 `show-register` is THE REGISTER READ, for any reader and either registrar: the
 agreement's latest version (registrar, status, cancellation day, home and
 covered garages) and every registration row that names it, at any garage, as
