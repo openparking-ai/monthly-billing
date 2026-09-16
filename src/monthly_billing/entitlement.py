@@ -46,6 +46,21 @@ home garage, or is refused by name (``REFUSAL_HOME_GARAGE_NOT_GIVEN``) rather
 than answered with the asking garage's grace. The entitlement is ACROSS the
 covered set: ten spots is ten cars inside across those garages, not ten at each.
 
+**WHAT THE BARRIER READS IS THE AGREEMENT'S REGISTER, AND WHO KEEPS IT IS
+STATED.** Under this module (the default registrar) the register is the
+version's own vehicle list. Under an OUTSIDE registrar the list is empty by
+rule and the register is the store's registration rows, which the outside
+registrar writes through the door -- so this call, which has no database,
+takes them as a stated parameter: ``registrations``, the identities registered
+to each agreement at the asking garage, by agreement id. An outside
+registrar's agreement handed in WITHOUT it is refused by name
+(``REFUSAL_REGISTRATIONS_NOT_GIVEN``), never answered "no agreement": that is
+the ``REFUSAL_HOME_GARAGE_NOT_GIVEN`` shape, and it fails closed. A stated
+empty register is an answer -- a car with no row is not covered -- and a
+self-written agreement never reads the parameter, so its answer is the one it
+gave before the parameter existed. Which cars belong to an agreement is
+decided in ONE place, ``register_of``, for both registrars and for both doors.
+
 **THE ANSWER SAYS WHAT IT COULD NOT CHECK.** Access hours are a condition on a
 STAY -- entry no earlier than, exit no later than -- and at the moment a car
 arrives, the exit half is unknowable. An answer that quietly reported "covered"
@@ -64,10 +79,11 @@ so must be reported as not-yet-evaluated rather than assumed either way.
 
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 
-from .agreement import Agreement, Status
+from .agreement import Agreement, Registrar, Status
 from .findings import (
     NOT_COVERED_BLOCKED_BY_OWNER,
     NOT_COVERED_CANCELLED,
@@ -79,6 +95,7 @@ from .findings import (
     NOT_COVERED_REASONS,
     NOT_COVERED_UNPAID_PAST_GRACE,
     REFUSAL_HOME_GARAGE_NOT_GIVEN,
+    REFUSAL_REGISTRATIONS_NOT_GIVEN,
     REFUSAL_VEHICLE_ON_TWO_AGREEMENTS,
 )
 from .findings import Refused as _Refused  # not exported: this module decides no exit
@@ -139,8 +156,16 @@ def is_covered(
     has_unpaid_invoice_since: datetime | None = None,
     blocked_by_owner: bool = False,
     home_garage: Garage | None = None,
+    registrations: Mapping[str, Collection[str]] | None = None,
 ) -> Answer:
     """The one call. An access fact, and nothing else.
+
+    ``registrations`` is the store's register at the ASKING garage, by
+    agreement id: which vehicle identities are registered to each agreement
+    there. It is read for an agreement whose registrar is OUTSIDE -- whose
+    document lists no vehicles by rule -- and for no other; such an agreement
+    handed in without it is refused by name. ``None`` means "not stated";
+    ``{}`` means "stated, and nothing is registered".
 
     ``garage`` is the ASKING garage -- the barrier the car is at. ``home_garage``
     is the garage that BILLS the agreement, whose grace period and clock decide
@@ -172,7 +197,10 @@ def is_covered(
         a
         for a in _latest_per_identity(agreements)
         if a.covers_garage(garage.id)
-        and any(garage.identities_match(v, vehicle_identity) for v in a.vehicles)
+        and any(
+            garage.identities_match(v, vehicle_identity)
+            for v in register_of(a, garage, registrations)
+        )
     ]
     if not mine:
         return _not_covered(NOT_COVERED_NO_AGREEMENT)
@@ -252,6 +280,33 @@ def is_covered(
         unchecked=unchecked,
         **cited,
     )
+
+
+def register_of(
+    agreement: Agreement,
+    garage: Garage,
+    registrations: Mapping[str, Collection[str]] | None,
+) -> Collection[str]:
+    """The vehicle identities that belong to this agreement at this garage --
+    THE ONE PLACE that decides it, for both registrars and for both doors.
+
+    Under this module the register is the version's own list, and
+    ``registrations`` is not read: the answer is the one the list gave before
+    the parameter existed. Under an OUTSIDE registrar the list is empty by rule
+    and the register is what the store holds, handed in by the caller; handed
+    in as ``None`` the call cannot answer and says so by name rather than
+    answering "no agreement" for every car the outside registrar put on.
+    """
+    if agreement.registrar is not Registrar.OUTSIDE:
+        return agreement.vehicles
+    if registrations is None:
+        raise _Refused(
+            REFUSAL_REGISTRATIONS_NOT_GIVEN,
+            f"agreement {agreement.id!r} names an outside registrar and covers garage "
+            f"{garage.id!r}; the coverage question was asked without the store's "
+            "registrations. Pass registrations.",
+        )
+    return registrations.get(agreement.id, ())
 
 
 def _latest_per_identity(agreements: tuple[Agreement, ...]) -> tuple[Agreement, ...]:

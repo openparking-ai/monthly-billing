@@ -46,7 +46,9 @@ sys.path.insert(0, str(ROOT / "tests"))
 from _guarantees import GUARANTEES, guarantee_ids  # noqa: E402
 from monthly_billing.agreement import (  # noqa: E402
     KNOWN_KEYS,
+    Agreement,
     FeeCadence,
+    Registrar,
     load_agreement_file,
 )
 from monthly_billing.billing_run import FAILED_OUTCOMES, RUN_OUTCOME_MEANS, RunOutcome  # noqa: E402
@@ -65,7 +67,12 @@ from monthly_billing.findings import (  # noqa: E402
     REFUSAL_ATTEMPT_UNRESOLVED,
     REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE,
     REFUSAL_NOTHING_OWED,
+    REFUSAL_REGISTRAR_CHANGED,
+    REFUSAL_REGISTRAR_IS_OUTSIDE,
+    REFUSAL_REGISTRAR_IS_THIS_MODULE,
+    REFUSAL_REGISTRATIONS_NOT_GIVEN,
     REFUSAL_REVERSAL_REASON_MISMATCH,
+    REFUSAL_VEHICLE_NOT_REGISTERED,
     REFUSAL_VEHICLE_ON_TWO_AGREEMENTS,
     REFUSALS,
     UNPAID_IS_THE_PAYERS,
@@ -166,6 +173,7 @@ def block_options() -> str:
             "line. The direction of every amount is the kind's, never the sign's: a negative "
             f"amount is refused by name (`{REFUSAL_EXCEPTION_AMOUNT_NOT_POSITIVE}`).",
         ]
+    lines += _registrar_lines()
     lines += [
         "",
         "An agreement document carries exactly these keys: "
@@ -177,6 +185,57 @@ def block_options() -> str:
         "payment method.",
     ]
     return "\n".join(lines)
+
+
+def _registrar_lines() -> list[str]:
+    """Who writes an agreement's registrations, DERIVED: the members from the
+    enum, the default from the dataclass field, and the sentence about the
+    vehicle list from which member is the default -- a default moved to the
+    other member changes the sentence rather than leaving it standing."""
+    default = Agreement.__dataclass_fields__["registrar"].default
+    lines = [
+        "",
+        "**Registrar** — who writes an agreement's registrations, stated on the "
+        "document, defaulting to this module:",
+        "",
+    ]
+    for registrar in Registrar:
+        lines.append(f"- `{registrar.value}`" + (" (the default)" if registrar is default else ""))
+    outside = Registrar.OUTSIDE
+    module = Registrar.THIS_MODULE
+    lines += [
+        "",
+        f"Under `{module.value}` the version's own vehicle list is the register -- it is "
+        "required, and an agreement listing no vehicle is refused by name because it "
+        f"covers nothing. Under `{outside.value}` the list is refused when present and "
+        "legal when empty, on the way in and on the way back: the outside registrar "
+        "registers and releases one vehicle identity at a time through the registration "
+        "door (`register-vehicle`, `release-vehicle`), which fans out over the covered "
+        "set under each garage's own identity rule, refuses at every covered garage "
+        "before it writes anywhere, and answers with the identity AS STORED per garage. "
+        "Both halves of the door refuse by name an agreement whose registrations this "
+        f"module writes (`{REFUSAL_REGISTRAR_IS_THIS_MODULE}`), and the version path's "
+        "writer refuses by name an agreement an outside registrar writes "
+        f"(`{REFUSAL_REGISTRAR_IS_OUTSIDE}`) -- one check, reached from every writer. "
+        f"A document that says nothing is `{default.value}`; the mode is never inferred "
+        "from the list, and it never changes between versions "
+        f"(`{REFUSAL_REGISTRAR_CHANGED}`).",
+        "",
+        "**What the barrier reads** is the agreement's REGISTER, decided in one place "
+        f"for both coverage doors: under `{module.value}` the version's own vehicle "
+        f"list; under `{outside.value}` the registration rows the door wrote. The "
+        "store-backed call supplies those rows to the pure call as a stated "
+        "parameter (`registrations`), empty or not; the pure call, which has no "
+        "database, refuses by name an outside registrar's agreement handed in "
+        f"without them (`{REFUSAL_REGISTRATIONS_NOT_GIVEN}`) rather than answering "
+        "'no agreement' for a car it could not look up. A car with no row is not "
+        "covered; a self-written agreement answers exactly as it did before the "
+        "parameter existed. Storing a version that drops a covered garage releases "
+        "the agreement's rows there under either registrar (the covered set is the "
+        "version's own fact), and releasing an identity that holds no row at any "
+        f"covered garage is refused by name (`{REFUSAL_VEHICLE_NOT_REGISTERED}`).",
+    ]
+    return lines
 
 
 def block_worked_example() -> str:

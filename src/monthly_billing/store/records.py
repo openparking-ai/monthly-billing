@@ -51,6 +51,37 @@ Now a refusal leaves the transaction exactly as it found it. Two registrations
 racing are different: the second's transaction is aborted by the UNIQUE before
 the refusal names it, nothing is written, and the caller rolls back.
 
+**ONE AGREEMENT, ONE REGISTRAR -- AND THE STORE HAS A DOOR FOR THE OTHER
+ONE.** An agreement whose ``registrar`` is OUTSIDE has its registrations
+written by some system of the owner's, not by this module: ``store_agreement``
+writes none of them and never releases one BY IDENTITY for such an agreement,
+and the document lists no vehicles. What it still does is release the rows at
+a garage the version no longer covers: which garages an agreement covers is a
+property of the version, whoever writes the vehicles, and a row left at a
+garage the door can no longer reach would be a registration nobody could
+release. The registrar itself never changes between versions
+(``REFUSAL_REGISTRAR_CHANGED``): handing the register from one writer to the
+other is an operation nobody designed, refused as the home move is. The
+outside registrar registers and releases ONE vehicle identity at a time
+through ``register_from_outside`` and ``release_from_outside``, which walk the
+same path a version's list walks: the same fan-out over the covered set, the
+same per-garage normalisation, every refusal at every garage first, then the
+writes, and the same handover of a cancelled holder's row on its day. Both
+doors refuse by name (``REFUSAL_REGISTRAR_IS_THIS_MODULE``) an agreement whose
+registrations this module writes, and the version path's writer refuses by
+name (``REFUSAL_REGISTRAR_IS_OUTSIDE``) an agreement an outside registrar
+writes -- ONE check, ``_registrar_must_be``, reached from both: two writers of
+one agreement's rows would race, and the other path says so instead. A release
+through the door that finds no row at any covered garage is refused by name
+too (``REFUSAL_VEHICLE_NOT_REGISTERED``): for a register kept by one writer a
+silent no-op hides exactly the divergence the rule exists to surface. The
+door's answer names the normalised identity it stored, per covered garage,
+because two garages fold the same plate differently and a caller that could
+not see the stored form could not reconcile its register with this one. What
+the door reads back is ``vehicle_registrations`` -- the garage's holder claim
+-- never ``agreement_vehicles``, which is a version's own list and stays empty
+for an outside registrar's agreement.
+
 **THE STORE'S IDS AND THE ENGINE'S IDS ARE DIFFERENT THINGS.** The engine
 compares opaque strings -- a garage id, a payer id, an agreement id -- and never
 parses them. The store keys rows by uuid and carries those strings as
@@ -61,6 +92,7 @@ twice.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Any
@@ -73,12 +105,17 @@ from ..agreement import (
     FeeCadence,
     Mandate,
     Pause,
+    Registrar,
     Status,
 )
 from ..findings import (
     REFUSAL_AGREEMENT_HOME_MOVED,
     REFUSAL_GARAGE_MISMATCH,
+    REFUSAL_REGISTRAR_CHANGED,
+    REFUSAL_REGISTRAR_IS_OUTSIDE,
+    REFUSAL_REGISTRAR_IS_THIS_MODULE,
     REFUSAL_VEHICLE_ALREADY_REGISTERED,
+    REFUSAL_VEHICLE_NOT_REGISTERED,
     Refused,
 )
 from ..garage import BillingDay, Garage, IdentityRule
@@ -90,6 +127,11 @@ class GarageNotFound(LookupError):
     """A garage id names no row in the store. The ONE class of that name: the
     billing run, the store-backed coverage call and the store itself all raise
     this one, so a caller catching it catches every garage-not-found."""
+
+
+class AgreementNotFound(LookupError):
+    """An agreement id names no version row in the store. Raised by the
+    registration door, which registers TO an agreement and cannot invent one."""
 
 
 #: The constraint whose violation MEANS "registered elsewhere" (migration 0003).
@@ -164,6 +206,16 @@ def store_agreement(
     compared against. ``now`` is the registration instant; a cancelled
     agreement's vehicles are released per garage on its effective day, judged
     against ``now`` in THAT garage's zone. Left unset it is the wall clock.
+
+    THE SWITCH. For an agreement whose ``registrar`` is OUTSIDE nothing here
+    writes a ``vehicle_registrations`` row or releases one by identity. Those
+    rows are the outside registrar's, written and released one identity at a
+    time through the door below. What IS released, for either registrar, is
+    every row of the agreement's at a garage this version no longer covers --
+    the covered set is the version's own, whoever writes the cars. The version
+    row, its covered set, pauses, fees and mandate are stored exactly as for
+    any other agreement, and a version that would change the registrar is
+    refused by name before anything is written.
     """
     tenant_id = as_uuid(tenant_id)
     garage_uuid, payer_uuid = as_uuid(garage_uuid), as_uuid(payer_uuid)
@@ -186,17 +238,36 @@ def store_agreement(
     # the home-keyed reads in entitlement_store correct for every state this
     # module can store. No cross-row database backstop exists for this; the
     # contract says so, as it does for G33.
-    home_already = _home_of_stored(cursor, agreement.id)
-    if home_already is not None and home_already != garage_uuid:
-        raise Refused(
-            REFUSAL_AGREEMENT_HOME_MOVED,
-            f"agreement {agreement.id!r} version {agreement.version} is billed at garage "
-            f"{garage.id!r}, but the versions the store already holds for it are billed "
-            "at another garage. The home never moves; a different home is a different "
-            "agreement.",
-        )
+    stored_already = _stored_identity_of(cursor, agreement.id)
+    if stored_already is not None:
+        home_already, registrar_already = stored_already
+        if home_already != garage_uuid:
+            raise Refused(
+                REFUSAL_AGREEMENT_HOME_MOVED,
+                f"agreement {agreement.id!r} version {agreement.version} is billed at garage "
+                f"{garage.id!r}, but the versions the store already holds for it are billed "
+                "at another garage. The home never moves; a different home is a different "
+                "agreement.",
+            )
+        # THE REGISTRAR NEVER CHANGES EITHER, for the home move's reason: the
+        # same one lookup, by identity, and nothing says what a hand-over does
+        # to the rows the other writer already wrote.
+        if registrar_already is not agreement.registrar:
+            raise Refused(
+                REFUSAL_REGISTRAR_CHANGED,
+                f"agreement {agreement.id!r} version {agreement.version} names registrar "
+                f"{agreement.registrar.value!r}, but the versions the store already holds "
+                f"for it name {registrar_already.value!r}. The registrar never changes; a "
+                "different registrar is a different agreement.",
+            )
     covered = covered_garages_of(cursor, agreement, home=StoredGarage(garage_uuid, garage))
-    register_vehicles(cursor, tenant_id, covered, agreement, now=now)
+    if agreement.registrar is Registrar.OUTSIDE:
+        # The outside registrar's rows are not this module's to write or to
+        # release by identity -- register_vehicles refuses them by name -- but a
+        # garage this version stopped covering is released for either registrar.
+        _release_at_dropped_garages(cursor, agreement.id, covered)
+    else:
+        register_vehicles(cursor, tenant_id, covered, agreement, now=now)
     agreement_uuid = _insert(
         cursor,
         "agreements",
@@ -215,6 +286,7 @@ def store_agreement(
                 agreement.access_hours.entry_from if agreement.access_hours else None
             ),
             "access_exit_by": agreement.access_hours.exit_by if agreement.access_hours else None,
+            "registrar": agreement.registrar.value,
         },
     )
     for stored in covered:
@@ -277,17 +349,20 @@ def store_agreement(
     return agreement_uuid
 
 
-def _home_of_stored(cursor: Any, agreement_external_id: str) -> UUID | None:
-    """The garage uuid every stored version of this agreement is billed at --
-    None when the store holds no version yet. By identity alone; the tenant
-    policy scopes the read. Every version has the same home by construction
-    (the refusal above), so the latest one's is the agreement's."""
+def _stored_identity_of(cursor: Any, agreement_external_id: str) -> tuple[UUID, Registrar] | None:
+    """The garage uuid every stored version of this agreement is billed at, and
+    the registrar every stored version names -- None when the store holds no
+    version yet. One lookup, by identity alone; the tenant policy scopes the
+    read. Every version has the same home and the same registrar by
+    construction (the two refusals above), so the latest one's are the
+    agreement's."""
     cursor.execute(
-        "SELECT garage_id FROM agreements WHERE external_id = %s ORDER BY version DESC LIMIT 1",
+        "SELECT garage_id, registrar FROM agreements WHERE external_id = %s "
+        "ORDER BY version DESC LIMIT 1",
         (agreement_external_id,),
     )
     row = cursor.fetchone()
-    return None if row is None else as_uuid(row[0])
+    return None if row is None else (as_uuid(row[0]), Registrar(row[1]))
 
 
 def covered_garages_of(
@@ -337,83 +412,157 @@ def register_vehicles(
     Every refusal first -- at every garage -- then the releases, then the
     writes: a refusal writes nothing, so a caller that catches it and commits
     has committed nothing.
-    """
-    import psycopg  # the store extra; the engine never imports this module
 
+    The refusal walk and the writes are the shared halves the registration
+    door reuses (``_plan_registrations``, ``_write_registrations``); the
+    release BY IDENTITY between them is this path's alone, because only a
+    version's own list can say which of the agreement's cars are no longer
+    listed. The release at a garage the version dropped is shared with
+    ``store_agreement``'s outside-registrar path, whose rows it may not touch
+    otherwise. An agreement an outside registrar writes is refused here by
+    name (``REFUSAL_REGISTRAR_IS_OUTSIDE``) -- this is the module's writer, and
+    it is exported, so the check lives in it and not at a call site.
+    """
     tenant_id = as_uuid(tenant_id)
+    _registrar_must_be(agreement.id, agreement.registrar, Registrar.THIS_MODULE)
+    plan = _plan_registrations(cursor, covered, agreement.id, agreement.vehicles, now)
+
+    # Every refusal has now had its chance. A garage this version no longer
+    # covers releases every row of this agreement's there -- BEFORE the
+    # per-garage release, and after every refusal, like it.
+    _release_at_dropped_garages(cursor, agreement.id, covered)
+    for stored, at, listed, held in plan:
+        # A version that drops a vehicle releases it -- AFTER every refusal.
+        cursor.execute(
+            "DELETE FROM vehicle_registrations WHERE garage_id = %s AND agreement_external_id = %s "
+            "AND NOT (identity_normalised = ANY(%s))",
+            (stored.uuid, agreement.id, sorted(listed)),
+        )
+        _write_registrations(cursor, tenant_id, stored, at, listed, held, agreement.id)
+
+
+def _plan_registrations(
+    cursor: Any,
+    covered: tuple[StoredGarage, ...],
+    agreement_id: str,
+    vehicles: tuple[str, ...],
+    now: datetime | None,
+) -> list[tuple[StoredGarage, datetime, set[str], dict[str, UUID]]]:
+    """THE REFUSALS, at every covered garage, before a row changes anywhere.
+    Shared by the version path and the door: one walk, one order. Each entry
+    is one covered garage's share: the garage, the instant judged in its zone,
+    the identities normalised under its rule, and the rows a cancelled holder
+    has released there (by identity) for this agreement to take."""
     plan: list[tuple[StoredGarage, datetime, set[str], dict[str, UUID]]] = []
     for stored in covered:
         tz = zone(stored.garage.timezone)
         at = now if now is not None else datetime.now(tz)
         today = day_of(at, tz)
-        listed = {stored.garage.normalise_identity(v) for v in agreement.vehicles}
-        held = _held_elsewhere(cursor, stored.garage, stored.uuid, agreement, listed, today)
+        listed = {stored.garage.normalise_identity(v) for v in vehicles}
+        held = _held_elsewhere(cursor, stored.garage, stored.uuid, agreement_id, listed, today)
         plan.append((stored, at, listed, held))
+    return plan
 
-    # Every refusal has now had its chance. A garage this version no longer
-    # covers releases every row of this agreement's there -- BEFORE the
-    # per-garage release, and after every refusal, like it.
+
+def _write_registrations(
+    cursor: Any,
+    tenant_id: UUID,
+    stored: StoredGarage,
+    at: datetime,
+    listed: set[str],
+    held: dict[str, UUID],
+    agreement_id: str,
+) -> None:
+    """THE WRITES at one garage, after every refusal everywhere: a released
+    holder's row passes to this agreement; a row already this agreement's is
+    left; anything else is inserted, with the UNIQUE as the backstop for a
+    registration racing this one."""
+    import psycopg  # the store extra; the engine never imports this module
+
+    garage, garage_uuid = stored.garage, stored.uuid
+    for identity in sorted(listed):
+        if identity in held:
+            # The holder is cancelled and its day has come: the row passes to
+            # this agreement, in this transaction.
+            guarded_update(
+                cursor,
+                "vehicle_registrations",
+                {"agreement_external_id": agreement_id, "registered_at": at},
+                {"id": held[identity]},
+            )
+            continue
+        cursor.execute(
+            "SELECT 1 FROM vehicle_registrations "
+            "WHERE garage_id = %s AND identity_normalised = %s AND agreement_external_id = %s",
+            (garage_uuid, identity, agreement_id),
+        )
+        if cursor.fetchone() is not None:
+            continue  # already this agreement's
+        try:
+            guarded_insert(
+                cursor,
+                "vehicle_registrations",
+                {
+                    "tenant_id": tenant_id,
+                    "garage_id": garage_uuid,
+                    "identity_normalised": identity,
+                    "agreement_external_id": agreement_id,
+                    "registered_at": at,
+                },
+            )
+            cursor.fetchone()
+        except psycopg.errors.UniqueViolation as violation:
+            # Two registrations racing: the second lands here, and the name of
+            # the constraint is what says "registered elsewhere".
+            if violation.diag.constraint_name != ONE_AGREEMENT_PER_GARAGE:
+                raise
+            raise Refused(
+                REFUSAL_VEHICLE_ALREADY_REGISTERED,
+                f"vehicle {identity!r} at garage {garage.id!r} was registered to another "
+                "agreement at the same instant.",
+            ) from None
+
+
+def _release_at_dropped_garages(
+    cursor: Any, agreement_id: str, covered: tuple[StoredGarage, ...]
+) -> None:
+    """Every row of this agreement's at a garage NOT in its covered set is
+    released -- for either registrar, because which garages the agreement
+    covers is the version's own fact, and a row at a garage the door can no
+    longer reach is a registration nobody could release."""
     cursor.execute(
         "DELETE FROM vehicle_registrations WHERE agreement_external_id = %s "
         "AND NOT (garage_id = ANY(%s))",
-        (agreement.id, [stored.uuid for stored in covered]),
+        (agreement_id, [stored.uuid for stored in covered]),
     )
-    for stored, at, listed, held in plan:
-        garage, garage_uuid = stored.garage, stored.uuid
-        # A version that drops a vehicle releases it -- AFTER every refusal.
-        cursor.execute(
-            "DELETE FROM vehicle_registrations WHERE garage_id = %s AND agreement_external_id = %s "
-            "AND NOT (identity_normalised = ANY(%s))",
-            (garage_uuid, agreement.id, sorted(listed)),
+
+
+def _registrar_must_be(agreement_id: str, registrar: Registrar, expected: Registrar) -> None:
+    """ONE AGREEMENT, ONE REGISTRAR -- the one check, reached from every writer.
+    The version path's writer requires this module; both halves of the door
+    require an outside registrar; each refuses the other by the other's name."""
+    if registrar is expected:
+        return
+    if expected is Registrar.OUTSIDE:
+        raise Refused(
+            REFUSAL_REGISTRAR_IS_THIS_MODULE,
+            f"agreement {agreement_id!r} names {registrar.value!r} as its registrar; the "
+            "registration door is for an agreement whose registrar is "
+            f"{Registrar.OUTSIDE.value!r}.",
         )
-        for identity in sorted(listed):
-            if identity in held:
-                # The holder is cancelled and its day has come: the row passes to
-                # this agreement, in this transaction.
-                guarded_update(
-                    cursor,
-                    "vehicle_registrations",
-                    {"agreement_external_id": agreement.id, "registered_at": at},
-                    {"id": held[identity]},
-                )
-                continue
-            cursor.execute(
-                "SELECT 1 FROM vehicle_registrations "
-                "WHERE garage_id = %s AND identity_normalised = %s AND agreement_external_id = %s",
-                (garage_uuid, identity, agreement.id),
-            )
-            if cursor.fetchone() is not None:
-                continue  # already this agreement's
-            try:
-                guarded_insert(
-                    cursor,
-                    "vehicle_registrations",
-                    {
-                        "tenant_id": tenant_id,
-                        "garage_id": garage_uuid,
-                        "identity_normalised": identity,
-                        "agreement_external_id": agreement.id,
-                        "registered_at": at,
-                    },
-                )
-                cursor.fetchone()
-            except psycopg.errors.UniqueViolation as violation:
-                # Two registrations racing: the second lands here, and the name of
-                # the constraint is what says "registered elsewhere".
-                if violation.diag.constraint_name != ONE_AGREEMENT_PER_GARAGE:
-                    raise
-                raise Refused(
-                    REFUSAL_VEHICLE_ALREADY_REGISTERED,
-                    f"vehicle {identity!r} at garage {garage.id!r} was registered to another "
-                    "agreement at the same instant.",
-                ) from None
+    raise Refused(
+        REFUSAL_REGISTRAR_IS_OUTSIDE,
+        f"agreement {agreement_id!r} names {registrar.value!r} as its registrar; the "
+        "version path writes registrations for an agreement whose registrar is "
+        f"{Registrar.THIS_MODULE.value!r}.",
+    )
 
 
 def _held_elsewhere(
     cursor: Any,
     garage: Garage,
     garage_uuid: UUID,
-    agreement: Agreement,
+    agreement_id: str,
     listed: set[str],
     today: date,
 ) -> dict[str, UUID]:
@@ -430,7 +579,7 @@ def _held_elsewhere(
             (garage_uuid, identity),
         )
         row = cursor.fetchone()
-        if row is None or row[1] == agreement.id:
+        if row is None or row[1] == agreement_id:
             continue
         holder = row[1]
         frees_on = _released_on(cursor, holder)
@@ -482,6 +631,148 @@ def registrations_at_garage(cursor: Any, garage_uuid: Any) -> tuple[tuple[str, s
         (as_uuid(garage_uuid),),
     )
     return tuple((i, a) for i, a in cursor.fetchall())
+
+
+# ---------------------------------------------------------------------------
+# The registration door: an OUTSIDE registrar's one vehicle at a time
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RegisteredIdentity:
+    """What the door stored (or released) at one covered garage: the garage's
+    id and the identity in the form THAT garage compares in. The caller's
+    means of reconciling its own register with this one -- two garages fold
+    one plate differently, and a door that hid the stored form would leave the
+    caller unable to tell one car from two. Nothing else travels on it."""
+
+    garage_id: str
+    identity_normalised: str
+
+
+def register_from_outside(
+    cursor: Any,
+    tenant_id: Any,
+    agreement_id: str,
+    identity: str,
+    *,
+    now: datetime | None = None,
+) -> tuple[RegisteredIdentity, ...]:
+    """Register ONE vehicle identity to an agreement whose registrar is OUTSIDE,
+    at every garage its latest version covers.
+
+    The path a version's list walks, for one identity: every refusal at every
+    covered garage first (``REFUSAL_VEHICLE_ALREADY_REGISTERED``, naming the
+    garage and the holder), then the writes -- a cancelled holder's row whose
+    day has come passes to this agreement in this same transaction; a row
+    already this agreement's is left; the rest are inserted. Nothing is
+    released: the door adds one car and takes none away, and
+    ``release_from_outside`` is the other half. All or none, and a refusal
+    writes nothing.
+
+    An agreement the store does not hold raises ``AgreementNotFound``; one
+    whose registrations this module writes is refused by name
+    (``REFUSAL_REGISTRAR_IS_THIS_MODULE``) -- one agreement, one registrar.
+    ``now`` is the registration instant, judged in each garage's zone; unset,
+    the wall clock.
+
+    Returns the normalised identity stored per covered garage, ordered by the
+    garage's id.
+    """
+    tenant_id = as_uuid(tenant_id)
+    covered = _outside_registrars_covered_set(cursor, agreement_id)
+    plan = _plan_registrations(cursor, covered, agreement_id, (identity,), now)
+    for stored, at, listed, held in plan:
+        _write_registrations(cursor, tenant_id, stored, at, listed, held, agreement_id)
+    return _stored_forms((stored, listed) for stored, _at, listed, _held in plan)
+
+
+def release_from_outside(
+    cursor: Any,
+    tenant_id: Any,
+    agreement_id: str,
+    identity: str,
+) -> tuple[RegisteredIdentity, ...]:
+    """Release ONE vehicle identity from an agreement whose registrar is
+    OUTSIDE, at every garage its latest version covers: the row is deleted, as
+    a version that drops a car deletes it -- there is no end date on a
+    registration. The same mode check as the other half: an agreement whose
+    registrations this module writes is refused by name.
+
+    Returns the normalised identity released per covered garage AT WHICH A ROW
+    WAS RELEASED, in the same shape as a registration, ordered by the garage's
+    id. A garage where this agreement held no row for the identity is absent
+    from the answer -- a version may have added a garage after the car was
+    registered -- and an identity that held no row at ANY covered garage is
+    refused by name (``REFUSAL_VEHICLE_NOT_REGISTERED``): for a register kept
+    by one writer a silent no-op would hide that the two registers have
+    diverged, and nothing is written.
+    """
+    as_uuid(tenant_id)  # the tenant policy scopes the write; typed for the same reason
+    covered = _outside_registrars_covered_set(cursor, agreement_id)
+    # Every garage's form first, then the deletes: an identity that normalises
+    # to nothing at one garage refuses before any garage's row has gone.
+    forms = [(stored, {stored.garage.normalise_identity(identity)}) for stored in covered]
+    released = []
+    for stored, listed in forms:
+        cursor.execute(
+            "DELETE FROM vehicle_registrations WHERE garage_id = %s "
+            "AND agreement_external_id = %s AND identity_normalised = ANY(%s)",
+            (stored.uuid, agreement_id, sorted(listed)),
+        )
+        if cursor.rowcount:
+            released.append((stored, listed))
+    if not released:
+        raise Refused(
+            REFUSAL_VEHICLE_NOT_REGISTERED,
+            f"vehicle {identity!r} is registered to agreement {agreement_id!r} at none of "
+            f"the {len(covered)} garage(s) it covers; nothing to release.",
+        )
+    return _stored_forms(released)
+
+
+def _stored_forms(
+    forms: Iterable[tuple[StoredGarage, set[str]]],
+) -> tuple[RegisteredIdentity, ...]:
+    """The door's answer: one entry per covered garage, the garage's id and the
+    one identity as stored there, ordered by garage id -- deterministic, for the
+    reason the release walks ``sorted(listed)``."""
+    return tuple(
+        sorted(
+            (
+                RegisteredIdentity(garage_id=stored.garage.id, identity_normalised=form)
+                for stored, listed in forms
+                for form in listed
+            ),
+            key=lambda entry: entry.garage_id,
+        )
+    )
+
+
+def _outside_registrars_covered_set(cursor: Any, agreement_id: str) -> tuple[StoredGarage, ...]:
+    """The covered set of the agreement's LATEST version, home first, for an
+    agreement whose registrar is OUTSIDE -- and the two refusals on the way:
+    no version in the store, and a registrar that is this module."""
+    cursor.execute(
+        "SELECT id, registrar FROM agreements WHERE external_id = %s "
+        "ORDER BY version DESC LIMIT 1",
+        (agreement_id,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        raise AgreementNotFound(f"no agreement with id {agreement_id!r} in the store.")
+    latest_uuid, registrar = as_uuid(row[0]), Registrar(row[1])
+    _registrar_must_be(agreement_id, registrar, Registrar.OUTSIDE)
+    out = []
+    for garage_id in _covered_garage_ids(cursor, latest_uuid):
+        stored = load_garage(cursor, garage_id)
+        if stored is None:  # pragma: no cover - 0004's key makes this unreachable
+            raise GarageNotFound(
+                f"agreement {agreement_id!r} covers garage {garage_id!r}, which is not in "
+                "the store."
+            )
+        out.append(stored)
+    return tuple(out)
 
 
 # ---------------------------------------------------------------------------
@@ -568,7 +859,7 @@ def load_agreements_at_garage(
         """
         SELECT a.id, a.external_id, a.version, a.payer_id, p.external_id, a.spots,
                a.monthly_price_minor, a.start_day, a.status, a.cancelled_effective_day,
-               a.access_entry_from, a.access_exit_by, g.external_id
+               a.access_entry_from, a.access_exit_by, g.external_id, a.registrar
         FROM (
             SELECT DISTINCT ON (external_id) *
             FROM agreements
@@ -598,7 +889,7 @@ def load_agreements_covering_garage(cursor: Any, garage_uuid: Any) -> tuple[Stor
         """
         SELECT a.id, a.external_id, a.version, a.payer_id, p.external_id, a.spots,
                a.monthly_price_minor, a.start_day, a.status, a.cancelled_effective_day,
-               a.access_entry_from, a.access_exit_by, g.external_id
+               a.access_entry_from, a.access_exit_by, g.external_id, a.registrar
         FROM (
             SELECT DISTINCT ON (external_id) *
             FROM agreements
@@ -631,7 +922,7 @@ def load_agreements_on_invoice(cursor: Any, invoice_uuid: Any) -> tuple[StoredAg
         """
         SELECT a.id, a.external_id, a.version, a.payer_id, p.external_id, a.spots,
                a.monthly_price_minor, a.start_day, a.status, a.cancelled_effective_day,
-               a.access_entry_from, a.access_exit_by, g.external_id
+               a.access_entry_from, a.access_exit_by, g.external_id, a.registrar
         FROM (
             SELECT DISTINCT ON (external_id) *
             FROM agreements
@@ -655,12 +946,16 @@ def load_agreements_on_invoice(cursor: Any, invoice_uuid: Any) -> tuple[StoredAg
 def _as_stored(cursor: Any, heads: list[tuple]) -> tuple[StoredAgreement, ...]:
     """Rows of the agreement head shape, read back through the engine's own
     constructor -- the covered set, vehicles, pauses, fees and mandate fetched
-    per version row."""
+    per version row. The registrar rides on the head row itself: it is a column
+    of the row the loader already selected, and the constructor needs it to
+    judge the vehicle list it is handed -- an outside registrar's version
+    legitimately lists none."""
     out: list[StoredAgreement] = []
     for row in heads:
         (
             uuid, external_id, version, payer_uuid, payer_external, spots, price,
             start_day, status, cancelled_day, entry_from, exit_by, garage_external,
+            registrar,
         ) = row
         out.append(
             StoredAgreement(
@@ -686,6 +981,7 @@ def _as_stored(cursor: Any, heads: list[tuple]) -> tuple[StoredAgreement, ...]:
                     ),
                     pauses=_pauses(cursor, uuid),
                     additional_fees=_fees(cursor, uuid),
+                    registrar=Registrar(registrar),
                 ),
             )
         )
@@ -775,7 +1071,9 @@ def payer_uuid_for(cursor: Any, external_id: str) -> UUID | None:
 
 
 __all__ = [
+    "AgreementNotFound",
     "GarageNotFound",
+    "RegisteredIdentity",
     "StoredAgreement",
     "StoredGarage",
     "covered_garages_of",
@@ -785,9 +1083,11 @@ __all__ = [
     "load_garage",
     "load_payers_at_garage",
     "payer_uuid_for",
+    "register_from_outside",
     "register_vehicles",
     "registration_for",
     "registrations_at_garage",
+    "release_from_outside",
     "store_agreement",
     "store_garage",
     "store_payer",

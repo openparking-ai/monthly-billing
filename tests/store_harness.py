@@ -121,6 +121,45 @@ def apply_migration(owner: Any, prefix: str) -> None:
         _apply(cursor, migration_path(prefix))
 
 
+#: A role that owns the schema and can see NO row of a FORCE-RLS table: not a
+#: superuser, no BYPASSRLS. The shape a managed database's owner has, and the
+#: shape under which a backfill that reads the rows reads nothing.
+BLIND_OWNER = "monthly_billing_test_blind_owner"
+
+
+@contextmanager
+def as_blind_owner(owner: Any):
+    """Run the block as ``BLIND_OWNER`` -- every table of the schema handed to
+    it first, so the only thing that separates it from the real owner is row
+    visibility. A migration's backfill under this role reads zero rows, and a
+    file that checks nothing else applies "cleanly" with nothing done; the
+    tests that use this require the file to refuse by name instead. Ownership
+    is handed back on exit, whatever happened in the block."""
+    with owner.cursor() as cursor:
+        cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (BLIND_OWNER,))
+        if cursor.fetchone() is None:
+            cursor.execute(f"CREATE ROLE {BLIND_OWNER} NOLOGIN NOSUPERUSER NOBYPASSRLS")
+        cursor.execute(
+            "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = %s", (BLIND_OWNER,)
+        )
+        assert cursor.fetchone() == (False, False), "the blind owner must not bypass row security"
+        cursor.execute("SELECT current_user")
+        (real_owner,) = cursor.fetchone()
+        cursor.execute(f"GRANT ALL ON SCHEMA public TO {BLIND_OWNER}")
+        cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+        tables = [row[0] for row in cursor.fetchall()]
+        for table in tables:
+            cursor.execute(f"ALTER TABLE {table} OWNER TO {BLIND_OWNER}")
+        cursor.execute(f"SET ROLE {BLIND_OWNER}")
+        try:
+            yield cursor
+        finally:
+            cursor.execute("RESET ROLE")
+            cursor.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+            for (table,) in cursor.fetchall():
+                cursor.execute(f"ALTER TABLE {table} OWNER TO {real_owner}")
+
+
 def _apply(cursor: Any, path: Path) -> None:
     try:
         cursor.execute(path.read_text())

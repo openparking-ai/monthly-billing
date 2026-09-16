@@ -339,6 +339,51 @@ GUARANTEES: dict[str, str] = {
         "cannot be placed fails the migration BY NAME -- external id and version -- "
         "before a row is written, and the whole migration rolls back."
     ),
+    "G42": (
+        "ONE AGREEMENT, ONE REGISTRAR. An agreement STATES who writes its "
+        "registrations -- this module, the default, or an OUTSIDE registrar -- on "
+        "its document and on its row, never inferred. For an outside registrar's "
+        "agreement the module writes NO registration of its own: storing a version "
+        "registers nothing and releases nothing, the document lists no vehicles "
+        "(a list it does not own is refused by name) and loads back that way, and "
+        "the outside registrar registers and releases ONE vehicle identity at a "
+        "time through the registration door -- which fans out over the covered set "
+        "under each garage's own rule, refuses at every covered garage before it "
+        "writes anywhere, takes over a cancelled holder's row on its day, and "
+        "answers with the identity as stored per garage. Both halves of the door "
+        "refuse by name an agreement whose registrations this module writes. The "
+        "door writes the garage's holder claim (vehicle_registrations), never a "
+        "version's own list (agreement_vehicles)."
+    ),
+    "G43": (
+        "Migration 0005 gives every EXISTING agreement version the registrar it "
+        "has today -- this module -- and asserts the stated rows against the "
+        "pre-migration count rather than a literal: a default that left any "
+        "version stating otherwise fails the migration and the whole file rolls "
+        "back. No version is left unstated. The file refuses BY NAME, before its "
+        "BEGIN, a role that cannot see every row of a FORCE-RLS table -- neither "
+        "superuser nor BYPASSRLS -- because under such a role its count check "
+        "compares zero with zero and a flipped default applies with nothing done. "
+        "And it carries 0004's repair forward: 0004 does not check who is reading, "
+        "and run as such a role it places no covered-set row for any version that "
+        "existed; 0005 inserts the missing home row for every version that lacks "
+        "one and nothing else -- zero rows where 0004 saw every row, the same zero "
+        "on a second run -- and neither audits 0004 nor refuses on finding rows "
+        "missing, because its guard already refuses the only role that leaves them."
+    ),
+    "G44": (
+        "THE BARRIER READS THE AGREEMENT'S REGISTER, AND WHO KEEPS IT IS STATED. "
+        "Which vehicle identities belong to an agreement at a garage is decided in "
+        "ONE place for both coverage doors: the version's own vehicle list under "
+        "this module -- the answer it always gave, field for field -- and the "
+        "store's registration rows under an OUTSIDE registrar, which the store-backed "
+        "door supplies to the pure call as a STATED parameter, empty or not. The pure "
+        "call refuses by name an outside registrar's agreement handed in without "
+        "them, never answering 'no agreement' for a car it could not look up; a car "
+        "with no row is not covered; the money state at the home reaches a "
+        "door-registered car at every door it covers; and the money doors read none "
+        "of this."
+    ),
 }
 
 
