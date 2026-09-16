@@ -39,10 +39,15 @@
 -- does not check who is reading. Run as an owner that is neither a superuser
 -- nor BYPASSRLS it reads zero rows (FORCE binds the owner), places zero, and
 -- its count check passes, zero against zero: every version that existed is
--- left without its home row. Such a version cannot be LOADED at all -- the
--- module refuses by name a covered set that omits the home (agreement.py) --
--- so the damage is loud, not a wrong number; but it is damage, and 0004 is
--- not edited to prevent it (whether it has run anywhere could not be
+-- left without its home row. What that costs depends on the door, and it is not
+-- the same at both. At the MONEY doors the version is returned and then refused
+-- BY NAME on construction, because the module refuses a covered set that omits
+-- the home (agreement.py) -- loud, and safe. At the ACCESS door it is SILENT:
+-- load_agreements_covering_garage joins agreement_garages, so a version with no
+-- home row is not returned at all, nothing raises, and a paying monthly is
+-- answered NOT COVERED at the barrier with nothing in any log. Both measured.
+-- So the damage is a wrong answer at the one door where it reaches a customer,
+-- and 0004 is not edited to prevent it (whether it has run anywhere could not be
 -- established, and a migration that has run is not rewritten). So this file,
 -- which DOES check who is reading, inserts the home row for any version that
 -- lacks one, and nothing else: it repairs, it does not audit, and it does not
