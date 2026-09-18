@@ -69,7 +69,9 @@ same per-garage normalisation, every refusal at every garage first, then the
 writes, and the same handover of a cancelled holder's row on its day. A
 release may name ONE covered garage and reach that garage alone (G46): two
 garages that fold one plate differently can hold a stale row and a live one
-under the same text, and the fan-out cannot take the one without the other.
+under the same text, and the fan-out cannot take the one without the other --
+and in that state the unnamed release refuses by name rather than take both
+(G47, ``REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES``), writing nothing.
 Both doors refuse by name (``REFUSAL_REGISTRAR_IS_THIS_MODULE``) an agreement whose
 registrations this module writes, and the version path's writer refuses by
 name (``REFUSAL_REGISTRAR_IS_OUTSIDE``) an agreement an outside registrar
@@ -129,6 +131,7 @@ from ..findings import (
     REFUSAL_REGISTRAR_CHANGED,
     REFUSAL_REGISTRAR_IS_OUTSIDE,
     REFUSAL_REGISTRAR_IS_THIS_MODULE,
+    REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES,
     REFUSAL_VEHICLE_ALREADY_REGISTERED,
     REFUSAL_VEHICLE_NOT_REGISTERED,
     Refused,
@@ -739,8 +742,26 @@ def release_from_outside(
     not cover (``REFUSAL_GARAGE_NOT_COVERED`` -- a row left at a garage a
     version dropped is not reachable this way; the version that dropped it
     released it); no row of this agreement for this identity there
-    (``REFUSAL_VEHICLE_NOT_REGISTERED``). Without ``garage_id`` nothing here
-    behaves differently from before the parameter existed.
+    (``REFUSAL_VEHICLE_NOT_REGISTERED``).
+
+    **Why the fan-out can refuse (G47).** Without ``garage_id`` the release
+    reaches every covered garage, and in the state above the text reaches the
+    stale row AND the live car's: the module has no car, only text, and the
+    fan-out cannot tell one from two. So before any DELETE the unnamed path
+    asks whether the text names one row across the covered set -- whether a
+    row it would take at one garage is ALSO the fold of a different identity
+    this agreement holds as its own row at another covered garage. When it is,
+    the release is refused by name (``REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES``),
+    the detail naming both identities and both garages, and nothing is
+    written; the way through is the named form. The check cannot fire for an
+    agreement covering one garage -- there is no other garage -- and it fires
+    for no other agreement's row and for no covered garage that holds no row.
+    The unnamed refusals, in order, every one before any write: no such
+    agreement; a registrar that is this module; the ambiguity; no row at any
+    garage the release reached (``REFUSAL_VEHICLE_NOT_REGISTERED``) -- the
+    last two cannot collide, since a text that reaches no row cannot be
+    ambiguous. An unnamed release that is not ambiguous is what it was before
+    the check existed: output, exit code, rows.
     """
     tenant_id = as_uuid(tenant_id)  # the tenant policy scopes the write; typed for the same reason
     covered = _outside_registrars_covered_set(cursor, tenant_id, agreement_id)
@@ -750,6 +771,8 @@ def release_from_outside(
     # Every garage's form first, then the deletes: an identity that normalises
     # to nothing at one garage refuses before any garage's row has gone.
     forms = [(stored, {stored.garage.normalise_identity(identity)}) for stored in reached]
+    if garage_id is None:
+        _refuse_an_ambiguous_release(cursor, agreement_id, identity, covered)
     released = []
     for stored, listed in forms:
         cursor.execute(
@@ -769,6 +792,70 @@ def release_from_outside(
             f"{garage_id!r}, the one garage this release named; nothing to release.",
         )
     return _stored_forms(released)
+
+
+def _refuse_an_ambiguous_release(
+    cursor: Any,
+    agreement_id: str,
+    identity: str,
+    covered: tuple[StoredGarage, ...],
+) -> None:
+    """Refuse the unnamed release when the text names no single row across the
+    covered set (G47). Reads and raises; writes nothing.
+
+    For each covered garage ``g`` let ``n_g`` be the text in ``g``'s form and
+    ``rows[g]`` the identities this agreement holds there. The fan-out would
+    delete at every ``g`` with ``n_g`` in ``rows[g]``. The release is AMBIGUOUS
+    when for such a ``g`` there are a DIFFERENT covered garage ``h`` and a row
+    ``m`` of this agreement at ``h``, ``m`` not the text's own form there, whose
+    form under ``g``'s rule is ``n_g``: the row the fan-out would take at ``g``
+    is the fold of the text AND of a distinct identity the agreement holds at
+    ``h``, and taking it removes coverage for a registration the release did
+    not name.
+
+    Stated over identities and folds, not cars: the store has no column that
+    links one registration's rows across garages, so text is all there is.
+    ``h is not g`` is in the rule rather than left to the ``m != n_h``
+    exclusion, so that the check is independent of whether a garage's own rule
+    is idempotent on what it stored -- a one-garage agreement can never reach
+    this refusal. Only rows of THIS agreement count: another agreement's
+    identity at a covered garage is that agreement's, and refuses nothing
+    here. A stored form that normalises to nothing under ``g``'s rule (legal
+    at an exact garage, empty under a folding one) is the fold of nothing, and
+    is skipped rather than raised on.
+    """
+    at = []
+    for stored in covered:
+        # Sorted here, by code point: which pair the detail names when there is
+        # more than one is then the same on every platform, not the collation's.
+        rows = sorted(
+            form
+            for form, holder in registrations_at_garage(cursor, stored.uuid)
+            if holder == agreement_id
+        )
+        at.append((stored, stored.garage.normalise_identity(identity), rows))
+    for g, n_g, rows_g in at:
+        if n_g not in rows_g:
+            continue  # the fan-out takes nothing here, so nothing here is at stake
+        for h, n_h, rows_h in at:
+            if h is g:
+                continue
+            for m in rows_h:
+                if m == n_h:
+                    continue  # the text's own row there, the one the release names
+                try:
+                    folded = g.garage.normalise_identity(m)
+                except ValueError:
+                    continue
+                if folded == n_g:
+                    raise Refused(
+                        REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES,
+                        f"vehicle {identity!r} would release row {n_g!r} of agreement "
+                        f"{agreement_id!r} at garage {g.garage.id!r}, which is also the "
+                        f"form there of {m!r}, a different identity this agreement holds "
+                        f"at garage {h.garage.id!r}; the text names no single row across "
+                        f"the covered set, so nothing was released.",
+                    )
 
 
 def _covered_garage_named(
