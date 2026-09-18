@@ -32,10 +32,13 @@ $ monthly-billing show-register --tenant T --agreement ag-fleet-0007
 Nothing wakes itself up: the run is a command the operator's platform calls on
 the billing day, and the platform is an ordinary client of it. `register-vehicle`
 and `release-vehicle` are the REGISTRATION DOOR: for an agreement whose
-`registrar` is `outside`, an outside registrar puts one car on and takes one
-off, at every garage the agreement covers -- or, with `--garage`, off at that
-one covered garage alone -- and is told the identity as stored at each; this
-module writes none of that agreement's registrations itself.
+`registrar` is `outside`, the registrar puts one car on at every garage the
+latest version covers, and takes one off at every covered garage holding its row
+(one holding none is absent from the answer) -- or, with `--garage`, at that one
+covered garage alone. When two garages fold a plate differently and the text
+names no single row across them, the unnamed release refuses and writes nothing;
+naming the garage is the way through. Answers give the identity as stored per
+garage; this module writes none of that agreement's registrations itself.
 `show-register` is THE REGISTER READ, for any reader and either registrar: the
 agreement's latest version (registrar, status, cancellation day, home and
 covered garages) and every registration row that names it, at any garage, as
