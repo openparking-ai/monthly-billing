@@ -62,6 +62,7 @@ from monthly_billing.findings import (
     REFUSAL_REGISTRAR_CHANGED,
     REFUSAL_REGISTRAR_IS_OUTSIDE,
     REFUSAL_REGISTRAR_IS_THIS_MODULE,
+    REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES,
     REFUSAL_VEHICLE_ALREADY_REGISTERED,
     REFUSAL_VEHICLE_NOT_REGISTERED,
     Refused,
@@ -175,6 +176,20 @@ def _release(app, tenant_id, agreement_id, identity):
     with tenant(app, tenant_id) as cursor:
         try:
             released = release_from_outside(cursor, tenant_id, agreement_id, identity)
+        except BaseException:
+            app.rollback()
+            raise
+    app.commit()
+    return released
+
+
+def release_at(app, tenant_id, agreement_id, identity, garage_id):
+    """The named form (G46), the way through an ambiguous text."""
+    with tenant(app, tenant_id) as cursor:
+        try:
+            released = release_from_outside(
+                cursor, tenant_id, agreement_id, identity, garage_id=garage_id
+            )
         except BaseException:
             app.rollback()
             raise
@@ -302,11 +317,17 @@ def test_the_door_releases_one_vehicle_at_every_covered_garage(app, tenant_id):
     seeded = _seed(app, tenant_id, outside())
     _register(app, tenant_id, OUTSIDE_ID, "AB-123")
     _register(app, tenant_id, OUTSIDE_ID, "CD-456")
-    released = _release(app, tenant_id, OUTSIDE_ID, "ab-123")  # spelt as the registrar has it
-    # The answer is where a row WENT, per garage, in that garage's form. Folded:
-    # 'ab-123' IS 'AB-123', released. Exact: it is another car, no row went, and
-    # the garage is absent from the answer -- how the registrar learns that
-    # 'AB-123' still stands there.
+    # Spelt other than the registrar has it: folded, 'ab-123' IS 'AB-123' and
+    # would go; exact, it is another car and 'AB-123' would stand. The unnamed
+    # release does not guess which the registrar meant -- it refuses by name
+    # (G47) and writes nothing; the registrar learns that 'AB-123' stands at
+    # the exact garage from the refusal, and names the garage.
+    with pytest.raises(Refused) as ambiguous:
+        _release(app, tenant_id, OUTSIDE_ID, "ab-123")
+    assert ambiguous.value.code == REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES
+    assert _rows(app, tenant_id, seeded, HOME) == [("ab123", "ag-outside"), ("cd456", "ag-outside")]
+    released = release_at(app, tenant_id, OUTSIDE_ID, "ab-123", HOME.id)
+    # The answer is where a row WENT, per garage, in that garage's form.
     assert released == (RegisteredIdentity(HOME.id, "ab123"),)
     assert _rows(app, tenant_id, seeded, HOME) == [("cd456", "ag-outside")]
     assert _rows(app, tenant_id, seeded, OTHER) == [

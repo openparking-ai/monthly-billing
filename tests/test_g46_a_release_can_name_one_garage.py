@@ -1,15 +1,16 @@
 """G46 -- a release can name ONE covered garage and reach it alone.
 
-The defect, measured by an outside registrar's review and here as the
-premise of the first test: ``release_from_outside`` deletes the identity at EVERY garage of
-the latest covered set, each under its own rule, in one call. With the home
-folded and the other garage exact, a car re-registered under a plate that
-differs only in formatting leaves a STALE row at the exact garage and ONE row
--- the live car's -- at the folded one, under the same text. Releasing the
-stale text removes the stale row and the live row together; the only string
-that reaches an exact-rule row is its own text, and by construction that text
-folds to the live form, so no caller could release the stale row alone. A
-crash inside that window leaves the live car uncovered at the folded garage.
+The defect, measured by an outside registrar's review: ``release_from_outside``
+deletes the identity at EVERY garage of the latest covered set, each under its
+own rule, in one call. With the home folded and the other garage exact, a car
+re-registered under a plate that differs only in formatting leaves a STALE row
+at the exact garage and ONE row -- the live car's -- at the folded one, under
+the same text. Releasing the stale text would remove the stale row and the
+live row together; the only string that reaches an exact-rule row is its own
+text, and by construction that text folds to the live form, so no caller could
+release the stale row alone. Since G47 the unnamed release REFUSES in that
+state rather than take both -- the premise of the first test, measured -- and
+this option is the way through.
 
 The change: ``release-vehicle --garage G`` (``garage_id=`` on the library
 call, the same code) reaches that one covered garage, under its rule, and
@@ -52,6 +53,7 @@ from monthly_billing.entitlement_store import covered_from_store
 from monthly_billing.findings import (
     REFUSAL_GARAGE_NOT_COVERED,
     REFUSAL_REGISTRAR_IS_THIS_MODULE,
+    REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES,
     REFUSAL_VEHICLE_NOT_REGISTERED,
     Refused,
 )
@@ -211,9 +213,10 @@ def test_the_l3_case_the_stale_row_goes_and_the_live_row_stays_covered_at_both(
     """T4, both directions. The car is registered as ``first``; the registrar
     swaps it to ``second``, a plate that differs only in formatting. At the
     folded home the two are ONE row; at the exact other garage they are two,
-    and ``first``'s is now stale. The premise, measured and rolled back: the
-    fan-out release of ``first`` takes the stale row AND the home's live row.
-    The fix: named at the other garage, the release takes the stale row alone,
+    and ``first``'s is now stale. The premise: the unnamed release of
+    ``first`` now refuses by name and writes nothing (G47) -- it would take the
+    stale row AND the home's live row, and the door no longer guesses. The
+    fix: named at the other garage, the release takes the stale row alone,
     and the car is covered at both garages before, during and after."""
     seeded = _seed(app, tenant_id, outside())
     _register(app, tenant_id, OUTSIDE_ID, first)
@@ -226,12 +229,15 @@ def test_the_l3_case_the_stale_row_goes_and_the_live_row_stays_covered_at_both(
     )
     assert _covered(app, tenant_id, second) == {HOME.id: True, OTHER.id: True}
 
-    # THE PREMISE: the unscoped release removes the live row with the stale one.
-    with tenant(app, tenant_id) as cursor:
-        fanned_out = release_from_outside(cursor, tenant_id, OUTSIDE_ID, first)
-        assert fanned_out == entries((OTHER.id, first), (HOME.id, "ab123"))
-        assert covered_from_store(app, tenant_id, HOME.id, second, DAY).covered is False
-    app.rollback()
+    # THE PREMISE: the unscoped release would take the live row with the stale
+    # one, and refuses by name instead (G47); the rows and the coverage stand.
+    with pytest.raises(Refused) as ambiguous:
+        _release(app, tenant_id, OUTSIDE_ID, first)
+    assert ambiguous.value.code == REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES
+    assert _rows(app, tenant_id, seeded, HOME) == [("ab123", OUTSIDE_ID)]
+    assert _rows(app, tenant_id, seeded, OTHER) == sorted(
+        [(first, OUTSIDE_ID), (second, OUTSIDE_ID)]
+    )
     assert _covered(app, tenant_id, second) == {HOME.id: True, OTHER.id: True}
 
     # THE FIX: the stale row, by its garage; the live rows stay; covered throughout.

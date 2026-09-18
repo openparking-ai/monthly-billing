@@ -2036,9 +2036,11 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "                cursor, args.tenant, args.agreement, args.vehicle, garage_id=args.garage",
         "                cursor, args.tenant, args.agreement, args.vehicle, garage_id=None  "
         "# PLANTED: parsed and dropped",
-        "the command line accepts --garage and hands the library nothing: the verb fans "
-        "out as before, prints a line per garage, and the stale row's live twin at the "
-        "folded garage goes with it",
+        "the command line accepts --garage and hands the library nothing: the verb takes "
+        "the unnamed path -- in a healthy register it fans out and prints a line per "
+        "garage where one was asked for (what the command-line tests see); in the L3's "
+        "state it would refuse by name (G47) rather than release the row the operator "
+        "named. Before G47 this plant took the stale row's live twin with it",
     ),
     "G46/fan-out-kept": (
         "tests/test_g46_a_release_can_name_one_garage.py",
@@ -2047,7 +2049,9 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "garage_id),)",
         "        reached = covered  # PLANTED: the garage is named, the fan-out is kept",
         "the library reads the option and releases at every covered garage anyway -- the "
-        "L3's defect exactly, with the option in place",
+        "L3's defect exactly, with the option in place; and because the garage IS named, "
+        "the ambiguity check (G47) does not stand in the way, so the stale row's live "
+        "twin at the folded garage goes with it",
     ),
     "G46/lookup-tenant-predicate": (
         "tests/test_g46_a_release_can_name_one_garage.py",
@@ -2161,6 +2165,119 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "a named release that found no row answers an empty tuple and exit 0 -- the "
         "fan-out's refusal (G42) still fires, so only the per-garage case hides the "
         "divergence the single-writer rule exists to surface",
+    ),
+    "G47/check-dropped": (
+        "tests/test_g47_an_ambiguous_release_names_its_garage.py",
+        "store/records.py",
+        source(
+            "    if garage_id is None:",
+            "        _refuse_an_ambiguous_release(cursor, agreement_id, identity, covered)",
+        ),
+        "    pass  # PLANTED: B3 replanted -- the unnamed path fans out as before",
+        "the whole guarantee: the unnamed release of a text that names no single row "
+        "across the covered set takes the live car's row with the stale one and exits 0 "
+        "-- the defect the outside round measured, back in place",
+    ),
+    "G47/named-form-also-refused": (
+        "tests/test_g46_a_release_can_name_one_garage.py",
+        "store/records.py",
+        source(
+            "    if garage_id is None:",
+            "        _refuse_an_ambiguous_release(cursor, agreement_id, identity, covered)",
+        ),
+        source(
+            "    if True:  # PLANTED: the check runs for the named form too",
+            "        _refuse_an_ambiguous_release(cursor, agreement_id, identity, covered)",
+        ),
+        "the escape hatch is closed by the fix: the named release is asked the "
+        "cross-garage question it exists to answer by hand, and in the L3's state the "
+        "stale row can no longer be released at all -- G46's own suite goes red",
+    ),
+    "G47/after-the-delete": (
+        "tests/test_g47_an_ambiguous_release_names_its_garage.py",
+        "store/records.py",
+        source(
+            "                if folded == n_g:",
+            "                    raise Refused(",
+            "                        REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES,",
+        ),
+        source(
+            "                if folded == n_g:",
+            "                    cursor.execute(  # PLANTED: the rows go, then the refusal",
+            '                        "DELETE FROM vehicle_registrations "',
+            '                        "WHERE agreement_external_id = %s",',
+            "                        (agreement_id,),",
+            "                    )",
+            "                    raise Refused(",
+            "                        REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES,",
+        ),
+        "a refusal that writes: the rows are gone in the caller's transaction before the "
+        "refusal is raised, which the rows read on the refusing cursor see (the check "
+        "MOVED below the delete loop would read rows already deleted and never refuse -- "
+        "the same red as check-dropped, proving nothing about the write; this plant "
+        "keeps the refusal and breaks 'writes nothing')",
+    ),
+    "G47/other-identity-not-excluded": (
+        "tests/test_g47_an_ambiguous_release_names_its_garage.py",
+        "store/records.py",
+        source(
+            "                if m == n_h:",
+            "                    continue  # the text's own row there, the one the release names",
+        ),
+        source(
+            "                if False:  # PLANTED: the text's own form is 'another identity'",
+            "                    continue",
+        ),
+        "the m != n_h exclusion dropped: the text's own row at the other garage folds "
+        "onto its own row at this one, so every ordinary unnamed release across two "
+        "garages refuses -- states d, e and g go red",
+    ),
+    "G47/same-garage-pair": (
+        "tests/test_g47_an_ambiguous_release_names_its_garage.py",
+        "store/records.py",
+        source(
+            "            if h is g:",
+            "                continue",
+        ),
+        source(
+            "            if False:  # PLANTED: a garage is paired with itself",
+            "                continue",
+        ),
+        "the h is not g exclusion dropped: a non-canonical row raw at a one-garage "
+        "agreement's only garage folds onto the text's row THERE, and the one-garage "
+        "agreement reaches a refusal that is about two garages -- state f goes red "
+        "(on the door's own canonical rows the normaliser is idempotent and this plant "
+        "would be silent, which is why state f plants the raw row)",
+    ),
+    "G47/agreement-filter-dropped": (
+        "tests/test_g47_an_ambiguous_release_names_its_garage.py",
+        "store/records.py",
+        source(
+            "            if holder == agreement_id",
+            "        )",
+        ),
+        source(
+            "            if True  # PLANTED: every agreement's rows count",
+            "        )",
+        ),
+        "the row read not filtered to this agreement: another agreement's identity at a "
+        "covered garage, colliding under the fold, refuses this agreement's healthy "
+        "release",
+    ),
+    "G47/refusal-renamed": (
+        "tests/test_g47_an_ambiguous_release_names_its_garage.py",
+        "store/records.py",
+        source(
+            "                    raise Refused(",
+            "                        REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES,",
+        ),
+        source(
+            "                    raise Refused(  # PLANTED: the old code for the new state",
+            "                        REFUSAL_VEHICLE_NOT_REGISTERED,",
+        ),
+        "the ambiguous state is refused under REFUSAL_VEHICLE_NOT_REGISTERED: the operator "
+        "cannot tell a text that names two rows from a text that names none, and the "
+        "sentence that says to name the garage is never printed",
     ),
 }
 

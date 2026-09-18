@@ -74,6 +74,7 @@ REFUSAL_REGISTRAR_CHANGED = "REFUSAL_REGISTRAR_CHANGED"
 REFUSAL_REGISTRATIONS_NOT_GIVEN = "REFUSAL_REGISTRATIONS_NOT_GIVEN"
 REFUSAL_VEHICLE_NOT_REGISTERED = "REFUSAL_VEHICLE_NOT_REGISTERED"
 REFUSAL_GARAGE_NOT_COVERED = "REFUSAL_GARAGE_NOT_COVERED"
+REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES = "REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -265,6 +266,17 @@ REFUSALS: dict[str, str] = {
         "covered holds no row of it to release. The garage exists for this tenant "
         "-- one it does not hold is NOT FOUND, before this -- it is simply not on "
         "the agreement."
+    ),
+    REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES: (
+        "A release that named no garage was asked to reach every covered garage, "
+        "and the text names no single row across them: at one covered garage the "
+        "agreement's register holds an identity that is a DIFFERENT row there and "
+        "the SAME row -- the one this text would take -- at another covered garage, "
+        "because the two garages fold a plate differently. Taking that row would "
+        "remove coverage for a registration the release did not name, so the door "
+        "refuses before any row goes and writes nothing. `show-register` shows the "
+        "stored form at each garage, and `release-vehicle --garage G` releases at "
+        "one garage alone, under that garage's rule."
     ),
     REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL: (
         "This adjustment would take the invoice total below zero. A waived fee or "

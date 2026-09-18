@@ -72,6 +72,7 @@ from monthly_billing.findings import (  # noqa: E402
     REFUSAL_REGISTRAR_IS_OUTSIDE,
     REFUSAL_REGISTRAR_IS_THIS_MODULE,
     REFUSAL_REGISTRATIONS_NOT_GIVEN,
+    REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES,
     REFUSAL_REVERSAL_REASON_MISMATCH,
     REFUSAL_VEHICLE_NOT_REGISTERED,
     REFUSAL_VEHICLE_ON_TWO_AGREEMENTS,
@@ -220,7 +221,18 @@ def _registrar_lines() -> list[str]:
         "plate differently can hold under the live car's text, which the fan-out cannot "
         "take without the live row; a garage the tenant does not hold is NOT FOUND, and "
         "one the latest version does not cover is refused by name "
-        f"(`{REFUSAL_GARAGE_NOT_COVERED}`), each before any write. "
+        f"(`{REFUSAL_GARAGE_NOT_COVERED}`), each before any write. And in that state "
+        "the UNNAMED release refuses by name rather than take both rows "
+        f"(`{REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES}`, G47): when the row it would "
+        "take at one covered garage is also the fold of a DIFFERENT identity the "
+        "agreement holds as its own row at another covered garage, the text names no "
+        "single row across the covered set, and the door writes nothing -- the "
+        "refusal comes after the registrar check and before "
+        f"`{REFUSAL_VEHICLE_NOT_REGISTERED}`, cannot fire for an agreement covering one "
+        "garage, counts no other agreement's row and no covered garage that holds "
+        "none, and names both identities and both garages in its detail; "
+        "`show-register` shows the stored forms, and the named release is the way "
+        "through. An unnamed release that is not ambiguous is what it was. "
         "Both halves of the door refuse by name an agreement whose registrations this "
         f"module writes (`{REFUSAL_REGISTRAR_IS_THIS_MODULE}`), and the version path's "
         "writer refuses by name an agreement an outside registrar writes "

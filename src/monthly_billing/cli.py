@@ -39,7 +39,12 @@ releases at that ONE covered garage alone, under its rule -- the same header,
 then exactly one ``at garage`` line -- for the row the fan-out cannot take
 without taking a live one with it; a garage the tenant does not hold is NOT
 FOUND, and one the agreement's latest version does not cover is refused by
-name. Without ``--garage`` the verb is what it was.
+name. Without ``--garage`` the verb reaches every covered garage as it always
+did -- except in that one state, where the text names no single row across
+the covered set: then it refuses by name
+(``REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES``), writes nothing, and the
+refusal says to name the garage. An unnamed release that is not ambiguous is
+what it was.
 
 ``show-register`` is THE REGISTER READ, for any reader and either registrar:
 the agreement's latest version -- registrar, status, cancellation day, home
@@ -472,7 +477,9 @@ def main(argv: list[str] | None = None) -> int:
     release.add_argument("--agreement", required=True, help="the agreement id")
     release.add_argument("--vehicle", required=True)
     release.add_argument(
-        "--garage", help="release at this ONE covered garage only (the garage id); default: all"
+        "--garage",
+        help="release at this ONE covered garage only (the garage id); default: every covered "
+        "garage, refused by name when the text names no single row across them",
     )
     release.set_defaults(run=_release_vehicle)
 
