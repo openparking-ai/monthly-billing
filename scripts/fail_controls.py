@@ -2279,6 +2279,197 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "cannot tell a text that names two rows from a text that names none, and the "
         "sentence that says to name the garage is never printed",
     ),
+    # ---- G48: the register, read by garage ----------------------------------
+    "G48/own-version-rule": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "store/records.py",
+        source(
+            "        try:",
+            "            latest = _latest_version_of(cursor, tenant_id, agreement_id)",
+            "        except AgreementNotFound:",
+            "            not_found.append(agreement_id)",
+            "            continue",
+        ),
+        source(
+            "        cursor.execute(  # PLANTED: the read picks its version on its own",
+            '            "SELECT id, version, registrar, status, cancelled_effective_day "',
+            '            "FROM agreements WHERE external_id = %s ORDER BY version DESC LIMIT 1",',
+            "            (agreement_id,),",
+            "        )",
+            "        picked = cursor.fetchone()",
+            "        if picked is None:",
+            "            not_found.append(agreement_id)",
+            "            continue",
+            "        latest = _LatestVersion(as_uuid(picked[0]), picked[1], picked[2], picked[3], "
+            "picked[4], as_uuid(picked[0]))",
+        ),
+        "the read picks 'the latest version' with a SELECT of its own, unscoped by tenant "
+        "-- a rule that agrees with the door's today and drifts the day one is edited, "
+        "and with the policy off hands this tenant another tenant's higher version",
+    ),
+    "G48/read-writes": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "store/records.py",
+        source(
+            "    garage_uuid = as_uuid(row[0])",
+            "    cursor.execute(",
+            '        "SELECT r.identity_normalised, r.agreement_external_id "',
+        ),
+        source(
+            "    garage_uuid = as_uuid(row[0])",
+            "    cursor.execute(  # PLANTED: a read that writes -- no value changes, xmin does",
+            '        "UPDATE vehicle_registrations SET registered_at = registered_at "',
+            '        "WHERE tenant_id = %s AND garage_id = %s",',
+            "        (tenant_id, garage_uuid),",
+            "    )",
+            "    cursor.execute(",
+            '        "SELECT r.identity_normalised, r.agreement_external_id "',
+        ),
+        "the read touches every row it shows: the digests of every table before and after "
+        "differ, and the backend's own tuple counters move",
+    ),
+    "G48/garage-tenant-predicate": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "store/records.py",
+        source(
+            '        "SELECT id FROM garages WHERE external_id = %s AND tenant_id = %s",',
+            "        (garage_id, tenant_id),",
+        ),
+        source(
+            '        "SELECT id FROM garages WHERE external_id = %s AND %s::uuid IS NOT NULL",  '
+            "# PLANTED",
+            "        (garage_id, tenant_id),",
+        ),
+        "the garage is looked up by id alone: with the policy off, fetchone hands the read "
+        "another tenant's garage of the same id and the register shown is not this tenant's",
+    ),
+    "G48/rows-tenant-predicate": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "store/records.py",
+        '        "WHERE r.tenant_id = %s AND r.garage_id = %s",',
+        '        "WHERE %s::uuid IS NOT NULL AND r.garage_id = %s",  # PLANTED',
+        "the rows are read by the garage's uuid alone: the uuid is unique across tenants so "
+        "nothing leaks today, and the static census of the read's SQL is what holds the "
+        "second predicate the guarantee names -- this plant proves that census can go red",
+    ),
+    "G48/unknown-agreement-dropped": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "store/records.py",
+        source(
+            '        "FROM vehicle_registrations r "',
+            '        "WHERE r.tenant_id = %s AND r.garage_id = %s",',
+        ),
+        source(
+            '        "FROM vehicle_registrations r "',
+            '        "JOIN agreements a ON a.tenant_id = r.tenant_id "  # PLANTED: through the set',
+            '        "AND a.external_id = r.agreement_external_id "',
+            '        "WHERE r.tenant_id = %s AND r.garage_id = %s",',
+        ),
+        "the rows are read through the agreements table: a row naming an id the store holds "
+        "no version of is silently dropped -- and shown twice for an agreement stored at two "
+        "versions -- instead of being named",
+    ),
+    "G48/unknown-agreement-refuses": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "store/records.py",
+        source(
+            "        except AgreementNotFound:",
+            "            not_found.append(agreement_id)",
+            "            continue",
+        ),
+        source(
+            "        except AgreementNotFound:  # PLANTED: one stray id refuses the whole read",
+            "            raise",
+        ),
+        "one row naming an unknown agreement makes the whole garage NOT FOUND: the reader "
+        "that needs the register most -- the one reconciling -- is the one refused",
+    ),
+    "G48/not-covering-unnamed": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "store/records.py",
+        "        if garage_id not in _covered_garage_ids(cursor, latest.uuid):",
+        "        if False:  # PLANTED: an agreement that does not cover the garage is never named",
+        "a row whose agreement's latest version no longer covers the garage is shown but the "
+        "agreement is not named",
+    ),
+    "G48/through-load-garage": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "store/records.py",
+        source(
+            '        "SELECT id FROM garages WHERE external_id = %s AND tenant_id = %s",',
+            "        (garage_id, tenant_id),",
+            "    )",
+            "    row = cursor.fetchone()",
+        ),
+        source(
+            '        "SELECT id FROM garages WHERE external_id = %s AND tenant_id = %s",',
+            "        (garage_id, tenant_id),",
+            "    )",
+            "    row = cursor.fetchone()",
+            "    if row is not None and load_garage(cursor, garage_id) is None:  # PLANTED",
+            "        row = None",
+        ),
+        "the read builds the Garage on its way in: a garage stored with a zone the system "
+        "does not carry refuses the read that exists to show it",
+    ),
+    "G48/rows-unsorted": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "store/records.py",
+        "            key=lambda entry: (entry.identity_normalised, entry.agreement),",
+        "            key=lambda entry: 0,  # PLANTED: the heap's order, whatever it is",
+        "no sort on the rows: they come out in the heap's order, which the test's premise "
+        "proves is not the code-point order",
+    ),
+    "G48/agreements-unsorted": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "store/records.py",
+        "    for agreement_id in sorted({entry.agreement for entry in registrations}):",
+        "    for agreement_id in sorted({entry.agreement for entry in registrations}, "
+        "reverse=True):  # PLANTED",
+        "the agreement list is deterministic but not the published order",
+    ),
+    "G48/sixth-key": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "store/records.py",
+        source(
+            '            "agreements_not_found": list(self.agreements_not_found),',
+            "        }",
+            "        return answer",
+        ),
+        source(
+            '            "agreements_not_found": list(self.agreements_not_found),',
+            "        }",
+            '        answer["home_garage"] = "PLANTED"  # PLANTED: a sixth key',
+            "        return answer",
+        ),
+        "the answer carries a sixth key -- the home garage -- and the field-set test, which "
+        "derives the five from the class and reads the document's keys, sees it",
+    ),
+    "G48/refusal-swallowed": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "store/records.py",
+        source(
+            "    if row is None:",
+            '        raise GarageNotFound(f"no garage {garage_id!r} in the store.")',
+        ),
+        source(
+            "    if row is None:  # PLANTED: an unknown garage is an empty register",
+            "        return GarageRegister(garage_id, (), (), (), ())",
+        ),
+        "a garage the store does not hold answers an empty register, exit 0, instead of NOT "
+        "FOUND -- a typo in the id reads as 'no cars registered'",
+    ),
+    "G48/stderr": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "cli.py",
+        "    print(json.dumps(register.as_document(), indent=2, sort_keys=True))",
+        source(
+            '    print(f"register of {args.garage}", file=sys.stderr)  # PLANTED',
+            "    print(json.dumps(register.as_document(), indent=2, sort_keys=True))",
+        ),
+        "the verb writes a line to stderr on success, so a program reading the answer sees "
+        "noise where the contract says nothing",
+    ),
 }
 
 

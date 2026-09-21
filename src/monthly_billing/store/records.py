@@ -1122,6 +1122,185 @@ def show_register(cursor: Any, tenant_id: Any, agreement_id: str) -> AgreementRe
     )
 
 
+@dataclass(frozen=True)
+class RegisteredAgreement:
+    """One agreement a garage's register names, from its LATEST version: the
+    columns a reader at a garage needs to decide whether the car is covered
+    NOW -- the version, who registers it, whether it is cancelled and from
+    which day -- and nothing else. Every field is a column's own value, the
+    same columns ``AgreementRegister`` documents and under the same
+    constraints."""
+
+    agreement: str
+    version: int
+    registrar: str
+    status: str
+    cancelled_effective_day: date | None
+
+
+@dataclass(frozen=True)
+class GarageRegisterEntry:
+    """One row of a garage's register: the identity in the form THIS garage
+    compares in, and the agreement it names. Nothing else travels on it."""
+
+    identity_normalised: str
+    agreement: str
+
+
+@dataclass(frozen=True)
+class GarageRegister:
+    """A garage's register as the store holds it, selected BY THE GARAGE: every
+    ``vehicle_registrations`` row at the garage as {identity as stored,
+    agreement}; for every agreement those rows name, its latest version's
+    registrar, status and cancellation day; the agreements whose latest version
+    does not cover this garage; and the agreement ids the rows name that the
+    tenant holds no version of. Five keys, and the field set is derived from
+    this class, so a sixth is seen the day it exists. NOTHING ELSE TRAVELS --
+    not the price, the payer, the spots, the fees, the pauses, the mandate,
+    the access hours, the start day, the home garage, the covered set, the
+    version's own vehicle list or a registration's instant. A reader at a
+    garage needs to know which cars an agreement holds HERE and whether the
+    agreement stands, not where else it answers.
+
+    It answers the question ``show_register`` cannot: that read takes one
+    agreement id, and a reader that has to hold every entitlement at a garage
+    -- a lane refreshing what it decides from -- was never told one.
+
+    Every field is a column's own value, backed by that column's constraint
+    (the same columns ``AgreementRegister`` documents), or is derived in
+    Python from two of them:
+
+    * ``garage`` -- ``garages.external_id``, the id the reader asked with.
+    * ``registrations[].identity_normalised`` -- ``vehicle_registrations.identity_normalised``.
+    * ``registrations[].agreement`` -- ``vehicle_registrations.agreement_external_id``:
+      text NOT NULL CHECK (length(btrim(..)) > 0) (0003) -- text, and keyed to
+      no ``agreements`` row, which is why the last list below can be non-empty.
+    * ``agreements[]`` -- ``agreements.external_id``, ``version``, ``registrar``,
+      ``status``, ``cancelled_effective_day``, from the row ``_latest_version_of``
+      picks -- the same rule the registration door and ``show_register`` apply.
+    * ``agreements_not_covering_garage`` -- derived: the agreements named
+      whose latest version's ``agreement_garages`` rows do not hold this garage.
+    * ``agreements_not_found`` -- derived: the agreement ids named by a row
+      that ``_latest_version_of`` finds no version for in this tenant.
+
+    So the read validates nothing: no ``Agreement``, no ``Garage`` is built,
+    and a version the loaders refuse or a garage stored with an unreadable
+    option still shows its register in full.
+    """
+
+    garage: str
+    registrations: tuple[GarageRegisterEntry, ...]
+    agreements: tuple[RegisteredAgreement, ...]
+    agreements_not_covering_garage: tuple[str, ...]
+    agreements_not_found: tuple[str, ...]
+
+    def as_document(self) -> dict[str, Any]:
+        """The JSON shape: the five keys above, every list sorted by code
+        point in Python (never by the database's collation), the day as an
+        ISO date or null. The command line prints exactly this."""
+        answer: dict[str, Any] = {
+            "garage": self.garage,
+            "registrations": [
+                {"identity_normalised": entry.identity_normalised, "agreement": entry.agreement}
+                for entry in self.registrations
+            ],
+            "agreements": [
+                {
+                    "agreement": each.agreement,
+                    "version": each.version,
+                    "registrar": each.registrar,
+                    "status": each.status,
+                    "cancelled_effective_day": (
+                        None
+                        if each.cancelled_effective_day is None
+                        else each.cancelled_effective_day.isoformat()
+                    ),
+                }
+                for each in self.agreements
+            ],
+            "agreements_not_covering_garage": list(self.agreements_not_covering_garage),
+            "agreements_not_found": list(self.agreements_not_found),
+        }
+        return answer
+
+
+def show_garage_register(cursor: Any, tenant_id: Any, garage_id: str) -> GarageRegister:
+    """A garage's register, for ANY reader, selected by the garage: every
+    ``vehicle_registrations`` row at it, and the latest version of every
+    agreement those rows name -- picked by ``_latest_version_of``, the one
+    rule the registration door and ``show_register`` pick theirs with.
+    Answers for either registrar and says which: the single-writer rule
+    governs WRITES, and a read refuses nobody on it. Takes no instant and
+    derives nothing: a cancelled agreement whose day has passed is shown
+    ``cancelled`` with its day and with whatever rows are still stored.
+    Writes nothing. A garage the tenant does not hold raises
+    ``GarageNotFound``; one with no rows answers an empty register, which is
+    not a refusal.
+
+    The rows are selected by the garage alone -- ``garage_id`` and the tenant
+    -- never through an agreement's covered set, so a row is never dropped for
+    its agreement: a row naming an agreement whose latest version no longer
+    covers this garage is shown and the agreement named again in
+    ``agreements_not_covering_garage``; a row naming an agreement id the
+    tenant holds no version of -- ``agreement_external_id`` is text keyed to
+    nothing, so a system past the module can leave one -- is shown and the id
+    named in ``agreements_not_found``, never a refusal of the whole read: it is
+    exactly the row a reconciliation exists to find.
+
+    Sorted here, by code point: ``registrations`` by (identity, agreement),
+    ``agreements`` and both name lists by agreement id. The database's
+    ``ORDER BY`` on text is the machine's collation and differs between
+    machines; a program reading this needs one order.
+    """
+    tenant_id = as_uuid(tenant_id)
+    cursor.execute(
+        "SELECT id FROM garages WHERE external_id = %s AND tenant_id = %s",
+        (garage_id, tenant_id),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        raise GarageNotFound(f"no garage {garage_id!r} in the store.")
+    garage_uuid = as_uuid(row[0])
+    cursor.execute(
+        "SELECT r.identity_normalised, r.agreement_external_id "
+        "FROM vehicle_registrations r "
+        "WHERE r.tenant_id = %s AND r.garage_id = %s",
+        (tenant_id, garage_uuid),
+    )
+    registrations = tuple(
+        sorted(
+            (GarageRegisterEntry(identity_normalised=identity, agreement=agreement)
+             for identity, agreement in cursor.fetchall()),
+            key=lambda entry: (entry.identity_normalised, entry.agreement),
+        )
+    )
+    agreements: list[RegisteredAgreement] = []
+    not_covering: list[str] = []
+    not_found: list[str] = []
+    for agreement_id in sorted({entry.agreement for entry in registrations}):
+        try:
+            latest = _latest_version_of(cursor, tenant_id, agreement_id)
+        except AgreementNotFound:
+            not_found.append(agreement_id)
+            continue
+        agreements.append(RegisteredAgreement(
+            agreement=agreement_id,
+            version=latest.version,
+            registrar=latest.registrar,
+            status=latest.status,
+            cancelled_effective_day=latest.cancelled_effective_day,
+        ))
+        if garage_id not in _covered_garage_ids(cursor, latest.uuid):
+            not_covering.append(agreement_id)
+    return GarageRegister(
+        garage=garage_id,
+        registrations=registrations,
+        agreements=tuple(agreements),
+        agreements_not_covering_garage=tuple(not_covering),
+        agreements_not_found=tuple(not_found),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Reading them back out
 # ---------------------------------------------------------------------------

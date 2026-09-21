@@ -27,6 +27,7 @@ $ monthly-billing release-vehicle --tenant T --agreement ag-fleet-0007 --vehicle
 $ monthly-billing release-vehicle --tenant T --agreement ag-fleet-0007 --vehicle "ABC 123" \
       --garage garage-downtown
 $ monthly-billing show-register --tenant T --agreement ag-fleet-0007
+$ monthly-billing show-garage-register --tenant T --garage garage-downtown
 ```
 
 Nothing wakes itself up: the run is a command the operator's platform calls on
@@ -44,6 +45,16 @@ agreement's latest version (registrar, status, cancellation day, home and
 covered garages) and every registration row that names it, at any garage, as
 the identity stored there -- JSON with sorted keys, and nothing of money on
 it. It writes nothing and validates nothing it does not return.
+`show-garage-register` is the same read BY GARAGE, for a reader that was never
+told an agreement id -- a lane refreshing what it decides from: every
+registration row at the garage as the identity stored there and the agreement
+it names, and for every agreement those rows name its latest version's
+registrar, status and cancellation day; an agreement whose latest version no
+longer covers the garage is named, and so is an id the rows name that the store
+holds no version of -- shown, never a refusal of the whole read. Nothing of
+where else an agreement answers travels: not its home garage, not its covered
+set. A garage with no rows answers an empty register; a garage the tenant does
+not hold is NOT FOUND.
 
 ## The lane never learns anything about money
 

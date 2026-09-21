@@ -460,6 +460,36 @@ GUARANTEES: dict[str, str] = {
         "migration, no grant; the money doors, the reads and `show-register` are "
         "untouched."
     ),
+    "G48": (
+        "THE REGISTER CAN BE READ BY GARAGE, BY ANY READER, WITHOUT AN AGREEMENT ID. "
+        "`show-garage-register` -- and `show_garage_register` beneath it, the same code -- "
+        "answers for a garage the tenant holds: every vehicle_registrations row at that "
+        "garage, selected by the garage and the tenant alone and never through an "
+        "agreement's covered set, as the identity stored there and the agreement it "
+        "names; for every agreement those rows name, from its LATEST version -- chosen by "
+        "the one helper the registration door and show-register choose theirs with -- the "
+        "agreement id, the version, the registrar, the status and the cancellation day; "
+        "the agreements whose latest version does not cover the garage; and the ids the "
+        "rows name that the tenant holds no version of, each named and never a refusal of "
+        "the whole read, because agreement_external_id is text keyed to nothing and a row "
+        "a system past the module left is the row a reconciliation exists to find. Five "
+        "keys, derived from the answer class, and nothing more travels: no price, payer, "
+        "spots, fee, pause, mandate, access hours, start day, home garage, covered set, "
+        "version vehicle list, registration instant, invoice or payment. It answers for "
+        "either registrar and says which. It takes no instant and derives nothing; it "
+        "validates nothing it does not return -- no Agreement and no Garage is built -- so "
+        "a garage stored with an unreadable option or a version the loaders refuse still "
+        "shows its register in full; it writes nothing, proven by row counts and digests "
+        "of every table and by the backend's own tuple counters; another tenant's garage "
+        "of the same id is not read, with the row policy on or off, held by the read's "
+        "own tenant predicate on the garage and on the rows; every list is sorted in "
+        "Python by code point, never by the database's collation; a garage the store "
+        "does not hold is NOT FOUND (stderr, exit 2) and one with no rows answers an "
+        "empty register. JSON with sorted keys on stdout, exit 0, nothing on stderr. "
+        "show-register (G45) is untouched: this is the read for the reader that was "
+        "never told an agreement id, and it exists because asking covered-in-store once "
+        "per known vehicle is a cost that grows with every car ever seen."
+    ),
 }
 
 
