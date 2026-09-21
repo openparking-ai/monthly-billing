@@ -28,6 +28,7 @@ Against the store (the `store` extra, `MONTHLY_BILLING_DSN`, `--tenant`):
         [--at 2026-05-07T09:00:00-06:00]
     monthly-billing release-vehicle --tenant T --agreement AG --vehicle ABC123 [--garage G]
     monthly-billing show-register --tenant T --agreement AG
+    monthly-billing show-garage-register --tenant T --garage G
 
 ``register-vehicle`` and ``release-vehicle`` are THE REGISTRATION DOOR: one
 vehicle identity, on or off an agreement whose registrar is OUTSIDE, at every
@@ -53,6 +54,17 @@ at any garage, as the identity stored there. JSON with sorted keys on stdout,
 exit 0; it writes nothing, takes no instant and validates nothing it does not
 return, so a version the loaders refuse still shows its register. An
 agreement the store does not hold is NOT FOUND, exit 2.
+
+``show-garage-register`` is THE REGISTER READ BY GARAGE, for a reader that
+was never told an agreement id -- a lane refreshing what it decides from:
+every registration row at the garage as the identity stored there and the
+agreement it names, and for every agreement those rows name its latest
+version's registrar, status and cancellation day; the agreements whose latest
+version does not cover the garage, and the ids the rows name that the store
+holds no version of, are each named. The same rules as ``show-register``:
+JSON with sorted keys on stdout, exit 0; it writes nothing, takes no instant
+and validates nothing it does not return. A garage the tenant does not hold is
+NOT FOUND, exit 2; a garage with no rows answers an empty register.
 
 A pending attempt comes only from the library's ``attempt_charge`` -- the
 platform, as an ordinary client, charges; nothing on this command line does.
@@ -363,6 +375,22 @@ def _show_register(args: argparse.Namespace) -> int:
     return 0
 
 
+def _show_garage_register(args: argparse.Namespace) -> int:
+    from .store.postgres import tenant
+    from .store.records import show_garage_register
+
+    connection = _connection(args)
+    try:
+        with tenant(connection, args.tenant) as cursor:
+            register = show_garage_register(cursor, args.tenant, args.garage)
+    finally:
+        # A read: there is nothing to commit, and the transaction the tenant
+        # context opened is ended either way.
+        connection.rollback()
+    print(json.dumps(register.as_document(), indent=2, sort_keys=True))
+    return 0
+
+
 def _print_stored_forms(entries) -> None:
     """Per covered garage, the identity in the form that garage stores it --
     the caller's means of reconciling, and the whole of the door's answer."""
@@ -490,6 +518,15 @@ def main(argv: list[str] | None = None) -> int:
     _store_arguments(show)
     show.add_argument("--agreement", required=True, help="the agreement id")
     show.set_defaults(run=_show_register)
+
+    show_garage = sub.add_parser(
+        "show-garage-register",
+        help="a garage's registrations and the latest version of every agreement they name, "
+        "as JSON -- no agreement id needed",
+    )
+    _store_arguments(show_garage)
+    show_garage.add_argument("--garage", required=True, help="the garage id")
+    show_garage.set_defaults(run=_show_garage_register)
 
     args = parser.parse_args(argv)
     try:
