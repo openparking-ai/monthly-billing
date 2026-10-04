@@ -59,6 +59,13 @@ jobs:
         if: github.event_name != 'pull_request'
         run: node .github/scripts/check-no-sibling-names.js
 
+      - name: No name from the maintainer's other software (working tree)
+        # Tracked and untracked files, contents and paths, and every commit
+        # message. Plants its own controls -- a word in a file, a word in a
+        # file's name -- and requires each caught, in the same run, before the
+        # real scan is read.
+        run: node .github/scripts/check-no-sibling-names.js --worktree
+
   test:
     name: test
     runs-on: ubuntu-latest
