@@ -50,6 +50,11 @@ same device or LAN as its consumer. A module that reaches for our platform to do
 its job has stopped being standalone, and a remote call on the identification
 path is out of the question whoever it is to.
 
+**A name from outside this project.** No product, module or hostname from the
+maintainer's other, private software appears here — not in code, a comment, a
+document, a test, a fixture, a file's path or a commit message.
+`.github/scripts/check-no-sibling-names.js` enforces it in CI.
+
 **A test that has never been seen to fail.** If you add a control, show it
 failing when the thing it protects is removed. The boundary guard in the
 lane-controller repository ships with planted positive controls as the worked
