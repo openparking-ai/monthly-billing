@@ -210,7 +210,7 @@ name and a date on it.
 
 ## Contributing
 
-Contributions are welcome under the CLA. See `CONTRIBUTING.md` and `CLA.md`.
+Open Parking AI does not accept outside contributions. Pull requests, issues and comments are limited to the maintainers.
 
 ## Licence
 
