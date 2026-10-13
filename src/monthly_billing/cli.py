@@ -6,13 +6,20 @@ installed but this package, and asserts BOTH exit codes. A command line that onl
 ever runs the happy path cannot tell a working refusal from one that reports
 nothing.
 
-    monthly-billing first-charge --garage G.json --agreement A.json
+    monthly-billing first-charge --garage G.json --agreement A.json [--tax-sets T.json]
     monthly-billing covered --garage G.json --agreement A.json \\
         --vehicle ABC123 --at 2026-04-01T09:00:00-06:00
     monthly-billing check-agreement --agreement A.json
 
+``first-charge`` prices the two periods. Given ``--tax-sets`` -- the garage's
+tax sets as `rate-engine` documents them -- it taxes the invoice once, at the
+start of the first period it pays for, through the engine (the `tax` extra).
+Given none, it prints the UNTAXED invoice and says so on its own output: an
+untaxed figure is never printed as if it were the whole of what is owed.
+
 Against the store (the `store` extra, `MONTHLY_BILLING_DSN`, `--tenant`):
 
+    monthly-billing state-tax-sets --tenant T --garage G --sets T.json --stated-by owner
     monthly-billing run --tenant T --garage G --period-containing 2026-05-01
     monthly-billing record-payment --tenant T --invoice REF --method cheque \\
         --amount-minor 12000 --received-at 2026-05-08T10:00:00-06:00 \\
@@ -74,6 +81,13 @@ does not know, and what it saw last. ``resolve-attempt`` is how an operator
 records what the processor said when the worker that asked did not live to
 record it.
 
+``state-tax-sets`` is the one door a garage's tax sets come in by: the engine
+judges the document, the sets are stored as it read them, the garage's whole
+list is read back and loaded again before the commit, and the whole list is
+printed as JSON. A set is never edited; a later one is how anything changes.
+The run refuses a payer, by name, when the garage has no set in force at the
+invoice's due instant -- including a garage that has stated none.
+
 Nothing here wakes itself up. The run is a command the operator's platform
 calls on the billing day, and the platform is an ordinary client of it.
 """
@@ -91,9 +105,9 @@ from .currency import UnpriceableCurrency
 from .entitlement import is_covered
 from .findings import Refused
 from .garage import BillingDay, Garage, IdentityRule
-from .invoice import first_charge
+from .invoice import first_charge, first_charge_due_at
 from .localday import UnknownTimezone
-from .money import NotMinorUnits
+from .money import NotMinorUnits, format_minor
 from .sensitive import InstrumentLike
 
 
@@ -118,10 +132,34 @@ def load_garage_file(path: str) -> Garage:
         ) from None
 
 
+#: Printed under a first charge computed without tax sets. Its absence would
+#: let an untaxed figure read as the whole of what is owed.
+UNTAXED = (
+    "  UNTAXED: no --tax-sets were given, so no tax is on this invoice. This is the "
+    "pre-tax figure, not necessarily what is owed."
+)
+
+
 def _first_charge(args: argparse.Namespace) -> int:
     garage = load_garage_file(args.garage)
     agreement = load_agreement_file(args.agreement)
-    print(first_charge(garage, agreement).rendered())
+    invoice = first_charge(garage, agreement)
+    if args.tax_sets is None:
+        print(invoice.rendered())
+        print(UNTAXED)
+        return 0
+    from .tax import tax_an_invoice
+
+    with open(args.tax_sets, encoding="utf-8") as handle:
+        sets = json.load(handle)
+    at = first_charge_due_at(garage, agreement)
+    taxed = tax_an_invoice(invoice, sets=sets, at=at)
+    print(taxed.invoice.rendered())
+    print(
+        f"  taxed once at {at.isoformat()}, by the set in force from "
+        f"{taxed.position.tax_set_effective_from.isoformat()}; subtotal "
+        f"{format_minor(taxed.position.subtotal_minor, invoice.currency)}"
+    )
     return 0
 
 
@@ -391,6 +429,30 @@ def _show_garage_register(args: argparse.Namespace) -> int:
     return 0
 
 
+def _state_tax_sets(args: argparse.Namespace) -> int:
+    from .store.postgres import tenant
+    from .store.records import GarageNotFound, load_garage
+    from .store.tax_sets import state_tax_sets
+
+    with open(args.sets, encoding="utf-8") as handle:
+        document = json.load(handle)
+    connection = _connection(args)
+    with tenant(connection, args.tenant) as cursor:
+        try:
+            stored = load_garage(cursor, args.garage)
+            if stored is None:
+                raise GarageNotFound(f"no garage with id {args.garage!r} in the store.")
+            whole = state_tax_sets(
+                cursor, args.tenant, stored.uuid, document, stated_by=args.stated_by
+            )
+        except BaseException:
+            connection.rollback()
+            raise
+    connection.commit()
+    print(json.dumps({"garage_id": args.garage, "tax_sets": whole}, indent=2, sort_keys=True))
+    return 0
+
+
 def _print_stored_forms(entries) -> None:
     """Per covered garage, the identity in the form that garage stores it --
     the caller's means of reconciling, and the whole of the door's answer."""
@@ -417,6 +479,11 @@ def main(argv: list[str] | None = None) -> int:
     charge = sub.add_parser("first-charge", help="the partial period and the next one")
     charge.add_argument("--garage", required=True)
     charge.add_argument("--agreement", required=True)
+    charge.add_argument(
+        "--tax-sets",
+        help="the garage's tax sets (a rate-engine document); without it the invoice is "
+        "printed UNTAXED and says so",
+    )
     charge.set_defaults(run=_first_charge)
 
     covered = sub.add_parser("covered", help="is this vehicle covered at this instant")
@@ -437,6 +504,15 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--period-containing", required=True, help="a day inside the period")
     run.add_argument("--now", help="the issue instant (ISO with offset); default: now")
     run.set_defaults(run=_run)
+
+    taxes = sub.add_parser(
+        "state-tax-sets", help="state a garage's tax sets from a document; prints the whole list"
+    )
+    _store_arguments(taxes)
+    taxes.add_argument("--garage", required=True, help="the garage id")
+    taxes.add_argument("--sets", required=True, help="a JSON list of tax sets")
+    taxes.add_argument("--stated-by", required=True, help="who is stating them")
+    taxes.set_defaults(run=_state_tax_sets)
 
     payment = sub.add_parser("record-payment", help="a cheque or ACH payment received")
     _store_arguments(payment)

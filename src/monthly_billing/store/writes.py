@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 from uuid import UUID
 
-from ..sensitive import InstrumentLike, refuse_instrument_like
+from ..sensitive import InstrumentLike, refuse_instrument_like, walk_and_refuse
 
 
 class InstrumentRefusedAtTheStore(InstrumentLike):
@@ -55,11 +55,22 @@ def refuse_instrument_in_record(table: str, record: dict[str, Any]) -> None:
 
     Keys as well as values: a column NAME is attacker-influenced wherever a
     record is assembled from input, and a name is written to the statement.
+
+    **A STRUCTURED VALUE IS WALKED TO EVERY LEAF.** A ``jsonb`` column (a
+    garage's tax rules, migration 0006) arrives as a list or dict, or wrapped in
+    the driver's JSON adapter, and a scan that read only strings would pass a
+    card number sitting in a rule's label straight into the database. The
+    adapter is recognised by its shape -- an ``obj`` it serialises -- so this
+    file still imports no driver.
     """
     for column, value in record.items():
         refuse_instrument_like(column, f"{table}.<column name>")
+        inner = value.obj if hasattr(value, "obj") and hasattr(value, "dumps") else value
         try:
-            refuse_instrument_like(value, f"{table}.{column}")
+            if isinstance(inner, (dict, list, tuple)):
+                walk_and_refuse(inner, f"{table}.{column}")
+            else:
+                refuse_instrument_like(inner, f"{table}.{column}")
         except InstrumentLike as exc:
             raise InstrumentRefusedAtTheStore(str(exc)) from None
 

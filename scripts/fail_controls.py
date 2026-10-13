@@ -828,11 +828,21 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
     "G33": (
         "tests/test_g33_a_total_never_goes_below_zero.py",
         "exceptions_store.py",
-        "            if owed.total_minor - amount < 0:",
-        "            if False:  # PLANTED: the total may go below zero",
+        "                if pre_tax - amount < 0:",
+        "                if False:  # PLANTED: the total may go below zero",
         "an adjustment past zero lands: a 15000 credit on a 12000 invoice makes the "
         "total -3000 and paid_at is set with zero payments -- the outside pass's "
         "Grok 10, money and not an opinion",
+    ),
+    "G33/pre-tax-floor": (
+        "tests/test_g33_a_total_never_goes_below_zero.py",
+        "exceptions_store.py",
+        """        "WHERE invoice_id = %s AND kind <> 'tax'",""",
+        """        "WHERE invoice_id = %s",  # PLANTED: the floor counts the tax lines""",
+        "the floor's sum loses its non-tax filter and nothing else, so on a taxed invoice "
+        "the ceiling is the TAXED total: a credit between the two passes the guard and the "
+        "engine refuses the negative base with NotMinorUnits instead of this module's "
+        "REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL",
     ),
     "G34": (
         "tests/test_g34_a_block_on_an_invoice_survives_the_payment.py",
@@ -2469,6 +2479,181 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         ),
         "the verb writes a line to stderr on success, so a program reading the answer sees "
         "noise where the contract says nothing",
+    ),
+    "G49": (
+        "tests/test_g49_tax_comes_after_every_priced_line.py",
+        "tax.py",
+        "        invoice=replace(invoice, lines=(*invoice.lines, *tax)),",
+        "        invoice=replace(invoice, lines=(*tax, *invoice.lines)),  # PLANTED: tax first",
+        "the tax lines are put IN FRONT of the priced lines, so the invoice no longer reads "
+        "period lines, fee lines, then tax",
+    ),
+    "G49/taxed-twice": (
+        "tests/test_g49_tax_comes_after_every_priced_line.py",
+        "tax.py",
+        "    if invoice.taxed:",
+        "    if False:  # PLANTED: a taxed invoice is taxed again",
+        "an invoice already carrying tax lines is taxed a second time -- tax on a total "
+        "that already includes tax",
+    ),
+    "G50": (
+        "tests/test_g50_the_subtotal_is_the_issued_lines.py",
+        "migrations/0006_tax_sets_and_invoice_subtotal.sql",
+        "  IF issued <> NEW.subtotal_minor THEN",
+        "  IF false AND issued <> NEW.subtotal_minor THEN  -- PLANTED",
+        "the commit-time trigger stops comparing the subtotal with the issued lines, so a raw "
+        "invoice whose subtotal disagrees with its lines commits",
+    ),
+    "G50/run-subtotal": (
+        "tests/test_g50_the_subtotal_is_the_issued_lines.py",
+        "billing_run.py",
+        '            "subtotal_minor": position.subtotal_minor,',
+        '            "subtotal_minor": invoice.total_minor,  # PLANTED: the taxed total',
+        "the run records the TAXED total as the subtotal; the database refuses it at commit "
+        "and the payer is not issued",
+    ),
+    "G51/unstated": (
+        "tests/test_g51_no_set_in_force_refuses.py",
+        "tax.py",
+        "    if isinstance(document, list) and not document:",
+        source(
+            "    if isinstance(document, list) and not document:  # PLANTED: nothing is zero",
+            '        return load_sets([{"effective_from": "1970-01-01T00:00:00+00:00", '
+            '"rules": []}])',
+            "    if False:",
+        ),
+        "a garage that stated nothing is taxed at zero, as if it had stated none",
+    ),
+    "G51/not-in-force": (
+        "tests/test_g51_no_set_in_force_refuses.py",
+        "tax.py",
+        "        chosen = engine_tax.select_tax_set(sets, at)",
+        source(
+            "        if not [s for s in sets if s.effective_from <= at]:  # PLANTED: zero",
+            "            return min(sets, key=lambda s: s.effective_from), []",
+            "        chosen = engine_tax.select_tax_set(sets, at)",
+        ),
+        "an instant before every set is taxed at zero instead of refused",
+    ),
+    "G52": (
+        "tests/test_g52_a_set_with_no_rules_is_no_tax.py",
+        "tax.py",
+        "    tax: list[InvoiceLine] = []",
+        source(
+            "    tax: list[InvoiceLine] = [] if chosen.rules else [  # PLANTED: a zero line",
+            "        InvoiceLine(kind=LineKind.TAX, label='No tax', amount_minor=0,",
+            "                    agreement_id=None, agreement_version=None,",
+            "                    period_start_day=_span(invoice)[0],",
+            "                    period_end_day=_span(invoice)[1], tax_rule_id='none')",
+            "    ]",
+        ),
+        "a set with no rules invents a zero tax line instead of yielding none",
+    ),
+    "G53/recorded-set": (
+        "tests/test_g53_an_issued_invoice_keeps_its_tax_set.py",
+        "tax.py",
+        "    (recorded,) = [s for s in loaded if s.effective_from == recorded_effective_from] "
+        "or [None]",
+        "    recorded = max(loaded, key=lambda s: s.effective_from)  # PLANTED: today's set",
+        "an adjustment re-taxes at the garage's NEWEST set rather than the one the invoice "
+        "recorded, so a backdated set reaches back into an issued invoice",
+    ),
+    "G53/immutable": (
+        "tests/test_g53_an_issued_invoice_keeps_its_tax_set.py",
+        "migrations/0006_tax_sets_and_invoice_subtotal.sql",
+        "  IF NEW.subtotal_minor IS DISTINCT FROM OLD.subtotal_minor THEN",
+        "  IF false THEN  -- PLANTED: the subtotal may be rewritten",
+        "the issue-time subtotal can be UPDATEd after the fact through the paid_at grant",
+    ),
+    "G54": (
+        "tests/test_g54_the_first_charge_has_one_tax_moment.py",
+        "invoice.py",
+        "    return period_containing(garage, agreement.start_day).start_instant",
+        "    return next_period_after(garage, period_containing(garage, agreement.start_day))"
+        ".start_instant  # PLANTED: the second period's start",
+        "the first charge is taxed at its SECOND period's start, so a set taking effect "
+        "between its two periods prices the whole charge",
+    ),
+    "G54/untaxed-says-so": (
+        "tests/test_g54_the_first_charge_has_one_tax_moment.py",
+        "cli.py",
+        "        print(UNTAXED)",
+        "        pass  # PLANTED: an untaxed figure printed as if it were the whole",
+        "the first charge printed without tax sets no longer says it is untaxed",
+    ),
+    "G55": (
+        "tests/test_g55_the_engine_is_the_only_arithmetic.py",
+        "tax.py",
+        "                amount_minor=line.delta_minor,",
+        "                amount_minor=subtotal * 29 // 1000,  # PLANTED: our own percentage",
+        "the seam computes its own percentage instead of carrying the engine's answer",
+    ),
+    "G55/entitlement-imports-engine": (
+        "tests/test_g55_the_engine_is_the_only_arithmetic.py",
+        "entitlement.py",
+        "from __future__ import annotations",
+        source(
+            "from __future__ import annotations",
+            "",
+            "import rate_engine.tax  # noqa: E402,F401  PLANTED: the lane's call needs the engine",
+        ),
+        "the entitlement answer -- what an integrator embeds in a lane -- imports the engine, "
+        "so it cannot run without the tax extra",
+    ),
+    "G56/no-retax": (
+        "tests/test_g56_an_adjustment_is_retaxed.py",
+        "exceptions_store.py",
+        "    for line in compensating:",
+        "    for line in ():  # PLANTED: the adjustment is not re-taxed",
+        "an adjustment lands without its compensating tax lines, so a waived fee stays taxed",
+    ),
+    "G56/wrong-amount": (
+        "tests/test_g56_an_adjustment_is_retaxed.py",
+        "tax.py",
+        "                amount_minor=now_owed - carried,",
+        "                amount_minor=now_owed,  # PLANTED: the new figure, not the difference",
+        "the compensating line carries the new tax figure instead of the difference, so the "
+        "rule's tax is counted twice",
+    ),
+    "G56/database": (
+        "tests/test_g56_an_adjustment_is_retaxed.py",
+        "migrations/0006_tax_sets_and_invoice_subtotal.sql",
+        "  IF coalesce(rule_count, 0) = 0 THEN",
+        "  IF true THEN  -- PLANTED: no adjustment needs its tax",
+        "the commit-time trigger accepts an adjustment on a taxed invoice with no tax line",
+    ),
+    "G56/agreement-filter": (
+        "tests/test_g56_an_adjustment_is_retaxed.py",
+        "exceptions_store.py",
+        """        "FROM invoice_lines WHERE invoice_id = %s AND kind <> 'tax' \"""",
+        """        "FROM invoice_lines WHERE invoice_id = %s "  # PLANTED: reads tax lines""",
+        "the agreement pick loses its non-tax filter and NOTHING ELSE -- its order is "
+        "untouched -- so with a tax line first in that order the adjustment copies a tax "
+        "line's null agreement and the database refuses it by name "
+        "(invoice_lines_tax_names_no_agreement). This replaced G56/agreement-pick, which "
+        "also rewrote the order and so moved two variables",
+    ),
+    "G57/judge": (
+        "tests/test_g57_the_tax_set_door.py",
+        "store/tax_sets.py",
+        "    stated = echoed(load_sets(document))",
+        "    stated = [dict(s) for s in document]  # PLANTED: stored without the engine",
+        "a set the engine refuses is stored, because the door no longer asks it",
+    ),
+    "G57/write-back": (
+        "tests/test_g57_the_tax_set_door.py",
+        "store/tax_sets.py",
+        """    load_sets(whole, where="the garage's stored tax_sets")  # the write-back proof""",
+        "    pass  # PLANTED: the whole list is not loaded again",
+        "a statement after which the garage's whole list no longer loads is committed",
+    ),
+    "G57/instrument-in-a-rule": (
+        "tests/test_g57_the_tax_set_door.py",
+        "store/writes.py",
+        "            if isinstance(inner, (dict, list, tuple)):",
+        "            if False:  # PLANTED: a structured column is not walked",
+        "a card-shaped value inside a jsonb rule reaches the database, because the chokepoint "
+        "scans only plain strings",
     ),
 }
 

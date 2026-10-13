@@ -36,7 +36,14 @@ Stated first, so nothing here is later read as a promise:
   physical car gets onto either. Which outside registrar is not this module's
   to know: the door is for an outside writer in general.
 - **No customer portal.** No screens of any kind.
-- **No tax.**
+- **No tax arithmetic of its own.** The tax on an invoice is `rate-engine`'s
+  `tax.py` -- the same computation as the barrier's -- called in-process through
+  the `tax` extra, pinned by commit. This module stores a garage's tax sets as
+  the engine read them, taxes each invoice once at its `due_at` and appends the
+  engine's lines after every priced line, and re-taxes an owner's adjustment at
+  the set the invoice recorded. A garage with no set in force at `due_at` is
+  refused an invoice (`REFUSAL_NO_TAX_SET_IN_FORCE`), never taxed at zero; a set
+  with no rules is how a garage states it charges none.
 - **No multi-garage MONEY.** An agreement is billed at ONE home garage -- its
   billing day, currency, timezone, grace period and invoice are that garage's,
   and every money door refuses another garage by name (`REFUSAL_GARAGE_MISMATCH`).
@@ -83,7 +90,7 @@ Stated first, so nothing here is later read as a promise:
 | **G30** | Every event that changes an invoice's money -- a payment, a reversal, an owner's adjustment, both halves of a charge, the resolution of a pending attempt -- runs inside a transaction that first takes the invoice's row lock, so two events on one invoice at once are serialised and the second derives paid_at from the first's COMMITTED rows. Which events take the lock is read from the source by the contract, never typed -- and the control that proves the serialisation removes the lock itself, not one caller's. |
 | **G31** | A charge is a PERSISTED RESERVATION, then the processor, then an OUTCOME with its payment: the attempt row is committed BEFORE the processor is called, and the outcome row and the card payment land in ONE transaction. What the module does not know is never written as an outcome: an answer that did not arrive -- a raise, or a return the instrument guard refused -- is an `unknown` row and the attempt stays PENDING. A pending attempt is never charged past: while its request may be in flight the next charge is refused by name, naming the attempt id, and `pending-attempts` lists it; when the module has said it does not know, the next charge asks the processor again under the SAME idempotency key for the amount RESERVED, with no cap on re-asks -- one key is one charge at most. An operator records what the processor said once (`resolve-attempt`): a second resolution is refused by name, from the check under the lock and from the one-outcome-per-attempt index caught by its name. The processor's own answer to an ask that was at the processor when the operator resolved is not a second resolution: it is a `late` row, and the processor's word on money outranks the operator's typed one -- a late SUCCESS the operator did not record writes the card payment for the amount RESERVED in the same transaction, so the invoice is paid and no fresh key is minted; a late SUCCESS on a recorded success writes no second payment; a late decline or error is the row only, and the operator's SUCCESS and its payment stand for the operator's reversal. |
 | **G32** | ONE CAR, ONE AGREEMENT PER GARAGE. A vehicle identity is registered to one agreement at a garage; a second agreement listing it is refused by name, naming the holder and, if the holder is cancelled, the day it frees the vehicle -- on which day the registration passes to the new agreement. A REFUSAL WRITES NOTHING: every listed identity is checked before the release and before any row changes, so the caller's transaction is as it was. The database's UNIQUE is the backstop for a raw insert and for two registrations racing. The coverage call picks nothing: handed two agreement identities for one vehicle, it refuses by name. |
-| **G33** | An invoice total never goes below zero: an owner's adjustment that would take it there is refused by name, computed under the invoice lock from the committed lines; exactly zero is a fully waived invoice and is allowed. There is no database backstop for a floor across rows -- the lock is the whole guard, and the contract says so. |
+| **G33** | An invoice total never goes below zero: an owner's adjustment may take the invoice's PRE-TAX total -- the sum of its non-tax lines -- to zero and no further, and one that would go past it is refused by name, computed under the invoice lock from the committed lines; exactly zero is a fully waived invoice and is allowed, and the tax follows the base down to nothing. On a taxed invoice a credit above the pre-tax total and below the taxed one is refused by the same name. There is no database backstop for a floor across rows -- the lock is the whole guard, and the contract says so. |
 | **G34** | A block the owner records against an INVOICE is lifted by an unblock the owner records, never by a payment: invoice-attached blocks and unblocks are read whatever the invoice's paid state, and a grace extension on an invoice is read only while that invoice is unpaid. |
 | **G35** | Overpayment is a RECORDED FACT and never acted on: the paid state carries by how much the unreversed payments exceed the total, the command line prints it, and no cap is put on what an operator records -- a cheque is what it is; a refund is the owner's exception and the money's return is collection's. |
 | **G36** | The store-backed coverage call answers the AGREEMENT axes at the instant asked and the PAYMENT state as of now, and the command line SAYS SO whenever the instant asked is in the past -- one line, present for a past instant and absent otherwise. |
@@ -99,8 +106,17 @@ Stated first, so nothing here is later read as a promise:
 | **G46** | A RELEASE CAN NAME ONE COVERED GARAGE AND REACH IT ALONE. `release-vehicle --garage G` -- and the same optional parameter on `release_from_outside`, the same code -- normalises the identity under THAT garage's rule, deletes that garage's row of this agreement and no other row anywhere, and answers the same header and exactly one `at garage G: form` line. Without the option an UNAMBIGUOUS release is what it was, byte for byte: output, exit code, rows -- the one state carved out is the ambiguous text, which the unnamed form refuses by name (G47). With it the refusals come by name, in this order, every one before any write: no such agreement (NOT FOUND); a registrar that is this module (REFUSAL_REGISTRAR_IS_THIS_MODULE); a garage the tenant does not hold (NOT FOUND -- found by tenant AND id in this path's own lookup, so another tenant's garage of the same id is not found with the row policy on or off); a garage the agreement's LATEST version does not cover (REFUSAL_GARAGE_NOT_COVERED -- a row left at a garage a version dropped is not reachable this way, the version that dropped it released it); no row of this agreement for this identity at that garage (REFUSAL_VEHICLE_NOT_REGISTERED). A refusal writes nothing. It is for any registrar: two covered garages that disagree on the identity rule can hold, under one text, a stale row at the exact-rule garage and the live car's row at the folded one, and the fan-out cannot take the one without the other -- so the stale row is released by naming its garage, the live row stays, and the car is covered at both garages throughout. No register change, no migration, no grant; the money doors and the reads are untouched. |
 | **G47** | AN AMBIGUOUS RELEASE NAMES ITS GARAGE. The unnamed release (`release-vehicle` without `--garage`, `release_from_outside` without `garage_id`) refuses by name (REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES) when, at a covered garage it would delete at, the row it would take is also the fold of a DIFFERENT identity this agreement holds as its own row at another covered garage -- the register holds two identities that are one row at one garage and two at another, so the text names no single row across the covered set, and taking it would remove coverage for a registration the release did not name. The refusal comes after no-such-agreement and the registrar check and before REFUSAL_VEHICLE_NOT_REGISTERED, every one before any write; it writes nothing, and its detail names the identity as given, the garage whose row is shared and the form there, and the other identity with the garage it is stored at. It cannot fire for an agreement covering one garage -- the rule pairs two DIFFERENT covered garages, so a one-garage agreement never reaches it whatever its rows hold; it does not fire for a covered garage that holds no row of the agreement (G42), nor for another agreement's identity at a covered garage -- only this agreement's rows count; and a stored form that normalises to nothing under the other garage's rule is the fold of nothing. The named form (G46) is untouched in every state and is the way through. An unnamed release that is not ambiguous is what it was, byte for byte: output, exit code, rows. No migration, no grant; the money doors, the reads and `show-register` are untouched. |
 | **G48** | THE REGISTER CAN BE READ BY GARAGE, BY ANY READER, WITHOUT AN AGREEMENT ID. `show-garage-register` -- and `show_garage_register` beneath it, the same code -- answers for a garage the tenant holds: every vehicle_registrations row at that garage, selected by the garage and the tenant alone and never through an agreement's covered set, as the identity stored there and the agreement it names; for every agreement those rows name, from its LATEST version -- chosen by the one helper the registration door and show-register choose theirs with -- the agreement id, the version, the registrar, the status and the cancellation day; the agreements whose latest version does not cover the garage; and the ids the rows name that the tenant holds no version of, each named and never a refusal of the whole read, because agreement_external_id is text keyed to nothing and a row a system past the module left is the row a reconciliation exists to find. Five keys, derived from the answer class, and nothing more travels: no price, payer, spots, fee, pause, mandate, access hours, start day, home garage, covered set, version vehicle list, registration instant, invoice or payment. It answers for either registrar and says which. It takes no instant and derives nothing; it validates nothing it does not return -- no Agreement and no Garage is built -- so a garage stored with an unreadable option or a version the loaders refuse still shows its register in full; it writes nothing, proven by row counts and digests of every table and by the backend's own tuple counters; another tenant's garage of the same id is not read, with the row policy on or off, held by the read's own tenant predicate on the garage and on the rows; every list is sorted in Python by code point, never by the database's collation; a garage the store does not hold is NOT FOUND (stderr, exit 2) and one with no rows answers an empty register. JSON with sorted keys on stdout, exit 0, nothing on stderr. show-register (G45) is untouched: this is the read for the reader that was never told an agreement id, and it exists because asking covered-in-store once per known vehicle is a cost that grows with every car ever seen. |
+| **G49** | AT ISSUE, TAX IS APPENDED AFTER EVERY PRICED LINE, BY ONE PRODUCER. `first_charge` and `invoice_for_period` price periods and return untaxed invoices; `tax_an_invoice` takes a complete untaxed invoice and appends the engine's lines after every period, fee and adjustment line, one per rule in the garage's stated `sequence`, each naming its rule and no agreement. An invoice that already carries tax lines is refused a second taxing by name (`REFUSAL_INVOICE_ALREADY_TAXED`). |
+| **G50** | AN INVOICE'S `subtotal_minor` IS THE SUM OF THE NON-TAX LINES IT WAS ISSUED WITH, AND THE DATABASE HOLDS IT. Migration 0006 checks it at commit against the non-tax lines written in the issuing transaction and refuses a row that disagrees, by name. `subtotal_minor`, `tax_set_effective_from` and `tax_sets_seen` are all present or all absent -- absent only on an invoice issued before 0006, untaxed, and never backfilled with a guess. A later adjustment moves the invoice's current pre-tax total, derived from its lines, and never the recorded issue-time figure. `subtotal + tax = total` is not a constraint: the total is derived from the lines, so it would prove nothing. |
+| **G51** | NO TAX SET IN FORCE AT THE INVOICE'S `due_at` IS A REFUSAL, NEVER A ZERO. A garage that has stated no tax position, or whose every set takes effect after `due_at`, gets no invoice: each payer's run line is REFUSED with `REFUSAL_NO_TAX_SET_IN_FORCE` carrying the engine's own sentence, the payers after it are still processed, nothing is written for it, and the run reports refused (the command exits non-zero). Stating nothing is not stating none. |
+| **G52** | A SET WITH NO RULES IS HOW A GARAGE STATES IT CHARGES NONE, AND IT YIELDS NO TAX LINE. The invoice is issued, carries no tax line, records that set and a subtotal equal to its total. A zero subtotal under a set with rules also yields no tax line: the engine returns none and this module invents none. |
+| **G53** | AN ISSUED INVOICE IS NEVER RE-PRICED AGAINST ANOTHER TAX SET. A set stated after issue -- later, or backdated to before `due_at` -- changes nothing on it: a re-run is ALREADY_ISSUED and its tax lines and tax position are as issued, and an adjustment on it re-taxes at the set it RECORDED, never the set in force today. The three tax-position columns are immutable: an UPDATE to any of them is refused by the database, naming the column, while the derived `paid_at` stays writable. |
+| **G54** | THE FIRST CHARGE'S TWO PERIODS TAKE ONE TAX MOMENT -- A FUNCTION-LEVEL GUARANTEE, because the first charge is computed from documents and stored nowhere. `first-charge --tax-sets` taxes the invoice once, through the engine, at `first_charge_due_at`: the start instant of the FIRST period it pays for. A set taking effect between its two periods prices neither. Without `--tax-sets` the output says, on its own lines, that the figure is UNTAXED. |
+| **G55** | THIS MODULE COMPUTES NO PERCENTAGE: `rate-engine` IS THE ONLY TAX ARITHMETIC. Every tax amount on an invoice is the engine's answer, mapped and never recomputed; `tax.py`, the one file that imports the engine, contains no multiplication, division, modulo or power; no other source file imports it. The engine is the `tax` extra, imported lazily: the entitlement answer, the invoice arithmetic and the store import no part of it, and tax asked for without it is refused by name (`REFUSAL_TAX_NEEDS_THE_ENGINE`). |
+| **G56** | TAX IS THE LAST COMPUTATION ON AN INVOICE, NOT THE LAST ROW. After every owner's adjustment on a taxed invoice, each rule's tax lines sum to the engine's tax for that rule on the invoice's non-tax total at the set the invoice recorded: the one writer of adjustments appends the adjustment and, in the same transaction, one compensating tax line per rule naming the exception (negative where the base fell, zero where the rounded figure did not move). A waiver to zero leaves no tax. The adjustment's agreement is copied from a non-tax line, the first by `created_at` then `id`; that filter is defence in depth, and what makes a money line carrying a tax line's null agreement impossible is the database's `invoice_lines_tax_names_no_agreement`. The database refuses at commit an adjustment on an invoice whose set has rules that arrives with NO tax line naming its exception; it counts no rules, so one line per rule is proven by this guarantee's tests alone, and that the line is the RIGHT amount needs the percentage, so that is this guarantee's test and not a constraint either. |
+| **G57** | A GARAGE'S TAX SETS COME IN THROUGH ONE DOOR, AND THE ENGINE IS ITS ONLY JUDGE. `state_tax_sets` (and `state-tax-sets`) hands the document to `rate-engine`'s `load_tax_sets` before reading a field, refuses what it refuses in its words (`REFUSAL_TAX_SETS_INVALID`) and stores nothing; stores what it accepted as the engine read it; and before the caller commits reads the garage's WHOLE list back and loads it again, refusing a statement after which the list would not load. A set at an instant the garage already has is refused by name. The table is append-only by grant, and a card-shaped value inside a rule is refused at the store like any other column's. |
 
-That is 48 guarantees. Every one of them has a fail control that has been proven to fire, and the count above is derived from the registry rather than typed here.
+That is 57 guarantees. Every one of them has a fail control that has been proven to fire, and the count above is derived from the registry rather than typed here.
 <!-- END:guarantees -->
 
 ## The entitlement answer
@@ -175,7 +191,7 @@ guessed.
 <!-- GENERATED:refusals -->
 | code | when, and what to do about it |
 |---|---|
-| `REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL` | This adjustment would take the invoice total below zero. A waived fee or a credit may reduce what is owed to exactly nothing -- a fully waived invoice -- and no further: money owed BY the garage is not a negative invoice, it is a refund the owner records as its own decision. Computed under the invoice lock from the committed lines; there is no database backstop for a floor across rows, so the lock is the whole guard. |
+| `REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL` | This adjustment would take the invoice total below zero. A waived fee or a credit may reduce what is owed to exactly nothing -- a fully waived invoice -- and no further: money owed BY the garage is not a negative invoice, it is a refund the owner records as its own decision. Computed under the invoice lock from the committed lines; there is no database backstop for a floor across rows, so the lock is the whole guard. On a taxed invoice the floor is the PRE-TAX total -- the money the tax is a percentage of -- and the tax follows it down, to nothing when it reaches nothing. |
 | `REFUSAL_AGREEMENT_HOME_MOVED` | This version is billed at a different home garage from the versions the store already holds for the same agreement, and MOVING AN AGREEMENT'S HOME IS AN OPERATION NOBODY DESIGNED. Nothing states what a move does to the month already invoiced at the old home, to an unpaid invoice or an owner's block sitting there, or to which garage's billing day and currency govern next -- so the module refuses rather than invents. An agreement keeps the home it was first stored with for its whole life; a different home is a different agreement. There is no cross-row database backstop for this: a row written past the module with another home is read at that home only. |
 | `REFUSAL_ALREADY_REVERSED` | This payment already has a reversal recorded. A payment that did not stand cannot un-stand twice; the first reversal is the record. |
 | `REFUSAL_ATTEMPT_ALREADY_RESOLVED` | This attempt already has an outcome recorded. What the processor said is written once; a second answer for the same attempt is a record somebody assembled wrong, and it is refused rather than stored beside the first. |
@@ -187,12 +203,14 @@ guessed.
 | `REFUSAL_GARAGE_MISMATCH` | An agreement is BILLED at one home garage, and this money question named another. The billing day, the currency, the timezone, the grace period and the invoice are the home garage's; an agreement may be good at other garages the owner lists, but pricing it against one of them would pick that garage's options over the home's with no rule saying which governs. |
 | `REFUSAL_GARAGE_NOT_COVERED` | A release named a garage the agreement's LATEST version does not cover. The door reaches the covered set and nothing outside it: a row this agreement left at a garage a later version dropped is released by the version that dropped it, not by name, and a garage the agreement never covered holds no row of it to release. The garage exists for this tenant -- one it does not hold is NOT FOUND, before this -- it is simply not on the agreement. |
 | `REFUSAL_HOME_GARAGE_NOT_GIVEN` | The coverage question was asked at a garage that is not the agreement's home, with an unpaid invoice to weigh, and the home garage was not supplied. Grace is a property of the invoice -- how long after it fell due the account stays covered -- and the invoice lives at the home garage, so the home's grace and clock decide it at every door. Reading the asking garage's grace instead would make one unpaid invoice expire on two different days depending on which door the car is at; refused rather than defaulted. |
+| `REFUSAL_INVOICE_ALREADY_TAXED` | This invoice already carries tax lines. An invoice is taxed once, at issue, on its complete untaxed lines; a later change to its base is re-taxed by the one writer of adjustments, against the set the invoice recorded, and never by taxing the taxed invoice again. |
 | `REFUSAL_INVOICE_NAMES_NO_AGREEMENT` | This invoice's lines name no agreement the store can load, so there is no mandate to charge it against. The charge gate reads the agreements the lines name, each at its latest version, wherever it is homed now; an invoice that reaches this state was written past the module, and a charge with no gate is refused rather than attempted. |
 | `REFUSAL_NOTHING_OWED` | Nothing is owed on this invoice: its unreversed payments already reach its total, so there is no balance to charge. The processor is not called and no attempt is recorded, because nothing was attempted. A charge is always for the balance, never for the total. |
 | `REFUSAL_NO_BILLING_DAY` | The garage has not stated its billing day. It is one of the offered options and there is no default, because the answer differs by garage and a guessed billing day charges somebody on the wrong date. |
 | `REFUSAL_NO_IDENTITY_RULE` | The garage has not stated how a vehicle identity is compared. There is no default, because the answer decides whether a monthly parker is recognised at all -- and an unrecognised monthly parker is charged as a transient. |
 | `REFUSAL_NO_MANDATE` | This agreement has no mandate record, so nothing may be charged against it. The mandate records who agreed, when, and to what: the recurring charge, its timing and frequency, how the amount is determined, and how it is cancelled. An invoice may still be issued and sent -- it is the CHARGE that is refused, not the billing. |
 | `REFUSAL_NO_PAYMENT_GRACE` | The garage has not stated how many days past an unpaid invoice an agreement stays covered. There is no default: a guessed grace period either strands a paying customer at a barrier or covers an unpaid one indefinitely. |
+| `REFUSAL_NO_TAX_SET_IN_FORCE` | The garage has no tax set in force at this invoice's due instant: it has stated no tax position at all, or every set it stated takes effect later. The invoice is refused, never taxed at zero -- a garage that charges no tax says so with a set that has no rules, and stating nothing is not stating none. The engine's own sentence follows. |
 | `REFUSAL_PAUSE_OVERLAPS_A_PAID_PERIOD` | The pause covers days in a period that has already been paid. A paid period is paid, and this module does not decide refunds or credits. The owner records an exception with an amount, or moves the pause. |
 | `REFUSAL_REGISTRAR_CHANGED` | This version names a different registrar from the versions the store already holds for the same agreement. Handing the register from this module to an outside registrar, or back, is an operation nobody designed: nothing says what becomes of the registrations already written by the other one. It is refused by name rather than stored -- as a version that would move the home is -- and a different registrar is a different agreement. |
 | `REFUSAL_REGISTRAR_IS_OUTSIDE` | This agreement's registrations are written by an OUTSIDE registrar, one vehicle at a time through the registration door, and the version path writes registrations only for an agreement whose registrar is this module. One agreement, one registrar: writing this agreement's rows from a version's list would take out every car the outside registrar put on, so the writer refuses by name instead. Storing a version of such an agreement is ordinary and writes none of them; only a direct call to the writer lands here. |
@@ -201,6 +219,8 @@ guessed.
 | `REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES` | A release that named no garage was asked to reach every covered garage, and the text names no single row across them: at one covered garage the agreement's register holds an identity that is a DIFFERENT row there and the SAME row -- the one this text would take -- at another covered garage, because the two garages fold a plate differently. Taking that row would remove coverage for a registration the release did not name, so the door refuses before any row goes and writes nothing. `show-register` shows the stored form at each garage, and `release-vehicle --garage G` releases at one garage alone, under that garage's rule. |
 | `REFUSAL_RETRIES_EXHAUSTED` | This invoice has reached its maximum charge attempts. The count resets when the caller reports that the payer changed payment method -- this module holds no payment method and cannot observe that for itself. |
 | `REFUSAL_REVERSAL_REASON_MISMATCH` | The reversal's reason does not fit the payment's method: a cheque bounces, an ACH debit is returned, a card payment is charged back or reversed by the processor. A reason from the wrong column is a record somebody assembled wrong, and it is refused rather than stored. |
+| `REFUSAL_TAX_NEEDS_THE_ENGINE` | Tax was asked for and `rate-engine` is not installed. The tax on an invoice is the engine's computation and nothing else's, so this module will not compute one without it: install the `tax` extra. The entitlement answer and the period arithmetic need nothing. |
+| `REFUSAL_TAX_SETS_INVALID` | The engine refused these tax sets at load, and its sentence names the field. This module judges no tax rule: whether a set is valid is said by `rate-engine`'s `load_tax_sets` and nowhere else, and a set it will not load is not stored -- sets are loaded whole, so one unloadable set would make every later one unloadable. |
 | `REFUSAL_VEHICLE_ALREADY_REGISTERED` | This vehicle identity is registered to ANOTHER agreement at this garage. One car, one agreement per garage: the registration names the other agreement and, if that agreement is cancelled, the day it frees the vehicle. Until then the vehicle is not added here. |
 | `REFUSAL_VEHICLE_NOT_REGISTERED` | This vehicle identity is registered to this agreement at no garage the release reached -- every garage the agreement covers, or the one covered garage the release named -- so there is nothing to release. For a register kept by one writer a release that finds no row means the two registers have diverged, which is the one thing the single-writer rule exists to surface -- so it is refused by name rather than reported as done. |
 | `REFUSAL_VEHICLE_ON_TWO_AGREEMENTS` | The agreements handed to this call list the same vehicle under two different agreement identities. The store can no longer produce that state; a library caller handed it in. The module refuses rather than picking one, because the two may disagree about coverage and a guess at a barrier is a wrong answer given confidently. |
@@ -287,9 +307,25 @@ Invoice to payer payer-acme for garage garage-downtown
   Period 2026-03-31 to 2026-04-30: 120.00 USD
   Reserved space 12 (monthly): 25.00 USD
   TOTAL: 258.22 USD
+  UNTAXED: no --tax-sets were given, so no tax is on this invoice. This is the pre-tax figure, not necessarily what is owed.
+
+$ monthly-billing first-charge --garage tests/documents/garage_downtown.json \
+      --agreement tests/documents/agreement_acme.json \
+      --tax-sets tests/documents/tax_sets_downtown.json
+Invoice to payer payer-acme for garage garage-downtown
+  Part period 2026-02-28 to 2026-03-31 (21 of 31 days): 81.29 USD
+  Reserved space 12 (part month): 16.93 USD
+  Access card (one-time): 15.00 USD
+  Period 2026-03-31 to 2026-04-30: 120.00 USD
+  Reserved space 12 (monthly): 25.00 USD
+  Sales tax: 2.9% of 258.22 USD paid is 7.48838 USD, rounded nearest (up) -- 7.49 USD added: 7.49 USD
+  Parking tax: 7% of 258.22 USD paid is 18.0754 USD, rounded down -- 18.07 USD added: 18.07 USD
+  TOTAL: 283.78 USD
 ```
 
 The agreement starts 2026-03-10 and the garage bills on `last_day_of_month`, so the first period runs 2026-02-28 to 2026-03-31 and 21 of 31 days of it are billable. The part period and the following one are separate lines, never summed.
+
+Given the garage's tax sets, the whole first charge is taxed ONCE, by `rate-engine`, at 2026-02-28T00:00:00-07:00 -- the start of the first period it pays for -- on its 25822 minor-unit subtotal: 2 tax line(s), one per rule, 2556 minor units in all, appended after every priced line.
 <!-- END:worked-example -->
 
 ## The billing run
@@ -311,7 +347,7 @@ never by line count.
 | `issued` | The invoice and its lines were written, in one transaction. |
 | `already_issued` | This period was already invoiced for this payer. Nothing was issued and nothing was re-priced; the database refused the duplicate and the run reports it. |
 | `nothing_billable` | No agreement of this payer's has a billable day in the period -- paused, cancelled, not started, or owned by the first charge -- so no invoice exists. |
-| `refused` | The module could not price this payer and says why. The payers after it were still processed; the command exits non-zero. |
+| `refused` | The module could not price this payer and says why -- among the reasons, no tax set in force at the invoice's due instant, which is never taxed at zero. The payers after it were still processed; the command exits non-zero. |
 | `constraint_violated` | The database refused this payer's invoice on a constraint OTHER than the one-invoice-per-period lock, and the line names it. Nothing was issued for this payer and nothing is claimed about the period; the payers after it were still processed; the command exits non-zero. |
 
 Every payer at the garage gets exactly one of these 5 outcomes, per run. The run exits non-zero if any payer's outcome is one of `refused`, `constraint_violated`, and zero otherwise -- `already_issued` is an answer, not an error, and it means exactly that a row for this garage, payer and period exists.
@@ -320,6 +356,14 @@ Every payer at the garage gets exactly one of these 5 outcomes, per run. The run
 An invoice is **due at the start instant of its period** -- the billing day,
 garage-local, paid in advance -- and the garage's grace period counts from
 there.
+
+⚠ There is **no database backstop** forcing a tax position onto a NEW invoice:
+`subtotal_minor`, `tax_set_effective_from` and `tax_sets_seen` are all present
+or all absent, and all absent is the honest value of an invoice issued before
+migration 0006 -- so a raw insert as the application role with all three NULL is
+accepted, and that invoice is then adjusted as untaxed. A constraint cannot tell
+a pre-0006 row from a careless new one. The billing run is the only writer, and
+it writes all three on every invoice it issues.
 
 ## Payments received
 
@@ -376,9 +420,11 @@ exception; the money's return is collection's.
 **An invoice total never goes below zero.** A waived fee or a credit that would
 take the total below zero is refused by name (`REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL`),
 computed under the invoice lock from the committed lines; exactly zero is a fully
-waived invoice. ⚠ There is **no database backstop** for this: a floor across rows
-is not a CHECK, so the lock is the whole guard, and a raw insert as the
-application role can still take a total negative.
+waived invoice. On a taxed invoice the floor is the PRE-TAX total, not the taxed
+one: the tax follows the base down, so a credit between the two is refused too.
+⚠ There is **no database backstop** for this: a floor across rows is not a
+CHECK, so the lock is the whole guard, and a raw insert as the application role
+can still take a total negative.
 
 **One car, one agreement per garage.** A vehicle identity is registered to one
 agreement at a garage (`vehicle_registrations`, migration 0003). A second
@@ -473,6 +519,7 @@ may do to each table, read from the catalogue of a database migrated from
 | `agreement_vehicles` | DELETE, INSERT, SELECT, UPDATE |
 | `agreements` | DELETE, INSERT, SELECT, UPDATE |
 | `charge_attempts` | INSERT, SELECT |
+| `garage_tax_sets` | INSERT, SELECT |
 | `garages` | DELETE, INSERT, SELECT, UPDATE |
 | `invoice_lines` | INSERT, SELECT |
 | `invoices` | INSERT, SELECT, UPDATE |
@@ -484,7 +531,7 @@ may do to each table, read from the catalogue of a database migrated from
 | `tenants` | DELETE, INSERT, SELECT, UPDATE |
 | `vehicle_registrations` | DELETE, INSERT, SELECT, UPDATE |
 
-16 tables. 6 are append-only -- `agreement_garages`, `charge_attempts`, `invoice_lines`, `owner_exceptions`, `payment_reversals`, `payments` -- and `invoices` keeps UPDATE and loses DELETE: `paid_at` is derived by the application after every payment, reversal and adjustment, and that is the one column it writes. The rest carry the DML the application needs to store documents.
+17 tables. 7 are append-only -- `agreement_garages`, `charge_attempts`, `garage_tax_sets`, `invoice_lines`, `owner_exceptions`, `payment_reversals`, `payments` -- and `invoices` keeps UPDATE and loses DELETE: `paid_at` is derived by the application after every payment, reversal and adjustment, and that is the one column it writes. The rest carry the DML the application needs to store documents.
 <!-- END:grants -->
 
 The charge log is the truth for retries, in the order it was recorded -- the
@@ -503,9 +550,11 @@ place in the log is its place in time).
 
 <!-- GENERATED:second-month -->
 ```
+$ monthly-billing state-tax-sets --garage garage-downtown --sets tests/documents/tax_sets_downtown.json --stated-by owner
+
 $ monthly-billing run --garage garage-downtown --period-containing 2026-05-01
 Billing run for garage garage-downtown, period 2026-04-30 to 2026-05-31
-  payer-acme: ISSUED — 2 line(s), total 14500 USD minor
+  payer-acme: ISSUED — 4 line(s), subtotal 14500, tax 1436, total 15936 USD minor
 
 $ monthly-billing covered-in-store --garage garage-downtown --vehicle "ABC-123" --at 2026-05-05T09:00 (local)
 COVERED
@@ -514,14 +563,14 @@ $ monthly-billing covered-in-store --garage garage-downtown --vehicle "ABC-123" 
 NOT COVERED
   This agreement has an unpaid invoice past its home garage's grace period. Not covered means this stay is an ordinary transient stay and is priced like any other. It does not mean refuse entry, and it never means refuse exit.
 
-$ monthly-billing record-payment --invoice garage-downtown/2026-04-30/payer-acme --method cheque --amount-minor 14500 --received-at 2026-05-08T10:00 (local)
+$ monthly-billing record-payment --invoice garage-downtown/2026-04-30/payer-acme --method cheque --amount-minor 15936 --received-at 2026-05-08T10:00 (local)
   invoice PAID at 2026-05-08T10:00:00-06:00
 
 $ monthly-billing covered-in-store --garage garage-downtown --vehicle "ABC-123" --at 2026-05-09T09:00 (local)
 COVERED
 ```
 
-The run issued garage-downtown/2026-04-30/payer-acme for the period 2026-04-30 to 2026-05-31, due on its first day, 14500 minor units. The garage states a grace of 5 days, so the vehicle is still covered on 2026-05-05 and is NOT covered (`UNPAID_PAST_GRACE`) on 2026-05-06. A cheque recorded on 2026-05-08 for the full amount pays it from that instant, and the vehicle is still covered on 2026-05-09. The lane was told nothing about money at any point.
+The run issued garage-downtown/2026-04-30/payer-acme for the period 2026-04-30 to 2026-05-31, due on its first day, 15936 minor units. The garage states a grace of 5 days, so the vehicle is still covered on 2026-05-05 and is NOT covered (`UNPAID_PAST_GRACE`) on 2026-05-06. A cheque recorded on 2026-05-08 for the full amount pays it from that instant, and the vehicle is still covered on 2026-05-09. The lane was told nothing about money at any point.
 <!-- END:second-month -->
 
 ## Payment instruments

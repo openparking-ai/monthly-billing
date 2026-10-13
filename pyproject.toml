@@ -14,6 +14,10 @@ license = "AGPL-3.0-or-later"
 # exceptions. None of it needs a database, and an integrator embedding the
 # entitlement answer in a parking lane should not have to install one.
 #
+# Tax is the one exception, and it is an extra rather than a dependency: the
+# `tax` extra brings `rate-engine`, whose `tax.py` is the only tax arithmetic in
+# the estate. See the extra below and src/monthly_billing/tax.py.
+#
 # The Postgres store is behind a port and its driver is the `store` extra. See
 # src/monthly_billing/store/__init__.py -- it is imported lazily, inside the
 # function that needs it, so importing this package on a machine with no driver
@@ -25,7 +29,26 @@ dependencies = []
 
 [project.optional-dependencies]
 store = ["psycopg[binary]>=3.1"]
-dev = ["pytest>=8", "ruff>=0.8", "psycopg[binary]>=3.1"]
+# The tax on a monthly invoice is `rate-engine`'s computation, in-process, and
+# nothing else's -- the same `tax.py` the barrier's tax is. It is an extra, not
+# a dependency: the entitlement answer and the period arithmetic still need
+# nothing, and src/monthly_billing/tax.py imports the engine lazily, inside the
+# function that needs it, exactly as the store imports its driver.
+#
+# Pinned to an exact commit on rate-engine's main -- the commit platform's
+# `rate-engine.pin` named when this was written. Moving it is a deliberate act
+# with its own pull request; `.github/scripts/check-rate-engine-pin.sh` fails CI
+# if the commit is not on the engine's main. `dev` carries the same pin, because
+# the tax guarantees cannot run without the engine and CI installs `.[dev]`.
+tax = [
+  "openparking-rate-engine @ git+https://github.com/openparking-ai/rate-engine@d636e538a7cd4fdaf4b62c11e3554a35fdc0035e",
+]
+dev = [
+  "pytest>=8",
+  "ruff>=0.8",
+  "psycopg[binary]>=3.1",
+  "openparking-rate-engine @ git+https://github.com/openparking-ai/rate-engine@d636e538a7cd4fdaf4b62c11e3554a35fdc0035e",
+]
 
 [project.scripts]
 monthly-billing = "monthly_billing.cli:main"

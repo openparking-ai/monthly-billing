@@ -28,6 +28,14 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: ruff check .
 
+      - name: The rate-engine pin is a commit on rate-engine main
+        # The tax on an invoice is the engine's, in-process, from the commit the
+        # `tax` and `dev` extras pin. A pin to a commit that lives only on a
+        # feature branch stops resolving when that branch is deleted. The same
+        # script lane-controller runs, with one addition: both extras must name
+        # the same commit.
+        run: bash .github/scripts/check-rate-engine-pin.sh
+
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
 
@@ -108,7 +116,10 @@ jobs:
         # integrator's build, and the README says the engine has none.
         #
         # The `store` extra is exempt BY NAME rather than by the check being
-        # loose: a driver belongs there, and nowhere else.
+        # loose: a driver belongs there, and nowhere else. So is `tax`: the
+        # tax on an invoice is rate-engine's computation, and it arrives as an
+        # extra so that the entitlement answer and the period arithmetic still
+        # install nothing.
         run: |
           python - <<'PY'
           import importlib.metadata as md
@@ -119,7 +130,7 @@ jobs:
               r.split("extra ==")[1].strip().strip('"\'')
               for r in requires if "extra ==" in r
           })
-          assert extras == ["dev", "store"], f"unexpected extras: {extras}"
+          assert extras == ["dev", "store", "tax"], f"unexpected extras: {extras}"
           print("no runtime dependencies, as published")
           PY
 
@@ -163,9 +174,24 @@ jobs:
         run: |
           set -o pipefail
 
+          # Without tax sets the first charge is printed UNTAXED and says so --
+          # an untaxed figure never reads as the whole of what is owed.
           monthly-billing first-charge \
             --garage tests/documents/garage_downtown.json \
-            --agreement tests/documents/agreement_acme.json
+            --agreement tests/documents/agreement_acme.json \
+            | tee "$RUNNER_TEMP/untaxed.txt"
+          grep -q "UNTAXED" "$RUNNER_TEMP/untaxed.txt"
+
+          # With them it is taxed once, by the engine, and says when.
+          monthly-billing first-charge \
+            --garage tests/documents/garage_downtown.json \
+            --agreement tests/documents/agreement_acme.json \
+            --tax-sets tests/documents/tax_sets_downtown.json \
+            | tee "$RUNNER_TEMP/taxed.txt"
+          grep -q "taxed once at" "$RUNNER_TEMP/taxed.txt"
+          if grep -q "UNTAXED" "$RUNNER_TEMP/taxed.txt"; then
+            echo "a taxed first charge said it was untaxed"; exit 1
+          fi
 
           # A vehicle on the agreement: covered, exit 0.
           monthly-billing covered \

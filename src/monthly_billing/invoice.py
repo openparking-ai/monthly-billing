@@ -42,6 +42,14 @@ start date, which is what makes this a guarantee rather than a habit.
 paid; it takes effect at the next cycle. Enforced by construction rather than by
 care: an invoice records the agreement VERSION each line was computed from, and
 recomputing a paid invoice against a newer version is refused.
+
+**THE FUNCTIONS HERE PRICE PERIODS AND NOTHING ELSE, AND WHAT THEY RETURN IS
+UNTAXED.** ``first_charge`` and ``invoice_for_period`` are the one place a
+period is priced; tax is applied afterwards, to a COMPLETE untaxed invoice, by
+``tax.tax_an_invoice`` -- the only producer of ``TAX`` lines at issue -- so the
+order on an issued invoice is period lines, fee lines, then tax lines. Neither
+function here takes a tax set, and a tax line handed to one would be a second
+place tax could come from.
 """
 
 from __future__ import annotations
@@ -70,6 +78,12 @@ class LineKind(Enum):
     #: with the exception's id on it, so that a figure nobody can account for
     #: cannot appear on an invoice.
     EXCEPTION_ADJUSTMENT = "exception_adjustment"
+    #: One tax rule's line: the engine's answer for that rule, on the invoice's
+    #: NON-TAX total. It belongs to the invoice, not to one agreement under it,
+    #: so it carries no agreement and no version; it names its rule instead. A
+    #: tax line written at issue names no exception; one written beside an
+    #: owner's adjustment names that exception -- the compensating tax it caused.
+    TAX = "tax"
 
 
 @dataclass(frozen=True)
@@ -77,12 +91,18 @@ class InvoiceLine:
     kind: LineKind
     label: str
     amount_minor: int
-    agreement_id: str
-    agreement_version: int
+    #: The agreement and version that priced the line. ``None`` on a TAX line and
+    #: on nothing else: a tax line's base is the whole invoice, and stamping one
+    #: agreement onto it would be false data on a money row.
+    agreement_id: str | None
+    agreement_version: int | None
     period_start_day: date
     period_end_day: date
-    #: Populated on an EXCEPTION_ADJUSTMENT line and on nothing else.
+    #: Populated on an EXCEPTION_ADJUSTMENT line, and on a TAX line an
+    #: adjustment caused; on nothing else.
     exception_id: str | None = None
+    #: The engine's rule id, on a TAX line and on nothing else.
+    tax_rule_id: str | None = None
 
     def rendered(self, currency: str) -> str:
         return f"{self.label}: {format_minor(self.amount_minor, currency)}"
@@ -99,6 +119,16 @@ class Invoice:
     @property
     def total_minor(self) -> int:
         return sum(line.amount_minor for line in self.lines)
+
+    @property
+    def subtotal_minor(self) -> int:
+        """The NON-TAX total: every line that is not a TAX line. The base a tax
+        is computed on, and never a tax of a tax."""
+        return sum(line.amount_minor for line in self.lines if line.kind is not LineKind.TAX)
+
+    @property
+    def taxed(self) -> bool:
+        return any(line.kind is LineKind.TAX for line in self.lines)
 
     def rendered(self) -> str:
         body = "\n".join(f"  {line.rendered(self.currency)}" for line in self.lines)
@@ -222,6 +252,15 @@ def first_charge(garage: Garage, agreement: Agreement) -> Invoice:
         issued_for_period_start=partial.start_day,
         lines=tuple(lines),
     )
+
+
+def first_charge_due_at(garage: Garage, agreement: Agreement):
+    """The first charge's ONE tax moment: the start instant of the first period
+    it pays for, in the garage's zone -- the same definition the billing run's
+    ``due_at`` has. The first charge covers two periods and is one payment, so
+    it is taxed once, here; a tax change landing between its two periods is
+    picked up by the next invoice and never reaches back into this one."""
+    return period_containing(garage, agreement.start_day).start_instant
 
 
 def invoice_for_period(

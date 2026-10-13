@@ -254,11 +254,14 @@ GUARANTEES: dict[str, str] = {
         "one vehicle, it refuses by name."
     ),
     "G33": (
-        "An invoice total never goes below zero: an owner's adjustment that would "
-        "take it there is refused by name, computed under the invoice lock from the "
-        "committed lines; exactly zero is a fully waived invoice and is allowed. "
-        "There is no database backstop for a floor across rows -- the lock is the "
-        "whole guard, and the contract says so."
+        "An invoice total never goes below zero: an owner's adjustment may take the "
+        "invoice's PRE-TAX total -- the sum of its non-tax lines -- to zero and no "
+        "further, and one that would go past it is refused by name, computed under "
+        "the invoice lock from the committed lines; exactly zero is a fully waived "
+        "invoice and is allowed, and the tax follows the base down to nothing. On a "
+        "taxed invoice a credit above the pre-tax total and below the taxed one is "
+        "refused by the same name. There is no database backstop for a floor across "
+        "rows -- the lock is the whole guard, and the contract says so."
     ),
     "G34": (
         "A block the owner records against an INVOICE is lifted by an unblock the "
@@ -489,6 +492,94 @@ GUARANTEES: dict[str, str] = {
         "show-register (G45) is untouched: this is the read for the reader that was "
         "never told an agreement id, and it exists because asking covered-in-store once "
         "per known vehicle is a cost that grows with every car ever seen."
+    ),
+    "G49": (
+        "AT ISSUE, TAX IS APPENDED AFTER EVERY PRICED LINE, BY ONE PRODUCER. "
+        "`first_charge` and `invoice_for_period` price periods and return untaxed "
+        "invoices; `tax_an_invoice` takes a complete untaxed invoice and appends the "
+        "engine's lines after every period, fee and adjustment line, one per rule in "
+        "the garage's stated `sequence`, each naming its rule and no agreement. An "
+        "invoice that already carries tax lines is refused a second taxing by name "
+        "(`REFUSAL_INVOICE_ALREADY_TAXED`)."
+    ),
+    "G50": (
+        "AN INVOICE'S `subtotal_minor` IS THE SUM OF THE NON-TAX LINES IT WAS ISSUED "
+        "WITH, AND THE DATABASE HOLDS IT. Migration 0006 checks it at commit against "
+        "the non-tax lines written in the issuing transaction and refuses a row that "
+        "disagrees, by name. `subtotal_minor`, `tax_set_effective_from` and "
+        "`tax_sets_seen` are all present or all absent -- absent only on an invoice "
+        "issued before 0006, untaxed, and never backfilled with a guess. A later "
+        "adjustment moves the invoice's current pre-tax total, derived from its lines, "
+        "and never the recorded issue-time figure. `subtotal + tax = total` is not a "
+        "constraint: the total is derived from the lines, so it would prove nothing."
+    ),
+    "G51": (
+        "NO TAX SET IN FORCE AT THE INVOICE'S `due_at` IS A REFUSAL, NEVER A ZERO. A "
+        "garage that has stated no tax position, or whose every set takes effect after "
+        "`due_at`, gets no invoice: each payer's run line is REFUSED with "
+        "`REFUSAL_NO_TAX_SET_IN_FORCE` carrying the engine's own sentence, the payers "
+        "after it are still processed, nothing is written for it, and the run reports "
+        "refused (the command exits non-zero). Stating nothing is not stating none."
+    ),
+    "G52": (
+        "A SET WITH NO RULES IS HOW A GARAGE STATES IT CHARGES NONE, AND IT YIELDS NO "
+        "TAX LINE. The invoice is issued, carries no tax line, records that set and "
+        "a subtotal equal to its total. A zero subtotal under a set with rules also "
+        "yields no tax line: the engine returns none and this module invents none."
+    ),
+    "G53": (
+        "AN ISSUED INVOICE IS NEVER RE-PRICED AGAINST ANOTHER TAX SET. A set stated "
+        "after issue -- later, or backdated to before `due_at` -- changes nothing on "
+        "it: a re-run is ALREADY_ISSUED and its tax lines and tax position are as "
+        "issued, and an adjustment on it re-taxes at the set it RECORDED, never the "
+        "set in force today. The three tax-position columns are immutable: an UPDATE "
+        "to any of them is refused by the database, naming the column, while the "
+        "derived `paid_at` stays writable."
+    ),
+    "G54": (
+        "THE FIRST CHARGE'S TWO PERIODS TAKE ONE TAX MOMENT -- A FUNCTION-LEVEL "
+        "GUARANTEE, because the first charge is computed from documents and stored "
+        "nowhere. `first-charge --tax-sets` taxes the invoice once, through the engine, "
+        "at `first_charge_due_at`: the start instant of the FIRST period it pays for. "
+        "A set taking effect between its two periods prices neither. Without "
+        "`--tax-sets` the output says, on its own lines, that the figure is UNTAXED."
+    ),
+    "G55": (
+        "THIS MODULE COMPUTES NO PERCENTAGE: `rate-engine` IS THE ONLY TAX ARITHMETIC. "
+        "Every tax amount on an invoice is the engine's answer, mapped and never "
+        "recomputed; `tax.py`, the one file that imports the engine, contains no "
+        "multiplication, division, modulo or power; no other source file imports it. "
+        "The engine is the `tax` extra, imported lazily: the entitlement answer, the "
+        "invoice arithmetic and the store import no part of it, and tax asked for "
+        "without it is refused by name (`REFUSAL_TAX_NEEDS_THE_ENGINE`)."
+    ),
+    "G56": (
+        "TAX IS THE LAST COMPUTATION ON AN INVOICE, NOT THE LAST ROW. After every "
+        "owner's adjustment on a taxed invoice, each rule's tax lines sum to the "
+        "engine's tax for that rule on the invoice's non-tax total at the set the "
+        "invoice recorded: the one writer of adjustments appends the adjustment and, "
+        "in the same transaction, one compensating tax line per rule naming the "
+        "exception (negative where the base fell, zero where the rounded figure did "
+        "not move). A waiver to zero leaves no tax. The adjustment's agreement is "
+        "copied from a non-tax line, the first by `created_at` then `id`; that filter "
+        "is defence in depth, and what makes a money line carrying a tax line's null "
+        "agreement impossible is the database's `invoice_lines_tax_names_no_agreement`. "
+        "The database refuses at commit an adjustment on an invoice whose set has "
+        "rules that arrives with NO tax line naming its exception; it counts no "
+        "rules, so one line per rule is proven by this guarantee's tests alone, and "
+        "that the line is the RIGHT amount needs the percentage, so that is this "
+        "guarantee's test and not a constraint either."
+    ),
+    "G57": (
+        "A GARAGE'S TAX SETS COME IN THROUGH ONE DOOR, AND THE ENGINE IS ITS ONLY "
+        "JUDGE. `state_tax_sets` (and `state-tax-sets`) hands the document to "
+        "`rate-engine`'s `load_tax_sets` before reading a field, refuses what it "
+        "refuses in its words (`REFUSAL_TAX_SETS_INVALID`) and stores nothing; stores "
+        "what it accepted as the engine read it; and before the caller commits reads "
+        "the garage's WHOLE list back and loads it again, refusing a statement after "
+        "which the list would not load. A set at an instant the garage already has is "
+        "refused by name. The table is append-only by grant, and a card-shaped value "
+        "inside a rule is refused at the store like any other column's."
     ),
 }
 
