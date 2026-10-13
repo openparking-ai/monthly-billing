@@ -834,6 +834,16 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "total -3000 and paid_at is set with zero payments -- the outside pass's "
         "Grok 10, money and not an opinion",
     ),
+    "G33/pre-tax-floor": (
+        "tests/test_g33_a_total_never_goes_below_zero.py",
+        "exceptions_store.py",
+        """        "WHERE invoice_id = %s AND kind <> 'tax'",""",
+        """        "WHERE invoice_id = %s",  # PLANTED: the floor counts the tax lines""",
+        "the floor's sum loses its non-tax filter and nothing else, so on a taxed invoice "
+        "the ceiling is the TAXED total: a credit between the two passes the guard and the "
+        "engine refuses the negative base with NotMinorUnits instead of this module's "
+        "REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL",
+    ),
     "G34": (
         "tests/test_g34_a_block_on_an_invoice_survives_the_payment.py",
         "entitlement_store.py",
@@ -2612,19 +2622,16 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "  IF true THEN  -- PLANTED: no adjustment needs its tax",
         "the commit-time trigger accepts an adjustment on a taxed invoice with no tax line",
     ),
-    "G56/agreement-pick": (
+    "G56/agreement-filter": (
         "tests/test_g56_an_adjustment_is_retaxed.py",
         "exceptions_store.py",
-        source(
-            """        "FROM invoice_lines WHERE invoice_id = %s AND kind <> 'tax' \"""",
-            """        "ORDER BY created_at LIMIT 1",""",
-        ),
-        source(
-            """        "FROM invoice_lines WHERE invoice_id = %s \"""",
-            """        "ORDER BY (kind = 'tax') DESC, created_at LIMIT 1",  # PLANTED""",
-        ),
-        "the adjustment copies its agreement from a TAX line -- the arbitrary pick landing "
-        "where A1.7 says it can -- and so carries no agreement",
+        """        "FROM invoice_lines WHERE invoice_id = %s AND kind <> 'tax' \"""",
+        """        "FROM invoice_lines WHERE invoice_id = %s "  # PLANTED: reads tax lines""",
+        "the agreement pick loses its non-tax filter and NOTHING ELSE -- its order is "
+        "untouched -- so with a tax line first in that order the adjustment copies a tax "
+        "line's null agreement and the database refuses it by name "
+        "(invoice_lines_tax_names_no_agreement). This replaced G56/agreement-pick, which "
+        "also rewrote the order and so moved two variables",
     ),
     "G57/judge": (
         "tests/test_g57_the_tax_set_door.py",

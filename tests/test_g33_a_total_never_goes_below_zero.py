@@ -6,6 +6,12 @@ by name, under the invoice lock, from the committed lines; exactly zero is a
 fully waived invoice and is allowed. There is no database backstop -- a floor
 across rows is not a CHECK -- and the contract says so. The control plants the
 floor away and requires red.
+
+On a taxed invoice the floor is the PRE-TAX total, not the taxed one: a credit
+strictly between the two is refused by name. Its own control plants the
+non-tax filter away -- nothing else -- and requires red: without the filter the
+ceiling is the taxed total, the credit passes the guard, and the engine refuses
+the negative base with an arithmetic error instead of this module's sentence.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from monthly_billing.exceptions_store import record_invoice_exception
 from monthly_billing.findings import REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL, Refused
 from monthly_billing.payments import PaymentMethod, record_payment
 from store_harness import needs_postgres, query, seed
+from tax_harness import TAXED, engine_tax, issue, lines_of, pre_tax
 
 pytestmark = needs_postgres
 
@@ -97,3 +104,23 @@ def test_a_credit_within_the_total_still_lands(app, tenant_id):
     reference = _issued(app, tenant_id)
     state = record_invoice_exception(app, tenant_id, _credit(reference, 2000))
     assert _total(app, tenant_id) == (10000, 2) and not state.paid
+
+
+@pytest.mark.guarantee("G33")
+def test_on_a_taxed_invoice_the_floor_is_the_pre_tax_total(app, tenant_id):
+    """A credit strictly between the pre-tax total and the taxed one is refused
+    BY CODE, and the invoice is as it was."""
+    (line,) = issue(app, tenant_id, sets=TAXED).lines
+    reference = line.reference
+    tax = sum(engine_tax(12000).values())
+    assert pre_tax(app, tenant_id, reference) == 12000
+    credit = 12500
+    assert 12000 < credit < 12000 + tax, "the fixture must sit strictly between the two"
+    before = lines_of(app, tenant_id, reference)
+    with pytest.raises(Refused) as refused:
+        record_invoice_exception(app, tenant_id, _credit(reference, credit))
+    app.rollback()
+    assert refused.value.code == REFUSAL_ADJUSTMENT_EXCEEDS_TOTAL
+    assert lines_of(app, tenant_id, reference) == before
+    assert query(app, tenant_id, "SELECT count(*) FROM owner_exceptions") == [(0,)]
+    assert query(app, tenant_id, "SELECT paid_at FROM invoices") == [(None,)]

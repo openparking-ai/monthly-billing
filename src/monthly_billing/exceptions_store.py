@@ -166,11 +166,19 @@ def _append_adjustment(
 ) -> None:
     """THE ONLY WRITER OF AN ADJUSTMENT LINE: the adjustment, and -- on an
     invoice priced with a tax set -- the compensating tax line per rule of THAT
-    set, in the caller's transaction, under the caller's invoice lock."""
+    set, in the caller's transaction, under the caller's invoice lock.
+
+    The agreement is copied from a NON-TAX line. Every line an issue writes
+    shares one ``created_at`` (``now()`` is transaction-stable), so ``id``
+    breaks the tie: the pick is deterministic, not the planner's choice. Which
+    of several non-tax agreements it lands on is still arbitrary (A1.7). The
+    filter is defence in depth -- what makes an adjustment carrying a tax
+    line's null agreement impossible is the database's
+    ``invoice_lines_tax_names_no_agreement``."""
     cursor.execute(
         "SELECT agreement_id, agreement_version, period_start_day, period_end_day "
         "FROM invoice_lines WHERE invoice_id = %s AND kind <> 'tax' "
-        "ORDER BY created_at LIMIT 1",
+        "ORDER BY created_at, id LIMIT 1",
         (invoice_uuid,),
     )
     agreement_uuid, version, start_day, end_day = cursor.fetchone()

@@ -8,9 +8,20 @@ agreement comes from a non-tax line. The database refuses, at commit, an
 adjustment on a taxed invoice that arrives without its tax line -- and accepts
 the same raw adjustment on an invoice whose set states no tax (the control).
 
-Controls plant: no compensating lines; the compensation as the new figure
-rather than the difference; the commit-time trigger away; and the agreement
-pick landing on a tax line. Each must go red.
+The trigger counts no rules: it refuses an adjustment that arrives with NO
+tax line naming its exception. One line per rule is proven here, by test, and
+nowhere in the database.
+
+The agreement pick's non-tax filter is defence in depth -- the database's
+``invoice_lines_tax_names_no_agreement`` is what makes a money line carrying a
+tax line's null agreement impossible. Its control needs a tax line the pick
+would otherwise land on, so one fixture writes a tax line strictly EARLIER
+than the priced lines, by an explicit ``created_at``.
+
+Controls plant, one variable each: no compensating lines; the compensation as
+the new figure rather than the difference; the commit-time trigger away; and
+the agreement pick's non-tax filter away with its order untouched. Each must
+go red.
 """
 
 from __future__ import annotations
@@ -169,3 +180,49 @@ def test_an_invoice_issued_untaxed_before_0006_is_adjusted_with_no_tax(app, tena
     state = record_invoice_exception(app, tenant_id, _exception("legacy-1", 2000))
     assert state.total_minor == 10000
     assert tax_by_rule(app, tenant_id, "legacy-1") == {}
+
+
+def _earlier_tax_line(app, tenant_id, reference):
+    """A zero tax line written past the module, strictly EARLIER than every
+    line the issue wrote, by an explicit ``created_at`` -- so that a pick in
+    ``created_at, id`` order with no non-tax filter lands on it. Zero moves no
+    money and no rule's figure; the fixture changes the ORDER and nothing else."""
+    ((invoice, earliest),) = query(
+        app, tenant_id,
+        "SELECT i.id, min(l.created_at) FROM invoices i JOIN invoice_lines l "
+        "ON l.invoice_id = i.id WHERE i.reference = %s GROUP BY i.id",
+        (reference,),
+    )
+    with tenant(app, tenant_id) as cursor:
+        cursor.execute(
+            "INSERT INTO invoice_lines (tenant_id, invoice_id, kind, label, amount_minor, "
+            "period_start_day, period_end_day, tax_rule_id, created_at) VALUES "
+            "(%s, %s, 'tax', 'earlier', 0, '2026-04-30', '2026-05-31', 'sales', %s)",
+            (tenant_id, invoice, earliest - timedelta(seconds=1)),
+        )
+    app.commit()
+    first = query(
+        app, tenant_id,
+        "SELECT kind FROM invoice_lines WHERE invoice_id = %s ORDER BY created_at, id LIMIT 1",
+        (invoice,),
+    )
+    assert first == [("tax",)], "the fixture must put a tax line first in the pick's order"
+
+
+@pytest.mark.guarantee("G56")
+def test_the_pick_skips_a_tax_line_that_sorts_first(app, tenant_id):
+    """With a tax line first in the pick's own order, a waiver still lands and
+    its adjustment carries the PRICED line's agreement."""
+    (line,) = issue(app, tenant_id, sets=TAXED).lines
+    _earlier_tax_line(app, tenant_id, line.reference)
+    record_invoice_exception(
+        app, tenant_id, _exception(line.reference, 500, kind=ExceptionKind.WAIVE_FEE)
+    )
+    rows = query(
+        app, tenant_id,
+        "SELECT kind, agreement_id FROM invoice_lines WHERE kind IN "
+        "('full_period', 'exception_adjustment')",
+    )
+    agreements = {kind: agreement for kind, agreement in rows}
+    assert agreements["exception_adjustment"] is not None
+    assert agreements["exception_adjustment"] == agreements["full_period"]

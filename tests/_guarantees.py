@@ -254,11 +254,14 @@ GUARANTEES: dict[str, str] = {
         "one vehicle, it refuses by name."
     ),
     "G33": (
-        "An invoice total never goes below zero: an owner's adjustment that would "
-        "take it there is refused by name, computed under the invoice lock from the "
-        "committed lines; exactly zero is a fully waived invoice and is allowed. "
-        "There is no database backstop for a floor across rows -- the lock is the "
-        "whole guard, and the contract says so."
+        "An invoice total never goes below zero: an owner's adjustment may take the "
+        "invoice's PRE-TAX total -- the sum of its non-tax lines -- to zero and no "
+        "further, and one that would go past it is refused by name, computed under "
+        "the invoice lock from the committed lines; exactly zero is a fully waived "
+        "invoice and is allowed, and the tax follows the base down to nothing. On a "
+        "taxed invoice a credit above the pre-tax total and below the taxed one is "
+        "refused by the same name. There is no database backstop for a floor across "
+        "rows -- the lock is the whole guard, and the contract says so."
     ),
     "G34": (
         "A block the owner records against an INVOICE is lifted by an unblock the "
@@ -558,10 +561,14 @@ GUARANTEES: dict[str, str] = {
         "in the same transaction, one compensating tax line per rule naming the "
         "exception (negative where the base fell, zero where the rounded figure did "
         "not move). A waiver to zero leaves no tax. The adjustment's agreement is "
-        "copied from a non-tax line. The database refuses at commit an adjustment on "
-        "an invoice whose set has rules that arrives without its tax line; that the "
-        "line is the RIGHT amount needs the percentage, so it is this guarantee's "
-        "test and not a constraint."
+        "copied from a non-tax line, the first by `created_at` then `id`; that filter "
+        "is defence in depth, and what makes a money line carrying a tax line's null "
+        "agreement impossible is the database's `invoice_lines_tax_names_no_agreement`. "
+        "The database refuses at commit an adjustment on an invoice whose set has "
+        "rules that arrives with NO tax line naming its exception; it counts no "
+        "rules, so one line per rule is proven by this guarantee's tests alone, and "
+        "that the line is the RIGHT amount needs the percentage, so that is this "
+        "guarantee's test and not a constraint either."
     ),
     "G57": (
         "A GARAGE'S TAX SETS COME IN THROUGH ONE DOOR, AND THE ENGINE IS ITS ONLY "
