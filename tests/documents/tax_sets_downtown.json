@@ -1,0 +1,9 @@
+[
+  {
+    "effective_from": "2026-01-01T00:00:00-07:00",
+    "rules": [
+      {"id": "sales", "label": "Sales tax", "percent_bp": 290, "rounding": "nearest", "sequence": 1},
+      {"id": "parking", "label": "Parking tax", "percent_bp": 700, "rounding": "down", "sequence": 2}
+    ]
+  }
+]

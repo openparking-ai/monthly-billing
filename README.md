@@ -3,11 +3,17 @@
 **What does this account owe, and when? Is this vehicle covered right now, and
 for how many cars?** Those two questions, and nothing else.
 
-Standalone. It runs with no parking system around it, no platform, and — for
-everything that decides money — no database and no dependencies at all.
+Standalone. It runs with no parking system around it and no platform. The
+entitlement answer and the period arithmetic need no database and have no
+dependencies at all. Tax is the exception: the tax on an invoice is
+`rate-engine`'s computation — the same one the barrier's tax is — and needs the
+engine, which the `tax` extra installs. Without it an invoice can be priced and
+is printed UNTAXED, saying so; it is never taxed by anything else.
 
 ```
 $ monthly-billing first-charge --garage garage.json --agreement agreement.json
+$ monthly-billing first-charge --garage garage.json --agreement agreement.json \
+      --tax-sets tax_sets.json
 $ monthly-billing covered --garage garage.json --agreement agreement.json \
       --vehicle ABC-123 --at 2026-04-01T09:00:00-06:00
 ```
@@ -16,9 +22,11 @@ And, against the store, the cycle: issue the period, record what was paid,
 answer the lane from what is actually owed.
 
 ```
+$ monthly-billing state-tax-sets --tenant T --garage garage-downtown \
+      --sets tax_sets.json --stated-by owner
 $ monthly-billing run --tenant T --garage garage-downtown --period-containing 2026-05-01
 $ monthly-billing record-payment --tenant T --invoice garage-downtown/2026-04-30/payer-acme \
-      --method cheque --amount-minor 14500 --received-at 2026-05-08T10:00:00-06:00 \
+      --method cheque --amount-minor 15936 --received-at 2026-05-08T10:00:00-06:00 \
       --reference "cheque 1043" --recorded-by operator
 $ monthly-billing covered-in-store --tenant T --garage garage-downtown \
       --vehicle ABC-123 --at 2026-05-09T09:00:00-06:00
@@ -129,10 +137,14 @@ No number in it is typed.
 ## Install
 
 ```
-pip install -e .              # the engine: no dependencies at all
+pip install -e .              # the entitlement answer and the period arithmetic: no dependencies
+pip install -e '.[tax]'       # plus rate-engine, pinned by commit: the tax on an invoice
 pip install -e '.[store]'     # plus the Postgres store
-pip install -e '.[dev]'       # plus pytest and ruff
+pip install -e '.[dev]'       # plus pytest, ruff, the driver and rate-engine
 ```
+
+The store's billing run taxes every invoice, so a store installation that issues
+invoices needs `.[store,tax]`.
 
 Python 3.11 or newer.
 
@@ -202,8 +214,10 @@ parameter or refuses by name.
 ## What is not here
 
 No payment processor. No enrolment, and no reconciliation of an outside
-registrar's register against this one. No customer portal. No tax. No
-multi-garage money — an agreement is billed at one home garage, whatever other
+registrar's register against this one. No customer portal. No tax
+arithmetic of its own — the tax on an invoice is `rate-engine`'s, and a garage
+that has stated no tax position is refused an invoice rather than taxed at zero.
+No multi-garage money — an agreement is billed at one home garage, whatever other
 garages of the account the owner lists it as good at. No refund decisions — the
 garage owner makes those, and records each one as an exception with an amount, a
 name and a date on it.

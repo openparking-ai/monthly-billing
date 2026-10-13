@@ -62,13 +62,18 @@ CROSS_GARAGE_INSERTS = {
         "INSERT INTO agreement_garages (tenant_id, agreement_id, garage_id) VALUES (%s, %s, %s)",
         "agreement_garages_garage_in_tenant",
     ),
+    "garage_tax_sets": (
+        "INSERT INTO garage_tax_sets (tenant_id, garage_id, effective_from, rules, stated_by) "
+        "VALUES (%s, %s, '1999-01-01T00:00:00Z', '[]', 'cross')",
+        "garage_tax_sets_garage_in_tenant",
+    ),
 }
 
 
 def _params(table: str, tenant_id, garage, payer_a, agreement_a) -> tuple:
     """The positional parameters each statement above takes, with ``garage`` in
     the garage_id slot -- tenant B's for the refusal, tenant A's for the control."""
-    if table == "vehicle_registrations":
+    if table in ("vehicle_registrations", "garage_tax_sets"):
         return (tenant_id, garage)
     if table == "agreements":
         return (tenant_id, garage, payer_a)

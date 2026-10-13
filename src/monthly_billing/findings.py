@@ -75,6 +75,10 @@ REFUSAL_REGISTRATIONS_NOT_GIVEN = "REFUSAL_REGISTRATIONS_NOT_GIVEN"
 REFUSAL_VEHICLE_NOT_REGISTERED = "REFUSAL_VEHICLE_NOT_REGISTERED"
 REFUSAL_GARAGE_NOT_COVERED = "REFUSAL_GARAGE_NOT_COVERED"
 REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES = "REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES"
+REFUSAL_NO_TAX_SET_IN_FORCE = "REFUSAL_NO_TAX_SET_IN_FORCE"
+REFUSAL_TAX_SETS_INVALID = "REFUSAL_TAX_SETS_INVALID"
+REFUSAL_TAX_NEEDS_THE_ENGINE = "REFUSAL_TAX_NEEDS_THE_ENGINE"
+REFUSAL_INVOICE_ALREADY_TAXED = "REFUSAL_INVOICE_ALREADY_TAXED"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -284,7 +288,36 @@ REFUSALS: dict[str, str] = {
         "invoice -- and no further: money owed BY the garage is not a negative "
         "invoice, it is a refund the owner records as its own decision. Computed "
         "under the invoice lock from the committed lines; there is no database "
-        "backstop for a floor across rows, so the lock is the whole guard."
+        "backstop for a floor across rows, so the lock is the whole guard. On a "
+        "taxed invoice the floor is the PRE-TAX total -- the money the tax is a "
+        "percentage of -- and the tax follows it down, to nothing when it reaches "
+        "nothing."
+    ),
+    REFUSAL_NO_TAX_SET_IN_FORCE: (
+        "The garage has no tax set in force at this invoice's due instant: it has "
+        "stated no tax position at all, or every set it stated takes effect later. "
+        "The invoice is refused, never taxed at zero -- a garage that charges no tax "
+        "says so with a set that has no rules, and stating nothing is not stating "
+        "none. The engine's own sentence follows."
+    ),
+    REFUSAL_TAX_SETS_INVALID: (
+        "The engine refused these tax sets at load, and its sentence names the "
+        "field. This module judges no tax rule: whether a set is valid is said by "
+        "`rate-engine`'s `load_tax_sets` and nowhere else, and a set it will not "
+        "load is not stored -- sets are loaded whole, so one unloadable set would "
+        "make every later one unloadable."
+    ),
+    REFUSAL_TAX_NEEDS_THE_ENGINE: (
+        "Tax was asked for and `rate-engine` is not installed. The tax on an invoice "
+        "is the engine's computation and nothing else's, so this module will not "
+        "compute one without it: install the `tax` extra. The entitlement answer "
+        "and the period arithmetic need nothing."
+    ),
+    REFUSAL_INVOICE_ALREADY_TAXED: (
+        "This invoice already carries tax lines. An invoice is taxed once, at "
+        "issue, on its complete untaxed lines; a later change to its base is "
+        "re-taxed by the one writer of adjustments, against the set the invoice "
+        "recorded, and never by taxing the taxed invoice again."
     ),
 }
 

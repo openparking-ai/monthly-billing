@@ -42,6 +42,7 @@ from monthly_billing.agreement import Agreement
 from monthly_billing.garage import Garage
 from monthly_billing.store.postgres import connect, set_tenant, tenant
 from monthly_billing.store.records import store_agreement, store_garage, store_payer
+from monthly_billing.store.tax_sets import state_tax_sets
 from monthly_billing.store.writes import as_uuid
 
 MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
@@ -201,14 +202,24 @@ class Seeded:
     garage_uuids: dict[str, UUID] = field(default_factory=dict)
 
 
+#: A garage that STATES it charges no tax, from long before any period a test
+#: prices. The billing run refuses a garage with no tax set in force (migration
+#: 0006, ``tax.py``), so every seeded garage states a position; this is the one
+#: a test gets unless it states its own -- written out, never an absence, and
+#: ``tax_sets=None`` seeds a garage that has stated nothing.
+NO_TAX: list[dict[str, Any]] = [{"effective_from": "2000-01-01T00:00:00+00:00", "rules": []}]
+
+
 def seed(
     app: Any,
     tenant_id: UUID,
     garage: Garage,
     agreements: tuple[Agreement, ...],
+    *,
+    tax_sets: list[dict[str, Any]] | None = NO_TAX,
 ) -> Seeded:
-    """The garage, every payer the agreements name, and the agreements."""
-    return seed_garages(app, tenant_id, (garage,), agreements)
+    """The garage, its tax sets, every payer the agreements name, and the agreements."""
+    return seed_garages(app, tenant_id, (garage,), agreements, tax_sets=tax_sets)
 
 
 def seed_garages(
@@ -218,8 +229,10 @@ def seed_garages(
     agreements: tuple[Agreement, ...],
     *,
     now: datetime | None = None,
+    tax_sets: list[dict[str, Any]] | None = NO_TAX,
 ) -> Seeded:
-    """Several garages, every payer the agreements name, and the agreements --
+    """Several garages, each stating ``tax_sets`` (see ``NO_TAX``), every payer
+    the agreements name, and the agreements --
     each stored under its HOME garage, which must be among ``garages``. The
     shape a multi-garage agreement needs: its covered garages have to be in the
     store before it is."""
@@ -230,6 +243,10 @@ def seed_garages(
     with tenant(app, tenant_id) as cursor:
         for garage in garages:
             garage_uuids[garage.id] = store_garage(cursor, tenant_id, garage)
+            if tax_sets is not None:
+                state_tax_sets(
+                    cursor, tenant_id, garage_uuids[garage.id], tax_sets, stated_by="the harness"
+                )
         for agreement in agreements:
             if agreement.payer_id not in payer_uuids:
                 payer_uuids[agreement.payer_id] = store_payer(

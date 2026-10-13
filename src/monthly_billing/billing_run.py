@@ -31,6 +31,19 @@ the grace period counts from there. ``BillingPeriod`` already carries the instan
 resolved in the garage's zone, so a spring-forward billing day is due at the
 right moment rather than 24 fixed hours after the previous one.
 
+**EVERY INVOICE IS TAXED, AT ITS `due_at`, BY THE ENGINE, IN THE PAYER'S OWN
+TRANSACTION.** The garage's tax sets are read INSIDE the transaction that writes
+the payer's invoice -- one transaction per payer is this module's unit of
+consistency -- so a set stated while the run is going cannot price two payers of
+one run differently without ``tax_sets_seen`` on their rows saying so. The
+moment is ``due_at``, never the clock: a re-run must give the first run's answer,
+and a figure that depended on when the command was typed would not. A garage
+with no set in force at ``due_at`` -- including one that has stated none -- is
+REFUSED for that payer, by name, in the engine's words; it is never taxed at
+zero. The invoice row records the pre-tax subtotal, the set that priced it and
+how many sets the transaction saw, and the database holds the subtotal to the
+issued lines at commit (migration 0006).
+
 **THE REFERENCE IS DERIVED, SO THE SAME INVOICE ALWAYS GETS THE SAME ONE.**
 Garage, period and payer -- the same three things the UNIQUE constraint holds --
 so ``UNIQUE (tenant_id, reference)`` from migration 0001 is a second lock on the
@@ -58,7 +71,9 @@ from .store.records import (
     load_garage,
     load_payers_at_garage,
 )
+from .store.tax_sets import load_tax_set_documents
 from .store.writes import as_uuid, guarded_insert
+from .tax import TaxPosition, tax_an_invoice
 
 
 class RunOutcome(Enum):
@@ -97,8 +112,9 @@ RUN_OUTCOME_MEANS: dict[RunOutcome, str] = {
         "cancelled, not started, or owned by the first charge -- so no invoice exists."
     ),
     RunOutcome.REFUSED: (
-        "The module could not price this payer and says why. The payers after it "
-        "were still processed; the command exits non-zero."
+        "The module could not price this payer and says why -- among the reasons, "
+        "no tax set in force at the invoice's due instant, which is never taxed at "
+        "zero. The payers after it were still processed; the command exits non-zero."
     ),
     RunOutcome.CONSTRAINT_VIOLATED: (
         "The database refused this payer's invoice on a constraint OTHER than the "
@@ -224,10 +240,17 @@ def run_billing(
         reference = invoice_reference(garage, period, payer_id)
         try:
             with tenant(connection, tenant_id) as cursor:
+                # The sets this payer's transaction sees, and the tax at due_at.
+                taxed = tax_an_invoice(
+                    invoice,
+                    sets=load_tax_set_documents(cursor, stored.uuid),
+                    at=period.start_instant,
+                )
                 _persist(
                     cursor,
                     tenant_id,
-                    invoice,
+                    taxed.invoice,
+                    position=taxed.position,
                     reference=reference,
                     garage_uuid=stored.uuid,
                     payer_uuid=payer_uuid,
@@ -236,6 +259,24 @@ def run_billing(
                     now=now,
                 )
             connection.commit()
+        except (Refused, UnpriceableCurrency) as refusal:
+            connection.rollback()
+            lines.append(RunLine(payer_id, RunOutcome.REFUSED, str(refusal)))
+            continue
+        except psycopg.errors.CheckViolation as violation:
+            # A constraint checked at COMMIT (migration 0006's subtotal trigger)
+            # or at the statement. Named, never read as "already issued".
+            connection.rollback()
+            lines.append(
+                RunLine(
+                    payer_id,
+                    RunOutcome.CONSTRAINT_VIOLATED,
+                    f"the database refused the invoice on {violation.diag.constraint_name!r}; "
+                    "nothing issued, and this period is NOT known to be invoiced",
+                    reference=reference,
+                )
+            )
+            continue
         except psycopg.errors.UniqueViolation as violation:
             connection.rollback()
             constraint = violation.diag.constraint_name
@@ -268,14 +309,16 @@ def run_billing(
                 )
             continue
 
+        issued = taxed.invoice
         lines.append(
             RunLine(
                 payer_id,
                 RunOutcome.ISSUED,
-                f"{len(invoice.lines)} line(s), total {invoice.total_minor} "
-                f"{invoice.currency} minor",
+                f"{len(issued.lines)} line(s), subtotal {issued.subtotal_minor}, tax "
+                f"{issued.total_minor - issued.subtotal_minor}, total {issued.total_minor} "
+                f"{issued.currency} minor",
                 reference=reference,
-                total_minor=invoice.total_minor,
+                total_minor=issued.total_minor,
             )
         )
 
@@ -296,6 +339,7 @@ def _persist(
     tenant_id: Any,
     invoice: Invoice,
     *,
+    position: TaxPosition,
     reference: str,
     garage_uuid: Any,
     payer_uuid: Any,
@@ -303,8 +347,9 @@ def _persist(
     due_at: datetime,
     now: datetime,
 ) -> Any:
-    """The invoice row and its lines, through the chokepoint, in the caller's
-    transaction."""
+    """The invoice row -- with the tax position that priced it -- and its lines,
+    through the chokepoint, in the caller's transaction. A tax line names no
+    agreement; every other line names the one that priced it."""
     guarded_insert(
         cursor,
         "invoices",
@@ -317,6 +362,9 @@ def _persist(
             "period_start_day": invoice.issued_for_period_start,
             "issued_at": now,
             "due_at": due_at,
+            "subtotal_minor": position.subtotal_minor,
+            "tax_set_effective_from": position.tax_set_effective_from,
+            "tax_sets_seen": position.tax_sets_seen,
         },
     )
     (invoice_uuid,) = cursor.fetchone()
@@ -331,11 +379,14 @@ def _persist(
                 "kind": line.kind.value,
                 "label": line.label,
                 "amount_minor": line.amount_minor,
-                "agreement_id": agreement_uuids[line.agreement_id],
+                "agreement_id": (
+                    None if line.agreement_id is None else agreement_uuids[line.agreement_id]
+                ),
                 "agreement_version": line.agreement_version,
                 "period_start_day": line.period_start_day,
                 "period_end_day": line.period_end_day,
                 "exception_id": line.exception_id,
+                "tax_rule_id": line.tax_rule_id,
             },
         )
     return invoice_uuid

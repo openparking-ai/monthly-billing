@@ -261,17 +261,31 @@ def _registrar_lines() -> list[str]:
 
 def block_worked_example() -> str:
     """Produced by RUNNING the module. No figure here is typed."""
-    from monthly_billing.cli import load_garage_file
+    import json
+
+    from monthly_billing.cli import UNTAXED, load_garage_file
+    from monthly_billing.invoice import first_charge_due_at
+    from monthly_billing.tax import tax_an_invoice
 
     garage = load_garage_file(str(ROOT / "tests" / "documents" / "garage_downtown.json"))
     agreement = load_agreement_file(str(ROOT / "tests" / "documents" / "agreement_acme.json"))
     invoice = first_charge(garage, agreement)
+    sets = json.loads((ROOT / "tests" / "documents" / "tax_sets_downtown.json").read_text())
+    at = first_charge_due_at(garage, agreement)
+    taxed = tax_an_invoice(invoice, sets=sets, at=at)
+    tax_total = taxed.invoice.total_minor - taxed.position.subtotal_minor
 
     lines = [
         "```",
         "$ monthly-billing first-charge --garage tests/documents/garage_downtown.json \\",
         "      --agreement tests/documents/agreement_acme.json",
         invoice.rendered(),
+        UNTAXED,
+        "",
+        "$ monthly-billing first-charge --garage tests/documents/garage_downtown.json \\",
+        "      --agreement tests/documents/agreement_acme.json \\",
+        "      --tax-sets tests/documents/tax_sets_downtown.json",
+        taxed.invoice.rendered(),
         "```",
         "",
         f"The agreement starts {agreement.start_day} and the garage bills on "
@@ -279,6 +293,12 @@ def block_worked_example() -> str:
         f"{invoice.lines[0].period_start_day} to {invoice.lines[0].period_end_day} and "
         f"{invoice.lines[0].label.split('(')[1].rstrip(') ')} of it are billable. "
         f"The part period and the following one are separate lines, never summed.",
+        "",
+        f"Given the garage's tax sets, the whole first charge is taxed ONCE, by "
+        f"`rate-engine`, at {at.isoformat()} -- the start of the first period it pays "
+        f"for -- on its {taxed.position.subtotal_minor} minor-unit subtotal: "
+        f"{len(taxed.invoice.lines) - len(invoice.lines)} tax line(s), one per rule, "
+        f"{tax_total} minor units in all, appended after every priced line.",
     ]
     return "\n".join(lines)
 
@@ -507,10 +527,13 @@ def block_second_month() -> str:
     tz = ZoneInfo(garage.timezone)
     at = lambda d, h=9: datetime(d.year, d.month, d.day, h, 0, tzinfo=tz)  # noqa: E731
 
+    import json
+
+    sets = json.loads((ROOT / "tests" / "documents" / "tax_sets_downtown.json").read_text())
     owner = migrate(dsn)
     app = app_connection(dsn)
     tenant_id = new_tenant(owner, "worked-example")
-    seed(app, tenant_id, garage, (agreement,))
+    seed(app, tenant_id, garage, (agreement,), tax_sets=sets)
     vehicle = agreement.vehicles[0]
 
     # The run that issues the third period -- the first charge owned the first two.
@@ -532,6 +555,9 @@ def block_second_month() -> str:
     fmt = lambda d: d.isoformat()  # noqa: E731
     lines = [
         "```",
+        f"$ monthly-billing state-tax-sets --garage {garage.id} "
+        "--sets tests/documents/tax_sets_downtown.json --stated-by owner",
+        "",
         f"$ monthly-billing run --garage {garage.id} --period-containing {fmt(third)}",
         report.rendered(),
         "",
