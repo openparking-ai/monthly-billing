@@ -10,8 +10,15 @@ before any write, a version whose number is not above the newest it holds; the
 same number again is refused the same way, where it used to reach the driver as
 a raw unique violation.
 
+The number check reads the newest stored version, so two saves at the same
+moment -- v6 not yet committed, v4 arriving -- would both read the same newest
+and both pass. A save therefore takes a transaction-scoped lock on the
+agreement's identity before it reads: the second waits for the first and is
+judged against what it committed.
+
 Controls, each with a plant in ``scripts/fail_controls.py``: the refusal
-removed (the late v3 is stored and CAR2 loses its registration).
+removed (the late v3 is stored and CAR2 loses its registration); the lock
+removed (the v4 saved while v6 is uncommitted is stored too).
 """
 
 from __future__ import annotations
@@ -98,3 +105,90 @@ def test_a_newer_version_still_stores_and_numbers_may_skip(app, tenant_id):
         (1,), (4,), (7,)
     ]
     assert _registered(app, tenant_id) == ["car2"]
+
+
+def _ungranted_lock_of(owner, pid: int) -> str | None:
+    """The kind of lock backend ``pid`` is waiting for, or None."""
+    with owner.cursor() as cursor:
+        cursor.execute(
+            "SELECT locktype FROM pg_locks WHERE pid = %s AND NOT granted LIMIT 1", (pid,)
+        )
+        row = cursor.fetchone()
+    return row[0] if row else None
+
+
+@pytest.mark.guarantee("G59")
+def test_two_saves_at_once_are_put_in_order_and_the_older_is_refused(app, owner, tenant_id):
+    """The race the number check alone cannot see. v3 is the newest stored. One
+    connection stores v6 (CAR1, CAR2) and has not committed; a second stores
+    v4 (CAR1). Both would read v3 as the newest and both pass -- an older
+    version accepted beside a newer one (measured without the lock: versions
+    3, 4 and 6 all stored). The second save waits for the first's transaction
+    instead; once v6 is committed it reads v6 as the newest and is refused by
+    name. The end state is v6's: both cars registered and covered."""
+    import threading
+    import time
+
+    from monthly_billing.store.records import store_agreement as store
+    from store_harness import DSN, app_connection
+
+    seeded = seed(app, tenant_id, GARAGE, (_version(3, "CAR1"),))
+    payer = seeded.payer_uuids[_version(3, "CAR1").payer_id]
+    second_pid: dict[str, int] = {}
+    ready = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def second_save():
+        c = app_connection(DSN)
+        try:
+            second_pid["pid"] = c.info.backend_pid
+            ready.set()
+            with tenant(c, tenant_id) as cursor:
+                store(cursor, tenant_id, GARAGE, seeded.garage_uuid, payer,
+                      _version(4, "CAR1"), now=NOW)
+            c.commit()
+            outcome["second"] = "stored"
+        except Refused as refusal:
+            c.rollback()
+            outcome["second"] = refusal
+        except Exception as exc:  # noqa: BLE001 -- the shape of the failure is the finding
+            c.rollback()
+            outcome["second"] = exc
+        finally:
+            c.close()
+
+    first = app_connection(DSN)
+    worker = threading.Thread(target=second_save)
+    try:
+        with tenant(first, tenant_id) as cursor:
+            store(cursor, tenant_id, GARAGE, seeded.garage_uuid, payer,
+                  _version(6, "CAR1", "CAR2"), now=NOW)
+        # v6 is written and NOT committed. Now the second save starts.
+        worker.start()
+        assert ready.wait(10), "the second connection never opened"
+        waited_on = None
+        deadline = time.monotonic() + 10
+        while worker.is_alive() and time.monotonic() < deadline:
+            waited_on = _ungranted_lock_of(owner, second_pid["pid"])
+            if waited_on:
+                break
+            time.sleep(0.05)
+        still_running = worker.is_alive()
+        first.commit()
+        worker.join(30)
+        assert not worker.is_alive(), "the second save never finished"
+    finally:
+        first.close()
+
+    second = outcome["second"]
+    assert isinstance(second, Refused) and second.code == REFUSAL_VERSION_NOT_NEWER, second
+    assert "version 4" in second.detail and "version 6" in second.detail
+    assert query(app, tenant_id, "SELECT version FROM agreements ORDER BY version") == [
+        (3,), (6,)
+    ]
+    assert _registered(app, tenant_id) == ["car1", "car2"]
+    for car in ("CAR1", "CAR2"):
+        assert covered_from_store(app, tenant_id, GARAGE.id, car, NOW).covered, car
+    # The premise, after the outcome: the second save really overlapped the
+    # first -- it was still waiting, on a lock, while v6 was uncommitted.
+    assert still_running and waited_on == "advisory", (still_running, waited_on)

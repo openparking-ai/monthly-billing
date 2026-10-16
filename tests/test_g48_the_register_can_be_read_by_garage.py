@@ -23,11 +23,14 @@ but G63's days, writes nothing, and sorts in Python by code point.
 Controls, each with a plant in ``scripts/fail_controls.py``: the read given
 its own version rule; a write planted into the read; the garage's tenant
 predicate planted away and the rows' tenant predicate planted away (the policy
-off shows another tenant's garage of the same id); rows read through the
-covered set; a row naming an unknown agreement refusing the whole read; an
-agreement not covering the garage left unnamed; the read routed through
-``load_garage``; the Python sorts removed; a sixth key; the refusal swallowed;
-a line on stderr.
+off shows another tenant's garage of the same id); the exceptions read's
+tenant predicate planted away, the register not handing its tenant to that
+read, and the join to the agreement losing the exception's tenant (the policy
+off hands this tenant another tenant's block and grace extension on an
+agreement of the same id); rows read through the covered set; a row naming an
+unknown agreement refusing the whole read; an agreement not covering the
+garage left unnamed; the read routed through ``load_garage``; the Python sorts
+removed; a sixth key; the refusal swallowed; a line on stderr.
 """
 
 from __future__ import annotations
@@ -47,8 +50,11 @@ from fixtures import (
     multi_garage_agreement,
     outside_registrar_agreement,
 )
-from monthly_billing.agreement import InvalidAgreement, Status
+from monthly_billing.agreement import InvalidAgreement, Pause, Status
+from monthly_billing.billing_run import run_billing
 from monthly_billing.cli import main
+from monthly_billing.exceptions_by_owner import ExceptionKind, OwnerException
+from monthly_billing.exceptions_store import record_agreement_exception
 from monthly_billing.garage import BillingDay, Garage, IdentityRule
 from monthly_billing.localday import UnknownTimezone
 from monthly_billing.store.postgres import tenant
@@ -121,6 +127,16 @@ def store_backed(test):
 
 def _seed(app, tenant_id, *agreements, garages=(HOME, OTHER), now=DAY):
     return seed_garages(app, tenant_id, garages, agreements, now=now)
+
+
+def _issue_unpaid(app, tenant_id):
+    """The home's invoice for the period containing 05-01, issued and left
+    unpaid: due 04-30 (the home bills on the last day of the month)."""
+    report = run_billing(
+        app, tenant_id, HOME.id, date(2026, 5, 1),
+        now=datetime(2026, 4, 30, 0, 30, tzinfo=HOME_TZ),
+    )
+    assert len(report.lines) == 1 and not report.refused, report.rendered()
 
 
 def _register(app, tenant_id, agreement_id, identity, *, now=DAY):
@@ -431,42 +447,88 @@ def test_another_tenants_garage_of_the_same_id_is_not_read_with_the_policy_on_an
     app, owner, tenant_id
 ):
     """Two tenants, the same garage ids and the same agreement id -- the other
-    tenant's at a HIGHER version, with cars of its own. With the row policy
-    ON the app role cannot see them (the control that the policy is doing its
-    job); with it OFF on the four tables the app role sees both tenants' rows,
-    and the read still shows only the tenant it was asked for: its garage's
-    rows, its version 1."""
+    tenant's at a HIGHER version, with cars of its own, a pause, an unpaid
+    invoice, and its owner's BLOCK and ten-day grace extension recorded on
+    that agreement id; and a block of this tenant's hung, raw, on the other
+    tenant's agreement row. With the row policy ON the app role cannot see
+    the other tenant's rows (the control that the policy is doing its job),
+    and the other tenant's own read shows its block and its extended day (the
+    control that those exceptions are real and read). With the policy OFF on
+    the seven tables
+    the read touches, the app role sees both tenants' rows, and the read
+    still shows only the tenant it was asked for: its garage's rows, its
+    version 1, not blocked, and its own first uncovered day -- due 04-30,
+    grace 5, so 05-06, where the other tenant's extension would make it
+    05-16 and its block would make it blocked."""
     other_tenant = new_tenant(owner)
     _seed(app, tenant_id, outside())
     _register(app, tenant_id, OUTSIDE_ID, "MINE-1")
+    _issue_unpaid(app, tenant_id)
     seeded_other = _seed(app, other_tenant, outside())
     _register(app, other_tenant, OUTSIDE_ID, "THEIRS-1")
-    _store(app, other_tenant, seeded_other, outside(version=2))
+    their_pause = (date(2026, 7, 1), date(2026, 7, 10))
+    _store(app, other_tenant, seeded_other, outside(
+        version=2, pauses=(Pause(from_day=their_pause[0], until_day=their_pause[1]),),
+    ))
+    _issue_unpaid(app, other_tenant)
+    for kind, extra in ((ExceptionKind.BLOCK, None), (ExceptionKind.EXTEND_GRACE, 10)):
+        record_agreement_exception(
+            app, other_tenant, seeded_other.agreement_uuids[OUTSIDE_ID], OwnerException(
+                id=f"theirs-{kind.value}", agreement_id=OUTSIDE_ID, invoice_reference=None,
+                kind=kind, recorded_by="their owner", recorded_at=DAY, extra_grace_days=extra,
+            ),
+        )
+    # And a row a system past the module could write: THIS tenant's block,
+    # hung on the OTHER tenant's agreement row (the key is the row's id
+    # alone). The policy never joins it to that agreement, so it blocks
+    # nothing; with the policy off the read's join keeps it that way.
+    _raw(
+        app, tenant_id,
+        "INSERT INTO owner_exceptions (tenant_id, agreement_id, kind, recorded_by, recorded_at) "
+        "VALUES (%s, %s, 'block', 'past the module', %s)",
+        (tenant_id, seeded_other.agreement_uuids[OUTSIDE_ID], DAY),
+    )
     expected = GarageRegister(
         garage=HOME.id, registrations=rows(("m1ne1", OUTSIDE_ID)),
-        agreements=(agreement_entry(OUTSIDE_ID),),
+        agreements=(agreement_entry(OUTSIDE_ID, not_covered_from=date(2026, 5, 6)),),
         agreements_not_covering_garage=(), agreements_not_found=(),
+    )
+    their_entry = agreement_entry(
+        OUTSIDE_ID, version=2, pauses=(their_pause,), blocked=True,
+        not_covered_from=date(2026, 5, 16),
     )
 
     def app_sees():
         garages = query(app, tenant_id, "SELECT count(*) FROM garages WHERE external_id = %s",
                         (HOME.id,))
         rows_ = query(app, tenant_id, "SELECT identity_normalised FROM vehicle_registrations")
-        return garages[0][0], sorted(i for (i,) in rows_)
+        (counts,) = query(
+            app, tenant_id,
+            "SELECT (SELECT count(*) FROM owner_exceptions), (SELECT count(*) FROM invoices), "
+            "(SELECT count(*) FROM agreement_pauses)",
+        )
+        return garages[0][0], sorted(i for (i,) in rows_), counts
 
-    assert app_sees() == (1, ["MINE-1", "m1ne1"])
+    assert app_sees() == (1, ["MINE-1", "m1ne1"], (1, 1, 0))
     assert _read(app, tenant_id) == expected
+    assert _read(app, other_tenant).agreements == (their_entry,)
 
-    tables = ("agreements", "agreement_garages", "garages", "vehicle_registrations")
+    tables = (
+        "agreements", "agreement_garages", "garages", "vehicle_registrations",
+        "owner_exceptions", "invoices", "agreement_pauses",
+    )
     with _row_security_off(owner, tables):
-        count, seen = app_sees()
+        count, seen, (exceptions, invoices, pauses) = app_sees()
         assert count >= 2 and {"THEIRS-1", "the1rs1", "MINE-1", "m1ne1"} <= set(seen)
+        assert exceptions >= 3 and invoices >= 2 and pauses >= 1, (exceptions, invoices, pauses)
         assert _read(app, tenant_id) == expected
-        assert json.loads(_cli(tenant_id, HOME.id)[1])["agreements"][0]["version"] == 1
+        printed = json.loads(_cli(tenant_id, HOME.id)[1])["agreements"][0]
+        assert (printed["version"], printed["blocked"], printed["not_covered_from"]) == (
+            1, False, "2026-05-06")
         theirs = _read(app, other_tenant)
         assert theirs.registrations == rows(("the1rs1", OUTSIDE_ID))
-        assert theirs.agreements == (agreement_entry(OUTSIDE_ID, version=2),)
-    assert app_sees() == (1, ["MINE-1", "m1ne1"])
+        assert theirs.agreements == (their_entry,)
+    assert app_sees() == (1, ["MINE-1", "m1ne1"], (1, 1, 0))
     assert _read(app, tenant_id) == expected
 
 

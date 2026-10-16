@@ -222,10 +222,13 @@ def store_agreement(
     one naming another payer (``REFUSAL_PAYER_CHANGED``), and one that newly
     pauses a day of a period already paid
     (``REFUSAL_PAUSE_OVERLAPS_A_PAID_PERIOD``, G13) -- one validation block,
-    before any write. Every other garage the agreement covers is looked up in
-    the store by its id, and one the store does not hold raises
-    ``GarageNotFound`` -- a covered set naming a garage that does not exist
-    cannot be registered, and inventing the garage is not this module's to do.
+    before any write. Two saves of one agreement are put in order before that
+    block reads anything (G59): the second waits for the first's transaction
+    to end and is judged against what it stored. Every other garage the
+    agreement covers is looked up in the store by its id, and one the store
+    does not hold raises ``GarageNotFound`` -- a covered set naming a garage
+    that does not exist cannot be registered, and inventing the garage is not
+    this module's to do.
 
     A version is never edited -- see migration 0001 -- so a price change is a
     second call with the next version number, and the old row stays to be
@@ -264,6 +267,25 @@ def store_agreement(
     # the home-keyed reads in entitlement_store correct for every state this
     # module can store. No cross-row database backstop exists for this; the
     # contract says so, as it does for G33.
+    #
+    # TWO SAVES OF ONE AGREEMENT ARE PUT IN ORDER FIRST. Every check below reads
+    # the newest stored version, and two saves at the same moment would each
+    # read the same newest and each pass: a v4 accepted next to the v6 being
+    # stored, an older version after a newer one, and every other check below
+    # (home, registrar, payer, paused paid days) judged against a version that
+    # is no longer the newest. The UNIQUE on
+    # (tenant, agreement, version) catches only two saves of the SAME number.
+    # So a save takes a transaction-scoped advisory lock on the agreement's
+    # identity in this tenant before it reads anything: a second save of the
+    # same agreement waits until the first's transaction ends, and its lookup
+    # -- a new statement, so under READ COMMITTED (the driver's default) a new
+    # snapshot -- then reads what the first committed, and is judged by it.
+    # The key is a 64-bit hash of the tenant and the agreement id, so saves of
+    # different agreements do not wait on each other.
+    cursor.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s::text || ':' || %s, 0))",
+        (tenant_id, agreement.id),
+    )
     stored_already = _stored_identity_of(cursor, agreement.id)
     if stored_already is not None:
         home_already, registrar_already, payer_already, newest = stored_already
@@ -1479,7 +1501,12 @@ def _coverage_days(
         (tenant_id, latest.uuid),
     )
     pauses = tuple(sorted(cursor.fetchall()))
-    exceptions = _exceptions_for(cursor, agreement_id, payer_uuid, latest.home_uuid)
+    # The tenant is a predicate of the exceptions read too, as it is of every
+    # other read here: with the policy off, another tenant's block or grace
+    # extension on an agreement of the same id is not this one's (G48).
+    exceptions = _exceptions_for(
+        cursor, agreement_id, payer_uuid, latest.home_uuid, tenant_id=tenant_id
+    )
     cursor.execute(
         "SELECT min(period_start_day) FROM invoices "
         "WHERE tenant_id = %s AND payer_id = %s AND garage_id = %s AND paid_at IS NULL",

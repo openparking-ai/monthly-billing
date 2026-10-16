@@ -2362,6 +2362,34 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "nothing leaks today, and the static census of the read's SQL is what holds the "
         "second predicate the guarantee names -- this plant proves that census can go red",
     ),
+    "G48/exceptions-tenant-predicate": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "entitlement_store.py",
+        "              WHERE %s::uuid IS NULL OR tenant_id = %s) e",
+        "              WHERE %s::uuid IS NULL OR %s::uuid IS NOT NULL) e  -- PLANTED",
+        "the owner's exceptions behind G63's days are read by agreement id alone: with the "
+        "policy off, another tenant's block on an agreement of the same id shows this "
+        "tenant's agreement blocked, and its grace extension moves this tenant's "
+        "not_covered_from",
+    ),
+    "G48/exceptions-tenant-handed-in": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "store/records.py",
+        "        cursor, agreement_id, payer_uuid, latest.home_uuid, tenant_id=tenant_id",
+        "        cursor, agreement_id, payer_uuid, latest.home_uuid,  # PLANTED: no tenant",
+        "the register calls the exceptions read without its tenant, which leaves the policy "
+        "alone to scope it: with the policy off, another tenant's block and grace extension "
+        "on an agreement of the same id reach this tenant's days",
+    ),
+    "G48/exceptions-join-tenant": (
+        "tests/test_g48_the_register_can_be_read_by_garage.py",
+        "entitlement_store.py",
+        "        LEFT JOIN agreements a ON a.id = e.agreement_id AND a.tenant_id = e.tenant_id",
+        "        LEFT JOIN agreements a ON a.id = e.agreement_id  -- PLANTED: any tenant's",
+        "an exception row of this tenant's, hung by a system past the module on another "
+        "tenant's agreement row, is joined to it with the policy off, and blocks this "
+        "tenant's agreement of the same id -- with the policy on it blocks nothing",
+    ),
     "G48/unknown-agreement-dropped": (
         "tests/test_g48_the_register_can_be_read_by_garage.py",
         "store/records.py",
@@ -2678,6 +2706,20 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "        if False:  # PLANTED: any version number is stored",
         "FO-L69 PLANTED BACK: a late v3 is stored after v5, its list rewrites the "
         "registrations, and a car on the newest version loses its registration",
+    ),
+    "G59/race": (
+        "tests/test_g59_a_version_is_newer_than_the_store_holds.py",
+        "store/records.py",
+        source(
+            "    cursor.execute(",
+            '        "SELECT pg_advisory_xact_lock(hashtextextended(%s::text || \':\' || %s, 0))",',
+            "        (tenant_id, agreement.id),",
+            "    )",
+        ),
+        "    pass  # PLANTED: two saves of one agreement are not put in order",
+        "two saves at once each read the same newest version and each pass: a v4 saved "
+        "while v6 is uncommitted is stored too, an older version accepted after a newer "
+        "one",
     ),
     "G60": (
         "tests/test_g60_a_recurring_fee_is_prorated_from_its_own_start.py",
