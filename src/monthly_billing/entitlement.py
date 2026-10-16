@@ -81,9 +81,9 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from .agreement import Agreement, Registrar, Status
+from .agreement import AccessHours, Agreement, Registrar, Status
 from .findings import (
     NOT_COVERED_BLOCKED_BY_OWNER,
     NOT_COVERED_CANCELLED,
@@ -261,8 +261,18 @@ def is_covered(
                 return _not_covered(NOT_COVERED_OUTSIDE_ACCESS_HOURS, **cited)
             unchecked = (CONDITION_ACCESS_HOURS_AT_EXIT,)
         else:
-            entry_local = stay_entered_at.astimezone(tz).timetz().replace(tzinfo=None)
-            if entry_local < hours.entry_from or local > hours.exit_by:
+            # ON DATED TIMES, never on times of day alone: the exit limit is
+            # exit_by on the ENTRY's own local day -- or on the day after it,
+            # when the hours run past midnight (exit_by earlier than
+            # entry_from, the night agreement). Compared as two wall-clock
+            # readings, the rate engine's bounded day span. A time-of-day
+            # compare covered a day agreement's overnight stay and never
+            # covered a night agreement at all.
+            entry_local = stay_entered_at.astimezone(tz).replace(tzinfo=None)
+            exit_local = at.astimezone(tz).replace(tzinfo=None)
+            if entry_local.time() < hours.entry_from or exit_local > _exit_limit(
+                entry_local, hours
+            ):
                 return _not_covered(NOT_COVERED_OUTSIDE_ACCESS_HOURS, **cited)
 
     return Answer(
@@ -280,6 +290,15 @@ def is_covered(
         unchecked=unchecked,
         **cited,
     )
+
+
+def _exit_limit(entry_local: datetime, hours: AccessHours) -> datetime:
+    """The latest local wall-clock reading a stay that entered at
+    ``entry_local`` may leave by: ``exit_by`` on the entry's day, or on the
+    next day when the hours run past midnight. Naive on purpose -- both sides
+    of the compare are local readings of the garage's clock, as the hours are."""
+    span = 1 if hours.exit_by < hours.entry_from else 0
+    return datetime.combine(entry_local.date() + timedelta(days=span), hours.exit_by)
 
 
 def register_of(

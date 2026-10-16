@@ -129,6 +129,13 @@ class AdditionalFee:
 class AccessHours:
     """Entry no earlier than, exit no later than -- local time, both halves stated.
 
+    Read on DATES, with the entry's local day as the anchor: a stay is inside
+    the hours when it enters at or after ``entry_from`` and leaves no later
+    than ``exit_by`` on that same day -- or on the day after it, when
+    ``exit_by`` is earlier than ``entry_from`` and the hours run past midnight
+    (a night agreement, 18:00 to 08:00). A day agreement's overnight stay is
+    outside them. See entitlement.py.
+
     Both are required. An agreement that stated only one half would be silently
     unbounded on the other, and "unbounded" is a thing an operator should have to
     write rather than something they get by omission.

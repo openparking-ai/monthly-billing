@@ -57,9 +57,11 @@ it. It writes nothing and validates nothing it does not return.
 told an agreement id -- a lane refreshing what it decides from: every
 registration row at the garage as the identity stored there and the agreement
 it names, and for every agreement those rows name its latest version's
-registrar, status and cancellation day; an agreement whose latest version no
-longer covers the garage is named, and so is an id the rows name that the store
-holds no version of -- shown, never a refusal of the whole read. Nothing of
+registrar, status and cancellation day, and the days coverage is decided by --
+its start day and pauses, the owner's block, and the first day an unpaid
+invoice is past grace (dates and a flag only: no amount, no invoice, no payer);
+an agreement whose latest version no longer covers the garage is named, and so
+is an id the rows name that the store holds no version of -- shown, never a refusal of the whole read. Nothing of
 where else an agreement answers travels: not its home garage, not its covered
 set. A garage with no rows answers an empty register; a garage the tenant does
 not hold is NOT FOUND.
@@ -162,9 +164,9 @@ The migrations run as the database OWNER, and the owner must be able to SEE
 EVERY ROW -- `BYPASSRLS`, or a superuser. `FORCE` binds the owner too, so an
 owner without it reads zero rows of every table; a migration whose backfill
 reads the rows would then write nothing and count nothing, and pass. `0005`
-checks the running role first and refuses by name, before its `BEGIN`; `0004`
-does not, and `0005` carries its repair forward -- the home row `0004` places
-for every version, inserted for any version that lacks one, and nothing else.
+and `0007` check the running role first and refuse by name, before their
+`BEGIN`; `0004` does not, and `0005` carries its repair forward -- the home row
+`0004` places for every version, inserted for any version that lacks one, and nothing else.
 
 ```
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0001_tenants_agreements_and_rls.sql
@@ -172,6 +174,8 @@ psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0002_billing_run_payments_and_rever
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0003_invoice_lock_attempt_reservation_and_registrations.sql
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0004_agreement_garages.sql
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0005_agreements_registrar.sql
+psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0006_tax_sets_and_invoice_subtotal.sql
+psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0007_identity_folds_o_and_i.sql
 MONTHLY_BILLING_APP_PASSWORD=... python scripts/ensure-app-role.py "$DSN"
 ```
 
@@ -197,9 +201,12 @@ beside the operator's resolution, and a late success the operator did not
 record writes the card payment for the amount reserved.
 **Every money event takes the invoice's row lock first**, so two events on one
 invoice at once are serialised, and **no exception leaves the lock held**. **One
-car, one agreement per garage**, and a refusal writes nothing. **Every garage
-reference is a composite tenant key.** **An agreement is billed at one home
-garage and covers the garages the owner lists** -- coverage is membership of
+car, one agreement per garage**, and a refusal writes nothing. **A new version
+is newer, keeps its payer, and pauses no paid day**: one whose number is not
+above the newest stored, one naming another payer, and one that newly pauses a
+day of a period already paid are each refused by name before anything is
+written. **Every garage reference is a composite tenant key.** **An agreement
+is billed at one home garage and covers the garages the owner lists** -- coverage is membership of
 that set, registrations fan out one row per covered garage under its own
 identity rule, and the unpaid, exception and grace reads follow the home; money
 never leaves it. **One agreement, one registrar**: an agreement states whether

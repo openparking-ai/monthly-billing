@@ -401,7 +401,7 @@ def test_another_tenants_garage_of_the_same_id_is_not_found_with_the_policy_on_a
         code, out, err = _cli(tenant_id, "--agreement", OUTSIDE_ID, "--vehicle", "MINE-1",
                               "--garage", theirs.id)
         assert (code, out) == (2, "") and err.startswith("NOT FOUND — ")
-        assert _rows(app, tenant_id, seeded, home) == [("mine1", OUTSIDE_ID)]
+        assert _rows(app, tenant_id, seeded, home) == [("m1ne1", OUTSIDE_ID)]
         assert _rows(app, tenant_id, seeded, other) == [("MINE-1", OUTSIDE_ID)]
         assert _rows(app, other_tenant, seeded_theirs, theirs) == [("THEIRS-1", OUTSIDE_ID)]
 
@@ -418,7 +418,7 @@ def test_another_tenants_garage_of_the_same_id_is_not_found_with_the_policy_on_a
         assert _release(app, tenant_id, OUTSIDE_ID, "MINE-1", garage_id=other.id) == entries(
             (other.id, "MINE-1")
         )
-        assert _rows(app, tenant_id, seeded, home) == [("mine1", OUTSIDE_ID)]
+        assert _rows(app, tenant_id, seeded, home) == [("m1ne1", OUTSIDE_ID)]
         assert _rows(app, tenant_id, seeded, other) == []
         assert _rows(app, other_tenant, seeded_theirs, theirs) == [("THEIRS-1", OUTSIDE_ID)]
     # Restored.

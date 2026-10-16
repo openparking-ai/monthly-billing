@@ -2655,6 +2655,118 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "a card-shaped value inside a jsonb rule reaches the database, because the chokepoint "
         "scans only plain strings",
     ),
+    "G13/store": (
+        "tests/test_g13_a_pause_over_a_paid_period_refuses.py",
+        "store/records.py",
+        "        _refuse_new_pause_days_over_paid_periods(cursor, garage, agreement, newest.uuid)",
+        "        pass  # PLANTED: the store never asks whether a period was paid",
+        "FO-M18 PLANTED BACK: a version pausing a month already paid is stored without a "
+        "word, and the car reads PAUSED on days somebody paid for",
+    ),
+    "G58": (
+        "tests/test_g58_a_payer_never_changes.py",
+        "store/records.py",
+        "        if payer_already != payer_uuid:",
+        "        if False:  # PLANTED: the payer may change",
+        "FO-M16 PLANTED BACK: a version naming another payer is stored, a re-run invoices "
+        "May again to the new payer, and the old payer's unpaid May stops counting",
+    ),
+    "G59": (
+        "tests/test_g59_a_version_is_newer_than_the_store_holds.py",
+        "store/records.py",
+        "        if agreement.version <= newest.version:",
+        "        if False:  # PLANTED: any version number is stored",
+        "FO-L69 PLANTED BACK: a late v3 is stored after v5, its list rewrites the "
+        "registrations, and a car on the newest version loses its registration",
+    ),
+    "G60": (
+        "tests/test_g60_a_recurring_fee_is_prorated_from_its_own_start.py",
+        "invoice.py",
+        "            else billable_days(agreement, period, since=fee.effective_from)",
+        "            else days  # PLANTED: the agreement's days, not the fee's",
+        "FO-M17(a) PLANTED BACK: a fee starting on the 20th is billed for the whole month",
+    ),
+    "G61/time-of-day": (
+        "tests/test_g61_access_hours_are_judged_on_dated_times.py",
+        "entitlement.py",
+        source(
+            "            if entry_local.time() < hours.entry_from or exit_local > _exit_limit(",
+            "                entry_local, hours",
+            "            ):",
+        ),
+        "            if entry_local.time() < hours.entry_from or exit_local.time() > "
+        "hours.exit_by:  # PLANTED: times of day, no date",
+        "FO-M19 PLANTED BACK: the exit is compared as a time of day, so a day agreement "
+        "covers an overnight stay and a night agreement covers nothing",
+    ),
+    "G61/next-day": (
+        "tests/test_g61_access_hours_are_judged_on_dated_times.py",
+        "entitlement.py",
+        "    span = 1 if hours.exit_by < hours.entry_from else 0",
+        "    span = 0  # PLANTED: the hours never run past midnight",
+        "the exit limit always falls on the entry's own day, so a night agreement covers "
+        "only a stay that leaves before midnight",
+    ),
+    "G62/fold": (
+        "tests/test_g62_the_fold_reads_o_as_0_and_i_as_1.py",
+        "garage.py",
+        source(
+            '            normalised = "".join(c for c in identity.lower() if c.isalnum())'
+            ".translate(",
+            "                _READER_FOLD",
+            "            )",
+        ),
+        '            normalised = "".join(c for c in identity.lower() if c.isalnum())  # PLANTED',
+        "FO-M22 PLANTED BACK: the folded rule ignores only case and punctuation, so GO4IT "
+        "never matches the reader's G041T",
+    ),
+    "G62/collision-check": (
+        "tests/test_g62_the_fold_reads_o_as_0_and_i_as_1.py",
+        "migrations/0007_identity_folds_o_and_i.sql",
+        source("  HAVING count(*) > 1", "   ORDER BY 1, 2, 3", "   LIMIT 1;"),
+        source("  HAVING false  -- PLANTED: no collision is looked for", "   ORDER BY 1, 2, 3",
+               "   LIMIT 1;"),
+        "two registrations the fold makes one reach the re-key, which then dies on the "
+        "table's UNIQUE with a driver error instead of being refused by name",
+    ),
+    "G62/rekey": (
+        "tests/test_g62_the_fold_reads_o_as_0_and_i_as_1.py",
+        "migrations/0007_identity_folds_o_and_i.sql",
+        "\n   AND r.identity_normalised ~ '[oi]';",
+        "\n   AND false;  -- PLANTED: the registrations are not re-keyed",
+        "the stored registrations keep the old form, so the stored GO4IT never matches the "
+        "read; the file's own count check is what fails it",
+    ),
+    "G63/unpaid": (
+        "tests/test_g63_the_register_carries_the_coverage_days.py",
+        "store/records.py",
+        "        not_covered_from = due_day + timedelta(days=grace + 1)",
+        "        not_covered_from = None  # PLANTED: the unpaid day is never published",
+        "FO-M4 PLANTED BACK: the register carries no unpaid day, so a lane reading it covers "
+        "the unpaid-past-grace holder the module answers NOT COVERED",
+    ),
+    "G63/extensions": (
+        "tests/test_g63_the_register_carries_the_coverage_days.py",
+        "store/records.py",
+        "        grace = applied_grace_days(base_grace, exceptions)",
+        "        grace = base_grace  # PLANTED: the owner's extensions not counted",
+        "the register's unpaid day ignores the owner's grace extensions, so a lane charges a "
+        "holder the module still covers",
+    ),
+    "G63/block": (
+        "tests/test_g63_the_register_carries_the_coverage_days.py",
+        "store/records.py",
+        '        "blocked": is_blocked(exceptions),',
+        '        "blocked": False,  # PLANTED: the owner\'s block is not read',
+        "the register says no agreement is blocked, so a lane covers a holder the owner blocked",
+    ),
+    "G63/pauses": (
+        "tests/test_g63_the_register_carries_the_coverage_days.py",
+        "store/records.py",
+        "    pauses = tuple(sorted(cursor.fetchall()))",
+        "    pauses = ()  # PLANTED: the version's pauses are not read",
+        "the register carries no pause, so a lane covers a paused holder",
+    ),
 }
 
 

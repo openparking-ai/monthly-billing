@@ -375,7 +375,7 @@ def test_another_tenants_agreement_of_the_same_id_is_not_shown_with_the_policy_o
     expected = AgreementRegister(
         agreement=OUTSIDE_ID, version=1, registrar="outside", status="active",
         cancelled_effective_day=None, home_garage=HOME.id, covered_garages=(OTHER.id, HOME.id),
-        registrations=entries((OTHER.id, "MINE-1"), (HOME.id, "mine1")), garages_not_covered=(),
+        registrations=entries((OTHER.id, "MINE-1"), (HOME.id, "m1ne1")), garages_not_covered=(),
     )
 
     def app_sees():
@@ -386,7 +386,7 @@ def test_another_tenants_agreement_of_the_same_id_is_not_shown_with_the_policy_o
         return sorted(v for (v,) in versions), sorted(i for (i,) in rows)
 
     # ON: the policy hides the other tenant, and the read agrees with it.
-    assert app_sees() == ([1], ["MINE-1", "mine1"])
+    assert app_sees() == ([1], ["MINE-1", "m1ne1"])
     assert _read(app, tenant_id) == expected
 
     tables = ("agreements", "agreement_garages", "garages", "vehicle_registrations")
@@ -394,17 +394,17 @@ def test_another_tenants_agreement_of_the_same_id_is_not_shown_with_the_policy_o
         # OFF: the premise -- the app role now sees the other tenant's rows
         # too (and every earlier test's tenant in this module's database).
         versions, rows = app_sees()
-        assert 2 in versions and {"THEIRS-1", "theirs1", "MINE-1", "mine1"} <= set(rows)
+        assert 2 in versions and {"THEIRS-1", "the1rs1", "MINE-1", "m1ne1"} <= set(rows)
         # And the read is still the tenant's own: version 1, its rows, not
         # the other tenant's version 2 that ``LIMIT 1`` would otherwise pick.
         assert _read(app, tenant_id) == expected
         assert json.loads(_cli(tenant_id, OUTSIDE_ID)[1])["version"] == 1
         assert _read(app, other_tenant).version == 2
         assert _read(app, other_tenant).registrations == entries(
-            (OTHER.id, "THEIRS-1"), (HOME.id, "theirs1")
+            (OTHER.id, "THEIRS-1"), (HOME.id, "the1rs1")
         )
     # Restored: the policy hides the other tenant again.
-    assert app_sees() == ([1], ["MINE-1", "mine1"])
+    assert app_sees() == ([1], ["MINE-1", "m1ne1"])
     assert _read(app, tenant_id) == expected
 
 

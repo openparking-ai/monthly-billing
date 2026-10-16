@@ -79,6 +79,8 @@ REFUSAL_NO_TAX_SET_IN_FORCE = "REFUSAL_NO_TAX_SET_IN_FORCE"
 REFUSAL_TAX_SETS_INVALID = "REFUSAL_TAX_SETS_INVALID"
 REFUSAL_TAX_NEEDS_THE_ENGINE = "REFUSAL_TAX_NEEDS_THE_ENGINE"
 REFUSAL_INVOICE_ALREADY_TAXED = "REFUSAL_INVOICE_ALREADY_TAXED"
+REFUSAL_PAYER_CHANGED = "REFUSAL_PAYER_CHANGED"
+REFUSAL_VERSION_NOT_NEWER = "REFUSAL_VERSION_NOT_NEWER"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -244,6 +246,26 @@ REFUSALS: dict[str, str] = {
         "other one. It is refused by name rather than stored -- as a version that "
         "would move the home is -- and a different registrar is a different "
         "agreement."
+    ),
+    REFUSAL_PAYER_CHANGED: (
+        "This version names a different payer from the versions the store already "
+        "holds for the same agreement. The invoice, the one-invoice-per-period lock, "
+        "the unpaid check at the barrier and the charge's mandate are all the "
+        "payer's, so a version that changed it would let a period already invoiced "
+        "to the old payer be invoiced again to the new one, an unpaid invoice of the "
+        "old payer stop counting, and the old payer's invoice be charged under the "
+        "new payer's mandate. Handing an agreement to another payer is an operation "
+        "nobody designed; it is refused by name rather than stored -- as a version "
+        "that would move the home is -- and a different payer is a different "
+        "agreement."
+    ),
+    REFUSAL_VERSION_NOT_NEWER: (
+        "This version's number is not higher than the newest version the store "
+        "already holds for the same agreement. A version is never edited, and the "
+        "newest one is what the barrier, the run and the register read -- storing "
+        "an older one late, or a retried one again, would rewrite the garage's "
+        "registered cars to that older list while the newest version still says "
+        "otherwise. Refused by name; a change is the next version number."
     ),
     REFUSAL_REGISTRATIONS_NOT_GIVEN: (
         "The coverage question was asked about an agreement whose registrar is "
