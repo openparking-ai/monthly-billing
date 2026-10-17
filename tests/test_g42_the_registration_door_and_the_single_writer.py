@@ -404,7 +404,7 @@ def test_the_version_paths_writer_refuses_an_outside_registrars_agreement_by_nam
     seeded = _seed(app, tenant_id, outside())
     _register(app, tenant_id, OUTSIDE_ID, "DOOR-1")
     before = (_rows(app, tenant_id, seeded, HOME), _rows(app, tenant_id, seeded, OTHER))
-    assert before == ([("door1", OUTSIDE_ID)], [("DOOR-1", OUTSIDE_ID)])
+    assert before == ([("d00r1", OUTSIDE_ID)], [("DOOR-1", OUTSIDE_ID)])
     with tenant(app, tenant_id) as cursor:
         covered = covered_garages_of(
             cursor, outside(), home=StoredGarage(seeded.garage_uuids[HOME.id], HOME)

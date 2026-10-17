@@ -116,17 +116,27 @@ def next_period_after(garage: Garage, period: BillingPeriod) -> BillingPeriod:
 # --------------------------------------------------------------------------
 
 
-def billable_days(agreement: Agreement, period: BillingPeriod) -> int:
+def billable_days(
+    agreement: Agreement, period: BillingPeriod, *, since: date | None = None
+) -> int:
     """How many days of ``period`` this agreement is live and unpaused for.
 
     Three things remove a day, and they are counted TOGETHER rather than in
     sequence so that a day both before the start and inside a pause is removed
     once. Counting them separately is how a period ends up with negative days.
+
+    ``since`` removes the days before it as well: a recurring fee that starts
+    inside the period is billed for the agreement's days from its own start,
+    which is how "prorated exactly as the monthly price is" reads for it.
     """
     count = 0
     day = period.start_day
     while day < period.end_day:
-        if day >= agreement.start_day and not agreement.is_paused_on(day):
+        if (
+            day >= agreement.start_day
+            and (since is None or day >= since)
+            and not agreement.is_paused_on(day)
+        ):
             if (
                 agreement.cancelled_effective_day is None
                 or day < agreement.cancelled_effective_day

@@ -174,7 +174,12 @@ def _earliest_unpaid_due_at(cursor: Any, payer_uuid: Any, garage_uuid: Any) -> d
 
 
 def _exceptions_for(
-    cursor: Any, agreement_external_id: str, payer_uuid: Any, garage_uuid: Any
+    cursor: Any,
+    agreement_external_id: str,
+    payer_uuid: Any,
+    garage_uuid: Any,
+    *,
+    tenant_id: Any = None,
 ) -> tuple[OwnerException, ...]:
     """The exceptions on the agreement, plus those on the payer's unpaid invoices
     at the agreement's HOME garage -- the two places a grace extension or a block
@@ -187,7 +192,25 @@ def _exceptions_for(
     The engine's ``OwnerException.agreement_id`` is the external id for the same
     reason. A control plants the read back onto one version's row and requires
     red.
+
+    **``tenant_id``, WHEN GIVEN, IS A PREDICATE OF THE READ'S OWN.** An external
+    id is unique per tenant, not across tenants, so with the row policy off --
+    the owner's DSN, or a role with BYPASSRLS -- "the exceptions on agreement
+    ag-x" is every tenant's ag-x. The garage register (G48, G63) passes its
+    tenant, so another tenant's block or grace extension on an agreement of the
+    same id never reaches its days: the exception row is the tenant's. The
+    agreement it hangs on is joined only within the exception's own tenant --
+    a row written past the module that hangs one tenant's exception on another
+    tenant's agreement is matched by neither, as the policy would have it. An
+    invoice is matched by the payer's and the home's own uuids, which no other
+    tenant's invoice carries. Left unset, the policy alone scopes which
+    exception rows are read, as it always has for ``covered_from_store``;
+    under the policy the join's tenant changes nothing, because another
+    tenant's agreement is not visible to join. Controls plant away the tenant
+    predicate, the tenant the register hands in, and the join's tenant, and
+    require red.
     """
+    tenant_id = None if tenant_id is None else as_uuid(tenant_id)
     # A block or an unblock on an invoice is read whatever the invoice's paid
     # state: a block the owner recorded is lifted by an unblock the owner
     # records, never by a cheque. A grace extension on an invoice is read only
@@ -196,15 +219,16 @@ def _exceptions_for(
         """
         SELECT e.id, a.external_id, i.reference, e.kind, e.recorded_by, e.recorded_at,
                e.note, e.amount_minor, e.extra_grace_days
-        FROM owner_exceptions e
-        LEFT JOIN agreements a ON a.id = e.agreement_id
+        FROM (SELECT * FROM owner_exceptions
+              WHERE %s::uuid IS NULL OR tenant_id = %s) e
+        LEFT JOIN agreements a ON a.id = e.agreement_id AND a.tenant_id = e.tenant_id
         LEFT JOIN invoices i ON i.id = e.invoice_id
         WHERE a.external_id = %s
            OR (i.payer_id = %s AND i.garage_id = %s
                AND (i.paid_at IS NULL OR e.kind IN ('block', 'unblock')))
         ORDER BY e.recorded_at
         """,
-        (agreement_external_id, payer_uuid, garage_uuid),
+        (tenant_id, tenant_id, agreement_external_id, payer_uuid, garage_uuid),
     )
     out = []
     for row in cursor.fetchall():

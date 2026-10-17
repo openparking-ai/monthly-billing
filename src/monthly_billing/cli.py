@@ -66,7 +66,9 @@ agreement the store does not hold is NOT FOUND, exit 2.
 was never told an agreement id -- a lane refreshing what it decides from:
 every registration row at the garage as the identity stored there and the
 agreement it names, and for every agreement those rows name its latest
-version's registrar, status and cancellation day; the agreements whose latest
+version's registrar, status and cancellation day, and the days coverage is
+decided by (start day, pauses, the owner's block, the first day an unpaid
+invoice is past grace -- G63); the agreements whose latest
 version does not cover the garage, and the ids the rows name that the store
 holds no version of, are each named. The same rules as ``show-register``:
 JSON with sorted keys on stdout, exit 0; it writes nothing, takes no instant

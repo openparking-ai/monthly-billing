@@ -148,7 +148,10 @@ def _fee_lines(
     """The additional fee lines falling in ``period``.
 
     **A RECURRING FEE IS PRORATED EXACTLY AS THE MONTHLY PRICE IS.** It is part of
-    what the account pays every month, so a half month of it is half of it. A
+    what the account pays every month, so a half month of it is half of it --
+    and a fee that STARTS inside the period is billed from its own start, the
+    later of its ``effective_from`` and the period's first day, never for the
+    days before it existed. A
     ONE-TIME fee is not prorated -- it is a thing that happened once, on a day --
     and it lands on the invoice for the period containing its effective date.
     Neither of these was settled by the specification; both are stated here
@@ -160,13 +163,17 @@ def _fee_lines(
     for fee in agreement.recurring_fees():
         if fee.effective_from >= period.end_day:
             continue
-        amount = (
-            prorate(fee.amount_minor, days, period.days) if prorated else fee.amount_minor
+        fee_days = (
+            days
+            if fee.effective_from <= period.start_day
+            else billable_days(agreement, period, since=fee.effective_from)
         )
+        part = prorated or fee_days != period.days
+        amount = prorate(fee.amount_minor, fee_days, period.days) if part else fee.amount_minor
         lines.append(
             InvoiceLine(
                 kind=LineKind.RECURRING_FEE,
-                label=f"{fee.label} ({'part month' if prorated else 'monthly'})",
+                label=f"{fee.label} ({'part month' if part else 'monthly'})",
                 amount_minor=amount,
                 agreement_id=agreement.id,
                 agreement_version=agreement.version,
