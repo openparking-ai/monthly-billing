@@ -183,7 +183,8 @@ MONTHLY_BILLING_APP_PASSWORD=... python scripts/ensure-app-role.py "$DSN"
 per tenant, garage, payer and period; a second run of the same period issues
 nothing, re-prices nothing, and says so per payer. **Paid is derived, never set
 by hand**: an invoice is paid when its unreversed payments reach its total, and
-that is re-derived after a payment, a reversal, or an owner's adjustment. A
+that is derived at issue -- an invoice that owes nothing is paid from then --
+and re-derived after a payment, a reversal, or an owner's adjustment. A
 reversal reopens the invoice from its ORIGINAL due date. **Payments, reversals
 and charge attempts are append-only by grant** — the application role has no
 `UPDATE` and no `DELETE` on them — and the charge log is the truth for retries:

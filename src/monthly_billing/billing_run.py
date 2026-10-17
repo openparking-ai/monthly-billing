@@ -9,11 +9,17 @@ once, and then it would issue twice and remember once. The refusal is read BY
 CONSTRAINT NAME: only the period lock means "already issued"; any other unique
 violation is reported as what it is, because "this period was already invoiced"
 said about a reference collision is a false sentence in a report somebody acts on.
+And a payer the run cannot price again TODAY -- no tax set in force at the due
+instant, as for an invoice issued before migration 0006, or no engine -- is not
+refused for a period already invoiced: the same fact is read back after the
+refusal, and a period with its row is ALREADY_ISSUED. A re-run must give the
+first run's answer, and "refused" about an invoiced period is not that answer.
 
 **ONE TRANSACTION PER PAYER.** A payer's invoice and its lines land together or
 not at all, and one payer's refusal -- a currency the module will not price, an
-agreement at the wrong garage -- does not stop the payer after it. Every payer
-gets a line in the report and the command exits non-zero if any was refused.
+agreement at the wrong garage, a row the instrument guard refuses -- does not
+stop the payer after it. Every payer gets a line in the report and the command
+exits non-zero if any was refused.
 
 **A PERIOD IS OWNED BY EXACTLY ONE OF ``first_charge`` AND THIS RUN.** The first
 charge, taken on the binding day, covers the period containing the agreement's
@@ -47,7 +53,18 @@ issued lines at commit (migration 0006).
 **THE REFERENCE IS DERIVED, SO THE SAME INVOICE ALWAYS GETS THE SAME ONE.**
 Garage, period and payer -- the same three things the UNIQUE constraint holds --
 so ``UNIQUE (tenant_id, reference)`` from migration 0001 is a second lock on the
-same fact rather than a different one.
+same fact rather than a different one. The instrument guard scans it like every
+column and is not loosened for it: a garage id ending in nine digits that pass
+the routing checksum makes every reference at that garage read as a routing
+number followed by an account number, so the guard refuses each of its payers'
+invoices, and each is that payer's REFUSED line -- not a stop of the run.
+
+**A ZERO TOTAL IS PAID AT ISSUE.** Paid is derived (payments.py), and the issue
+is where it is first true for an invoice that owes nothing: ``_persist`` derives
+``paid_at`` in the transaction that writes the invoice, so a comped agreement's
+invoice is paid from its issue instant rather than unpaid for ever -- a payment
+of nothing and a waiver of nothing are both refused, so nothing else could pay
+it. Any other total is unpaid at issue and the derivation writes nothing.
 """
 
 from __future__ import annotations
@@ -64,6 +81,8 @@ from .findings import Refused
 from .garage import Garage
 from .invoice import Invoice, invoice_for_period
 from .money import NotMinorUnits
+from .payments import rederive_paid_at
+from .sensitive import InstrumentLike
 from .store.postgres import tenant
 from .store.records import (
     GarageNotFound,
@@ -105,16 +124,19 @@ RUN_OUTCOME_MEANS: dict[RunOutcome, str] = {
     RunOutcome.ISSUED: "The invoice and its lines were written, in one transaction.",
     RunOutcome.ALREADY_ISSUED: (
         "This period was already invoiced for this payer. Nothing was issued and "
-        "nothing was re-priced; the database refused the duplicate and the run reports it."
+        "nothing was re-priced; the database refused the duplicate, or -- when the "
+        "period could not be priced again today, as with no tax set in force at its "
+        "due instant -- the run read the period's row and reports it, not a refusal."
     ),
     RunOutcome.NOTHING_BILLABLE: (
         "No agreement of this payer's has a billable day in the period -- paused, "
         "cancelled, not started, or owned by the first charge -- so no invoice exists."
     ),
     RunOutcome.REFUSED: (
-        "The module could not price this payer and says why -- among the reasons, "
-        "no tax set in force at the invoice's due instant, which is never taxed at "
-        "zero. The payers after it were still processed; the command exits non-zero."
+        "The module could not price or store this payer's invoice and says why -- "
+        "among the reasons, no tax set in force at the invoice's due instant, which "
+        "is never taxed at zero, and a row the instrument guard refuses. The payers "
+        "after it were still processed; the command exits non-zero."
     ),
     RunOutcome.CONSTRAINT_VIOLATED: (
         "The database refused this payer's invoice on a constraint OTHER than the "
@@ -259,9 +281,26 @@ def run_billing(
                     now=now,
                 )
             connection.commit()
-        except (Refused, UnpriceableCurrency) as refusal:
+        except (Refused, UnpriceableCurrency, InstrumentLike) as refusal:
             connection.rollback()
-            lines.append(RunLine(payer_id, RunOutcome.REFUSED, str(refusal)))
+            # Nothing was written. A period already invoiced is not refused
+            # because it cannot be priced again today: nothing was to be issued
+            # and nothing re-priced. The period lock's own fact, read back as
+            # the unique-violation path below reads it.
+            with tenant(connection, tenant_id) as cursor:
+                invoiced = _period_is_issued(cursor, stored.uuid, payer_uuid, period.start_day)
+            connection.rollback()
+            if invoiced:
+                lines.append(
+                    RunLine(
+                        payer_id,
+                        RunOutcome.ALREADY_ISSUED,
+                        "this period was already invoiced; nothing issued and nothing re-priced",
+                        reference=reference,
+                    )
+                )
+            else:
+                lines.append(RunLine(payer_id, RunOutcome.REFUSED, str(refusal)))
             continue
         except psycopg.errors.CheckViolation as violation:
             # A constraint checked at COMMIT (migration 0006's subtotal trigger)
@@ -349,7 +388,8 @@ def _persist(
 ) -> Any:
     """The invoice row -- with the tax position that priced it -- and its lines,
     through the chokepoint, in the caller's transaction. A tax line names no
-    agreement; every other line names the one that priced it."""
+    agreement; every other line names the one that priced it. Then ``paid_at``,
+    derived: a zero total is paid at issue (see the module docstring)."""
     guarded_insert(
         cursor,
         "invoices",
@@ -389,4 +429,5 @@ def _persist(
                 "tax_rule_id": line.tax_rule_id,
             },
         )
+    rederive_paid_at(cursor, invoice_uuid, now)
     return invoice_uuid
