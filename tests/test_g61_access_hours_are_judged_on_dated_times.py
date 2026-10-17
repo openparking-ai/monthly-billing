@@ -3,11 +3,13 @@
 Access hours are entry no earlier than, exit no later than. The exit check
 compared two times of day with no date, so a day agreement (07:00 to 18:00)
 covered a stay from Monday 08:00 to Wednesday 10:00, and one from Friday 19:30
-to Saturday 09:00 -- wholly outside its hours -- while a night agreement
-(18:00 to 08:00) covered nothing at all: 19:00 to 21:00 was "after 08:00". The
-exit limit is now ``exit_by`` on the ENTRY's local day, or on the day after it
-when the hours run past midnight -- the rate engine's bounded day span, on the
-garage's wall clock. At entry, with no exit known, nothing changes.
+to Saturday 09:00 -- wholly outside its hours. A night agreement (18:00 to
+08:00) refused a stay that left the same evening -- 19:00 to 21:00 was "after
+08:00" -- and covered one that ran two nights, Monday 19:00 to Wednesday 07:00.
+It covered an evening entry with a morning exit, and still does. The exit limit
+is now ``exit_by`` on the ENTRY's local day, or on the day after it when the
+hours run past midnight -- the rate engine's bounded day span, on the garage's
+wall clock. At entry, with no exit known, nothing changes.
 
 Controls, each with a plant in ``scripts/fail_controls.py``: the time-of-day
 compare planted back; the next-day span removed.

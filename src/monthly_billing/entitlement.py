@@ -266,8 +266,10 @@ def is_covered(
             # when the hours run past midnight (exit_by earlier than
             # entry_from, the night agreement). Compared as two wall-clock
             # readings, the rate engine's bounded day span. A time-of-day
-            # compare covered a day agreement's overnight stay and never
-            # covered a night agreement at all.
+            # compare covered a day agreement's overnight and multi-day stays;
+            # for a night agreement it refused a stay that left the same
+            # evening (19:00 to 21:00 was "after 08:00") and covered one that
+            # ran two nights (19:00 Monday to 07:00 Wednesday).
             entry_local = stay_entered_at.astimezone(tz).replace(tzinfo=None)
             exit_local = at.astimezone(tz).replace(tzinfo=None)
             if entry_local.time() < hours.entry_from or exit_local > _exit_limit(

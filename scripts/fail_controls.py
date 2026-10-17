@@ -2739,15 +2739,16 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "            if entry_local.time() < hours.entry_from or exit_local.time() > "
         "hours.exit_by:  # PLANTED: times of day, no date",
         "FO-M19 PLANTED BACK: the exit is compared as a time of day, so a day agreement "
-        "covers an overnight stay and a night agreement covers nothing",
+        "covers an overnight stay, and a night agreement refuses a stay that leaves the "
+        "same evening and covers one that runs two nights",
     ),
     "G61/next-day": (
         "tests/test_g61_access_hours_are_judged_on_dated_times.py",
         "entitlement.py",
         "    span = 1 if hours.exit_by < hours.entry_from else 0",
         "    span = 0  # PLANTED: the hours never run past midnight",
-        "the exit limit always falls on the entry's own day, so a night agreement covers "
-        "only a stay that leaves before midnight",
+        "the exit limit always falls on the entry's own day, at exit_by, before any "
+        "entry the night agreement allows, so a night agreement covers nothing",
     ),
     "G62/fold": (
         "tests/test_g62_the_fold_reads_o_as_0_and_i_as_1.py",
