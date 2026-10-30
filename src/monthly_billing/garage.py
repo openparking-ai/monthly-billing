@@ -65,9 +65,20 @@ class IdentityRule(Enum):
 
     #: Byte-for-byte. Nothing is normalised away.
     EXACT = "exact"
-    #: Case-folded, and every character that is not a letter or a digit removed.
-    #: "ABC-123", "abc 123" and "abc123" are then one identity.
+    #: Case-folded, every character that is not a letter or a digit removed, and
+    #: the letter O read as the digit 0 and the letter I as the digit 1.
+    #: "ABC-123", "abc 123" and "abc123" are then one identity, and so are
+    #: "GO4IT" and "G041T": the plate reader's alphabet has no I and no O, so
+    #: it reads those letters as 1 and 0, and a registered plate that kept them
+    #: would never match its own car.
     FOLDED_ALPHANUMERIC = "folded_alphanumeric"
+
+
+#: The two letters the plate reader cannot output, read as the digits it does.
+#: Applied after case folding, so lower case only. The same fold on both sides
+#: -- the identity written down and the one presented -- is what makes it a
+#: comparison rather than a guess. Migration 0007 re-keys the stored forms.
+_READER_FOLD = str.maketrans({"o": "0", "i": "1"})
 
 
 @dataclass(frozen=True)
@@ -192,7 +203,9 @@ class Garage:
         if self.identity_rule is IdentityRule.EXACT:
             normalised = identity
         else:
-            normalised = "".join(c for c in identity.lower() if c.isalnum())
+            normalised = "".join(c for c in identity.lower() if c.isalnum()).translate(
+                _READER_FOLD
+            )
         if not normalised.strip():
             raise ValueError(
                 f"the identity {identity!r} normalises to nothing under this garage's "

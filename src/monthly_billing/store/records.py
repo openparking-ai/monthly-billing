@@ -110,7 +110,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -124,20 +124,23 @@ from ..agreement import (
     Registrar,
     Status,
 )
+from ..cycle import BillingPeriod, refuse_pause_over_a_paid_period
 from ..findings import (
     REFUSAL_AGREEMENT_HOME_MOVED,
     REFUSAL_GARAGE_MISMATCH,
     REFUSAL_GARAGE_NOT_COVERED,
+    REFUSAL_PAYER_CHANGED,
     REFUSAL_REGISTRAR_CHANGED,
     REFUSAL_REGISTRAR_IS_OUTSIDE,
     REFUSAL_REGISTRAR_IS_THIS_MODULE,
     REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES,
     REFUSAL_VEHICLE_ALREADY_REGISTERED,
     REFUSAL_VEHICLE_NOT_REGISTERED,
+    REFUSAL_VERSION_NOT_NEWER,
     Refused,
 )
 from ..garage import BillingDay, Garage, IdentityRule
-from ..localday import day_of, zone
+from ..localday import day_of, day_start, zone
 from .writes import as_uuid, guarded_insert, guarded_update
 
 
@@ -214,10 +217,18 @@ def store_agreement(
     is billed at, and the one ``agreement.garage_id`` names; a mismatch is
     refused before anything is written, and so is a version whose home differs
     from the versions already stored for the same agreement: THE HOME NEVER
-    MOVES (``REFUSAL_AGREEMENT_HOME_MOVED``). Every other garage the agreement covers
-    is looked up in the store by its id, and one the store does not hold raises
-    ``GarageNotFound`` -- a covered set naming a garage that does not exist
-    cannot be registered, and inventing the garage is not this module's to do.
+    MOVES (``REFUSAL_AGREEMENT_HOME_MOVED``). So, in this order, is a version
+    whose number is not above the newest stored (``REFUSAL_VERSION_NOT_NEWER``),
+    one naming another payer (``REFUSAL_PAYER_CHANGED``), and one that newly
+    pauses a day of a period already paid
+    (``REFUSAL_PAUSE_OVERLAPS_A_PAID_PERIOD``, G13) -- one validation block,
+    before any write. Two saves of one agreement are put in order before that
+    block reads anything (G59): the second waits for the first's transaction
+    to end and is judged against what it stored. Every other garage the
+    agreement covers is looked up in the store by its id, and one the store
+    does not hold raises ``GarageNotFound`` -- a covered set naming a garage
+    that does not exist cannot be registered, and inventing the garage is not
+    this module's to do.
 
     A version is never edited -- see migration 0001 -- so a price change is a
     second call with the next version number, and the old row stays to be
@@ -256,9 +267,28 @@ def store_agreement(
     # the home-keyed reads in entitlement_store correct for every state this
     # module can store. No cross-row database backstop exists for this; the
     # contract says so, as it does for G33.
+    #
+    # TWO SAVES OF ONE AGREEMENT ARE PUT IN ORDER FIRST. Every check below reads
+    # the newest stored version, and two saves at the same moment would each
+    # read the same newest and each pass: a v4 accepted next to the v6 being
+    # stored, an older version after a newer one, and every other check below
+    # (home, registrar, payer, paused paid days) judged against a version that
+    # is no longer the newest. The UNIQUE on
+    # (tenant, agreement, version) catches only two saves of the SAME number.
+    # So a save takes a transaction-scoped advisory lock on the agreement's
+    # identity in this tenant before it reads anything: a second save of the
+    # same agreement waits until the first's transaction ends, and its lookup
+    # -- a new statement, so under READ COMMITTED (the driver's default) a new
+    # snapshot -- then reads what the first committed, and is judged by it.
+    # The key is a 64-bit hash of the tenant and the agreement id, so saves of
+    # different agreements do not wait on each other.
+    cursor.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s::text || ':' || %s, 0))",
+        (tenant_id, agreement.id),
+    )
     stored_already = _stored_identity_of(cursor, agreement.id)
     if stored_already is not None:
-        home_already, registrar_already = stored_already
+        home_already, registrar_already, payer_already, newest = stored_already
         if home_already != garage_uuid:
             raise Refused(
                 REFUSAL_AGREEMENT_HOME_MOVED,
@@ -278,6 +308,36 @@ def store_agreement(
                 f"for it name {registrar_already.value!r}. The registrar never changes; a "
                 "different registrar is a different agreement.",
             )
+        # A VERSION IS NEVER OLDER THAN THE NEWEST ONE STORED. A late or retried
+        # save of an older version would register the cars on ITS list -- and
+        # registering releases every car not on the list -- while the newest
+        # version still names them: a car on the newest version priced as a
+        # transient, with nothing saying why. Equal is refused too: a version is
+        # never edited, and a second row of one number is a retry, not a change.
+        if agreement.version <= newest.version:
+            raise Refused(
+                REFUSAL_VERSION_NOT_NEWER,
+                f"agreement {agreement.id!r} version {agreement.version} was offered, and "
+                f"the store already holds version {newest.version} of it. A change is "
+                "the next version number.",
+            )
+        # THE PAYER NEVER CHANGES EITHER, for the home move's reason: the
+        # invoice, its one-per-period lock, the unpaid check and the charge's
+        # mandate all follow the payer, and nothing says what a hand-over does
+        # to a period already invoiced to the old one -- re-run, it was invoiced
+        # twice, and the old payer's unpaid invoice stopped counting.
+        if payer_already != payer_uuid:
+            raise Refused(
+                REFUSAL_PAYER_CHANGED,
+                f"agreement {agreement.id!r} version {agreement.version} names payer "
+                f"{agreement.payer_id!r}, but the versions the store already holds for it "
+                "name another payer. The payer never changes; a different payer is a "
+                "different agreement.",
+            )
+        # A PAUSE OVER A PAID PERIOD IS REFUSED BY NAME (G13), before any write:
+        # only the days this version newly pauses -- a pause the newest version
+        # already held was there when those periods were priced.
+        _refuse_new_pause_days_over_paid_periods(cursor, garage, agreement, newest.uuid)
     covered = covered_garages_of(cursor, agreement, home=StoredGarage(garage_uuid, garage))
     if agreement.registrar is Registrar.OUTSIDE:
         # The outside registrar's rows are not this module's to write or to
@@ -367,20 +427,94 @@ def store_agreement(
     return agreement_uuid
 
 
-def _stored_identity_of(cursor: Any, agreement_external_id: str) -> tuple[UUID, Registrar] | None:
-    """The garage uuid every stored version of this agreement is billed at, and
-    the registrar every stored version names -- None when the store holds no
-    version yet. One lookup, by identity alone; the tenant policy scopes the
-    read. Every version has the same home and the same registrar by
-    construction (the two refusals above), so the latest one's are the
-    agreement's."""
+@dataclass(frozen=True)
+class _NewestStored:
+    """The newest version row the store holds of an agreement: its uuid, for
+    the reads that follow it, and its number, for the order check."""
+
+    uuid: UUID
+    version: int
+
+
+def _stored_identity_of(
+    cursor: Any, agreement_external_id: str
+) -> tuple[UUID, Registrar, UUID, _NewestStored] | None:
+    """The garage uuid every stored version of this agreement is billed at, the
+    registrar and the payer every stored version names, and the newest stored
+    version -- None when the store holds no version yet. One lookup, by
+    identity alone; the tenant policy scopes the read. Every version has the
+    same home, registrar and payer by construction (the refusals above), so the
+    latest one's are the agreement's."""
     cursor.execute(
-        "SELECT garage_id, registrar FROM agreements WHERE external_id = %s "
-        "ORDER BY version DESC LIMIT 1",
+        "SELECT garage_id, registrar, payer_id, id, version FROM agreements "
+        "WHERE external_id = %s ORDER BY version DESC LIMIT 1",
         (agreement_external_id,),
     )
     row = cursor.fetchone()
-    return None if row is None else (as_uuid(row[0]), Registrar(row[1]))
+    if row is None:
+        return None
+    home, registrar, payer, uuid, version = row
+    return (
+        as_uuid(home), Registrar(registrar), as_uuid(payer),
+        _NewestStored(uuid=as_uuid(uuid), version=version),
+    )
+
+
+def _refuse_new_pause_days_over_paid_periods(
+    cursor: Any, home: Garage, agreement: Agreement, newest_uuid: UUID
+) -> None:
+    """THE STORE'S HALF OF G13: refuse, by name and before any write, a version
+    that newly pauses a day inside a period already paid.
+
+    The paid periods are the periods of this agreement's invoice lines -- by
+    its IDENTITY, across every version -- whose invoice is paid. "Newly" is
+    measured against the newest stored version's pauses: a pause that was
+    already there when a period was priced took its days out of that price, so
+    storing a later version that keeps it (a price change, a car added) is not
+    a pause over paid days; extending it into a paid period is, for the days
+    it adds. Only the store's invoices are read: the first charge is stored
+    nowhere, so its periods are not known here.
+    """
+    earlier = _pauses(cursor, newest_uuid)
+    newly: list[tuple[date, date]] = []
+    for pause in agreement.pauses:
+        newly.extend(_days_not_in(pause, earlier))
+    if not newly:
+        return
+    cursor.execute(
+        "SELECT DISTINCT l.period_start_day, l.period_end_day FROM invoice_lines l "
+        "JOIN invoices i ON i.id = l.invoice_id "
+        "JOIN agreements a ON a.id = l.agreement_id "
+        "WHERE a.external_id = %s AND i.paid_at IS NOT NULL",
+        (agreement.id,),
+    )
+    tz = zone(home.timezone)
+    paid = tuple(
+        BillingPeriod(
+            start_day=start, end_day=end,
+            start_instant=day_start(start, tz), end_instant=day_start(end, tz),
+        )
+        for start, end in sorted(cursor.fetchall())
+    )
+    for from_day, until_day in newly:
+        refuse_pause_over_a_paid_period(agreement, from_day, until_day, paid)
+
+
+def _days_not_in(pause: Pause, earlier: tuple[Pause, ...]) -> list[tuple[date, date]]:
+    """The parts of ``pause`` no earlier pause covers, as half-open ranges."""
+    left = [(pause.from_day, pause.until_day)]
+    for old in earlier:
+        cut: list[tuple[date, date]] = []
+        for start, end in left:
+            if old.until_day <= start or old.from_day >= end:
+                cut.append((start, end))
+                continue
+            if start < old.from_day:
+                cut.append((start, old.from_day))
+            if old.until_day < end:
+                cut.append((old.until_day, end))
+        left = cut
+    return left
 
 
 def covered_garages_of(
@@ -1127,15 +1261,35 @@ class RegisteredAgreement:
     """One agreement a garage's register names, from its LATEST version: the
     columns a reader at a garage needs to decide whether the car is covered
     NOW -- the version, who registers it, whether it is cancelled and from
-    which day -- and nothing else. Every field is a column's own value, the
-    same columns ``AgreementRegister`` documents and under the same
-    constraints."""
+    which day -- and THE DAYS THE MODULE DECIDES COVERAGE BY (G63), and
+    nothing else. The first five are a column's own value, the same columns
+    ``AgreementRegister`` documents and under the same constraints:
+
+    * ``start_day`` -- ``agreements.start_day``: no day before it is covered
+      (``NOT_STARTED``).
+    * ``pauses`` -- ``agreement_pauses`` of that version, as stored, half-open
+      (from_day paused, until_day not): no day inside one is covered (``PAUSED``).
+    * ``blocked`` -- the owner's latest block or unblock, read as the
+      store-backed coverage call reads it (``BLOCKED_BY_OWNER``).
+    * ``not_covered_from`` -- the first day, in the HOME garage's calendar, on
+      which the payer's earliest unpaid invoice at the home is past grace,
+      the owner's extensions counted (``UNPAID_PAST_GRACE``); None when
+      nothing is unpaid. The payment state is the store's as of NOW, as it is
+      for ``covered-in-store``.
+
+    Dates and a flag: no amount, no invoice, no payer, no grace figure.
+    Additive -- a reader that does not know these fields reads the first five
+    as before."""
 
     agreement: str
     version: int
     registrar: str
     status: str
     cancelled_effective_day: date | None
+    start_day: date
+    pauses: tuple[tuple[date, date], ...]
+    blocked: bool
+    not_covered_from: date | None
 
 
 @dataclass(frozen=True)
@@ -1152,15 +1306,17 @@ class GarageRegister:
     """A garage's register as the store holds it, selected BY THE GARAGE: every
     ``vehicle_registrations`` row at the garage as {identity as stored,
     agreement}; for every agreement those rows name, its latest version's
-    registrar, status and cancellation day; the agreements whose latest version
-    does not cover this garage; and the agreement ids the rows name that the
-    tenant holds no version of. Five keys, and the field set is derived from
-    this class, so a sixth is seen the day it exists. NOTHING ELSE TRAVELS --
-    not the price, the payer, the spots, the fees, the pauses, the mandate,
-    the access hours, the start day, the home garage, the covered set, the
-    version's own vehicle list or a registration's instant. A reader at a
-    garage needs to know which cars an agreement holds HERE and whether the
-    agreement stands, not where else it answers.
+    registrar, status and cancellation day, and the days coverage is decided
+    by (start day, pauses, the owner's block, the first day unpaid past grace
+    -- G63); the agreements whose latest version does not cover this garage;
+    and the agreement ids the rows name that the tenant holds no version of.
+    Five keys, and the field set is derived from this class, so a sixth is
+    seen the day it exists. NOTHING ELSE TRAVELS -- not the price, the payer,
+    the spots, the fees, the mandate, the access hours, an invoice or an
+    amount, the home garage, the covered set, the version's own vehicle list
+    or a registration's instant. A reader at a garage needs to know which cars
+    an agreement holds HERE and on which days the agreement stands, not where
+    else it answers.
 
     It answers the question ``show_register`` cannot: that read takes one
     agreement id, and a reader that has to hold every entitlement at a garage
@@ -1215,6 +1371,17 @@ class GarageRegister:
                         if each.cancelled_effective_day is None
                         else each.cancelled_effective_day.isoformat()
                     ),
+                    "start_day": each.start_day.isoformat(),
+                    "pauses": [
+                        {"from_day": from_day.isoformat(), "until_day": until_day.isoformat()}
+                        for from_day, until_day in each.pauses
+                    ],
+                    "blocked": each.blocked,
+                    "not_covered_from": (
+                        None
+                        if each.not_covered_from is None
+                        else each.not_covered_from.isoformat()
+                    ),
                 }
                 for each in self.agreements
             ],
@@ -1231,8 +1398,9 @@ def show_garage_register(cursor: Any, tenant_id: Any, garage_id: str) -> GarageR
     rule the registration door and ``show_register`` pick theirs with.
     Answers for either registrar and says which: the single-writer rule
     governs WRITES, and a read refuses nobody on it. Takes no instant and
-    derives nothing: a cancelled agreement whose day has passed is shown
-    ``cancelled`` with its day and with whatever rows are still stored.
+    derives nothing but the days of G63 (``_coverage_days``): a cancelled
+    agreement whose day has passed is shown ``cancelled`` with its day and
+    with whatever rows are still stored.
     Writes nothing. A garage the tenant does not hold raises
     ``GarageNotFound``; one with no rows answers an empty register, which is
     not a refusal.
@@ -1289,6 +1457,7 @@ def show_garage_register(cursor: Any, tenant_id: Any, garage_id: str) -> GarageR
             registrar=latest.registrar,
             status=latest.status,
             cancelled_effective_day=latest.cancelled_effective_day,
+            **_coverage_days(cursor, tenant_id, agreement_id, latest),
         ))
         if garage_id not in _covered_garage_ids(cursor, latest.uuid):
             not_covering.append(agreement_id)
@@ -1299,6 +1468,66 @@ def show_garage_register(cursor: Any, tenant_id: Any, garage_id: str) -> GarageR
         agreements_not_covering_garage=tuple(not_covering),
         agreements_not_found=tuple(not_found),
     )
+
+
+def _coverage_days(
+    cursor: Any, tenant_id: UUID, agreement_id: str, latest: _LatestVersion
+) -> dict[str, Any]:
+    """The days the module decides coverage by, for one agreement of a garage's
+    register (G63): its latest version's start day and pauses, as stored, and
+    the money state at its HOME as ``entitlement_store.covered_from_store``
+    reads it -- the same exceptions read, the same "earliest unpaid" rule and
+    the same grace arithmetic -- turned into a day. Builds no ``Agreement`` and
+    no ``Garage``, and needs no zone: an invoice is due at the start instant of
+    its period, so the home-calendar day it falls due on IS its stored
+    ``period_start_day``.
+
+    ``is_covered`` answers UNPAID_PAST_GRACE once more than ``grace`` home
+    days have passed since that day, so the first such day is
+    ``due + grace + 1``."""
+    # The one read of the owner's decisions the coverage call makes. Imported
+    # here: entitlement_store reads the store through this module.
+    from ..entitlement_store import _exceptions_for
+    from ..exceptions_by_owner import applied_grace_days, is_blocked
+
+    cursor.execute(
+        "SELECT start_day, payer_id FROM agreements WHERE tenant_id = %s AND id = %s",
+        (tenant_id, latest.uuid),
+    )
+    start_day, payer_uuid = cursor.fetchone()
+    cursor.execute(
+        "SELECT from_day, until_day FROM agreement_pauses "
+        "WHERE tenant_id = %s AND agreement_id = %s",
+        (tenant_id, latest.uuid),
+    )
+    pauses = tuple(sorted(cursor.fetchall()))
+    # The tenant is a predicate of the exceptions read too, as it is of every
+    # other read here: with the policy off, another tenant's block or grace
+    # extension on an agreement of the same id is not this one's (G48).
+    exceptions = _exceptions_for(
+        cursor, agreement_id, payer_uuid, latest.home_uuid, tenant_id=tenant_id
+    )
+    cursor.execute(
+        "SELECT min(period_start_day) FROM invoices "
+        "WHERE tenant_id = %s AND payer_id = %s AND garage_id = %s AND paid_at IS NULL",
+        (tenant_id, payer_uuid, latest.home_uuid),
+    )
+    (due_day,) = cursor.fetchone()
+    not_covered_from = None
+    if due_day is not None:
+        cursor.execute(
+            "SELECT payment_grace_days FROM garages WHERE tenant_id = %s AND id = %s",
+            (tenant_id, latest.home_uuid),
+        )
+        (base_grace,) = cursor.fetchone()
+        grace = applied_grace_days(base_grace, exceptions)
+        not_covered_from = due_day + timedelta(days=grace + 1)
+    return {
+        "start_day": start_day,
+        "pauses": pauses,
+        "blocked": is_blocked(exceptions),
+        "not_covered_from": not_covered_from,
+    }
 
 
 # ---------------------------------------------------------------------------

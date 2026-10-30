@@ -9,24 +9,28 @@ grows with every car ever seen. ``show-garage-register``
 every ``vehicle_registrations`` row at it as {identity as stored, agreement},
 and for every agreement those rows name, from its LATEST version -- picked by
 the same helper the door and G45 pick theirs with -- the id, version,
-registrar, status and cancellation day; the agreements whose latest version
+registrar, status and cancellation day, and the days coverage is decided by
+(G63, proven in its own module); the agreements whose latest version
 does not cover the garage; and the ids the rows name that the tenant holds no
 version of. Five keys, derived from the answer class.
 
 **IT VALIDATES NOTHING IT DOES NOT RETURN**, like G45: no ``Agreement`` and no
 ``Garage`` is built; a garage stored with an unreadable option or a version the
 loaders refuse still shows its register, and the control is that the loaders
-and the door DO refuse on the same rows. It takes no instant, derives nothing,
-writes nothing, and sorts in Python by code point.
+and the door DO refuse on the same rows. It takes no instant, derives nothing
+but G63's days, writes nothing, and sorts in Python by code point.
 
 Controls, each with a plant in ``scripts/fail_controls.py``: the read given
 its own version rule; a write planted into the read; the garage's tenant
 predicate planted away and the rows' tenant predicate planted away (the policy
-off shows another tenant's garage of the same id); rows read through the
-covered set; a row naming an unknown agreement refusing the whole read; an
-agreement not covering the garage left unnamed; the read routed through
-``load_garage``; the Python sorts removed; a sixth key; the refusal swallowed;
-a line on stderr.
+off shows another tenant's garage of the same id); the exceptions read's
+tenant predicate planted away, the register not handing its tenant to that
+read, and the join to the agreement losing the exception's tenant (the policy
+off hands this tenant another tenant's block and grace extension on an
+agreement of the same id); rows read through the covered set; a row naming an
+unknown agreement refusing the whole read; an agreement not covering the
+garage left unnamed; the read routed through ``load_garage``; the Python sorts
+removed; a sixth key; the refusal swallowed; a line on stderr.
 """
 
 from __future__ import annotations
@@ -46,8 +50,11 @@ from fixtures import (
     multi_garage_agreement,
     outside_registrar_agreement,
 )
-from monthly_billing.agreement import InvalidAgreement, Status
+from monthly_billing.agreement import InvalidAgreement, Pause, Status
+from monthly_billing.billing_run import run_billing
 from monthly_billing.cli import main
+from monthly_billing.exceptions_by_owner import ExceptionKind, OwnerException
+from monthly_billing.exceptions_store import record_agreement_exception
 from monthly_billing.garage import BillingDay, Garage, IdentityRule
 from monthly_billing.localday import UnknownTimezone
 from monthly_billing.store.postgres import tenant
@@ -90,12 +97,22 @@ THE_FIVE = (
     "agreements_not_covering_garage",
     "agreements_not_found",
 )
-THE_AGREEMENT_FIVE = ("agreement", "version", "registrar", "status", "cancelled_effective_day")
+#: The five columns of the latest version, then the four days the module
+#: decides coverage by (G63).
+THE_AGREEMENT_FIELDS = (
+    "agreement", "version", "registrar", "status", "cancelled_effective_day",
+    "start_day", "pauses", "blocked", "not_covered_from",
+)
 
 #: G45's list, and what a read BY GARAGE must not echo either: the home garage
-#: and the covered set are where else the agreement answers, not what it holds
-#: here.
-NEVER_TRAVELS_BY_GARAGE = (*NEVER_TRAVELS, "home", "covered")
+#: and the covered set (``covered_garages``, as G45 names it) are where else
+#: the agreement answers, not what it holds here. The start day and the pauses
+#: are the two of G45's words that DO travel here, as days (G63) -- a lane
+#: deciding by day needs them; nothing of money does.
+NEVER_TRAVELS_BY_GARAGE = (
+    *(fragment for fragment in NEVER_TRAVELS if fragment not in ("start", "pause")),
+    "home", "covered_garage", "grace", "amount", "minor",
+)
 
 
 def outside(**overrides: object):
@@ -110,6 +127,16 @@ def store_backed(test):
 
 def _seed(app, tenant_id, *agreements, garages=(HOME, OTHER), now=DAY):
     return seed_garages(app, tenant_id, garages, agreements, now=now)
+
+
+def _issue_unpaid(app, tenant_id):
+    """The home's invoice for the period containing 05-01, issued and left
+    unpaid: due 04-30 (the home bills on the last day of the month)."""
+    report = run_billing(
+        app, tenant_id, HOME.id, date(2026, 5, 1),
+        now=datetime(2026, 4, 30, 0, 30, tzinfo=HOME_TZ),
+    )
+    assert len(report.lines) == 1 and not report.refused, report.rendered()
 
 
 def _register(app, tenant_id, agreement_id, identity, *, now=DAY):
@@ -169,7 +196,8 @@ def rows(*pairs: tuple[str, str]) -> tuple[GarageRegisterEntry, ...]:
 def agreement_entry(agreement_id: str, **overrides) -> RegisteredAgreement:
     return RegisteredAgreement(**{
         "agreement": agreement_id, "version": 1, "registrar": "outside", "status": "active",
-        "cancelled_effective_day": None, **overrides,
+        "cancelled_effective_day": None, "start_day": date(2026, 1, 5), "pauses": (),
+        "blocked": False, "not_covered_from": None, **overrides,
     })
 
 
@@ -184,7 +212,7 @@ def test_the_answer_is_five_fields_and_nothing_more_travels():
     day it exists, and the document the command line prints has exactly the
     same keys."""
     assert tuple(f.name for f in fields(GarageRegister)) == THE_FIVE
-    assert tuple(f.name for f in fields(RegisteredAgreement)) == THE_AGREEMENT_FIVE
+    assert tuple(f.name for f in fields(RegisteredAgreement)) == THE_AGREEMENT_FIELDS
     assert tuple(f.name for f in fields(GarageRegisterEntry)) == (
         "identity_normalised", "agreement")
     register = GarageRegister(
@@ -192,7 +220,9 @@ def test_the_answer_is_five_fields_and_nothing_more_travels():
         registrations=rows(("AB-123", "ag-b"), ("ab123", "ag-a")),
         agreements=(
             agreement_entry("ag-a", version=3, status="cancelled",
-                            cancelled_effective_day=date(2026, 2, 1)),
+                            cancelled_effective_day=date(2026, 2, 1),
+                            pauses=((date(2026, 1, 10), date(2026, 1, 20)),), blocked=True,
+                            not_covered_from=date(2026, 1, 25)),
             agreement_entry("ag-b", registrar="this_module"),
         ),
         agreements_not_covering_garage=("ag-b",),
@@ -206,11 +236,14 @@ def test_the_answer_is_five_fields_and_nothing_more_travels():
     ]
     assert document["agreements"] == [
         {"agreement": "ag-a", "version": 3, "registrar": "outside", "status": "cancelled",
-         "cancelled_effective_day": "2026-02-01"},
+         "cancelled_effective_day": "2026-02-01", "start_day": "2026-01-05",
+         "pauses": [{"from_day": "2026-01-10", "until_day": "2026-01-20"}], "blocked": True,
+         "not_covered_from": "2026-01-25"},
         {"agreement": "ag-b", "version": 1, "registrar": "this_module", "status": "active",
-         "cancelled_effective_day": None},
+         "cancelled_effective_day": None, "start_day": "2026-01-05", "pauses": [],
+         "blocked": False, "not_covered_from": None},
     ]
-    assert all(tuple(entry) == THE_AGREEMENT_FIVE for entry in document["agreements"])
+    assert all(tuple(entry) == THE_AGREEMENT_FIELDS for entry in document["agreements"])
     for fragment in NEVER_TRAVELS_BY_GARAGE:
         assert not any(fragment in key for key in document), (fragment, list(document))
         assert not any(fragment in key for entry in document["registrations"] for key in entry)
@@ -312,7 +345,8 @@ def test_a_cancelled_agreement_past_its_day_is_shown_with_its_rows(app, tenant_i
     printed = json.loads(_cli(tenant_id, HOME.id)[1])
     assert printed["agreements"] == [{
         "agreement": OUTSIDE_ID, "version": 2, "registrar": "outside", "status": "cancelled",
-        "cancelled_effective_day": "2026-02-01"}]
+        "cancelled_effective_day": "2026-02-01", "start_day": "2026-01-05", "pauses": [],
+        "blocked": False, "not_covered_from": None}]
 
 
 @pytest.mark.guarantee("G48")
@@ -413,42 +447,88 @@ def test_another_tenants_garage_of_the_same_id_is_not_read_with_the_policy_on_an
     app, owner, tenant_id
 ):
     """Two tenants, the same garage ids and the same agreement id -- the other
-    tenant's at a HIGHER version, with cars of its own. With the row policy
-    ON the app role cannot see them (the control that the policy is doing its
-    job); with it OFF on the four tables the app role sees both tenants' rows,
-    and the read still shows only the tenant it was asked for: its garage's
-    rows, its version 1."""
+    tenant's at a HIGHER version, with cars of its own, a pause, an unpaid
+    invoice, and its owner's BLOCK and ten-day grace extension recorded on
+    that agreement id; and a block of this tenant's hung, raw, on the other
+    tenant's agreement row. With the row policy ON the app role cannot see
+    the other tenant's rows (the control that the policy is doing its job),
+    and the other tenant's own read shows its block and its extended day (the
+    control that those exceptions are real and read). With the policy OFF on
+    the seven tables
+    the read touches, the app role sees both tenants' rows, and the read
+    still shows only the tenant it was asked for: its garage's rows, its
+    version 1, not blocked, and its own first uncovered day -- due 04-30,
+    grace 5, so 05-06, where the other tenant's extension would make it
+    05-16 and its block would make it blocked."""
     other_tenant = new_tenant(owner)
     _seed(app, tenant_id, outside())
     _register(app, tenant_id, OUTSIDE_ID, "MINE-1")
+    _issue_unpaid(app, tenant_id)
     seeded_other = _seed(app, other_tenant, outside())
     _register(app, other_tenant, OUTSIDE_ID, "THEIRS-1")
-    _store(app, other_tenant, seeded_other, outside(version=2))
+    their_pause = (date(2026, 7, 1), date(2026, 7, 10))
+    _store(app, other_tenant, seeded_other, outside(
+        version=2, pauses=(Pause(from_day=their_pause[0], until_day=their_pause[1]),),
+    ))
+    _issue_unpaid(app, other_tenant)
+    for kind, extra in ((ExceptionKind.BLOCK, None), (ExceptionKind.EXTEND_GRACE, 10)):
+        record_agreement_exception(
+            app, other_tenant, seeded_other.agreement_uuids[OUTSIDE_ID], OwnerException(
+                id=f"theirs-{kind.value}", agreement_id=OUTSIDE_ID, invoice_reference=None,
+                kind=kind, recorded_by="their owner", recorded_at=DAY, extra_grace_days=extra,
+            ),
+        )
+    # And a row a system past the module could write: THIS tenant's block,
+    # hung on the OTHER tenant's agreement row (the key is the row's id
+    # alone). The policy never joins it to that agreement, so it blocks
+    # nothing; with the policy off the read's join keeps it that way.
+    _raw(
+        app, tenant_id,
+        "INSERT INTO owner_exceptions (tenant_id, agreement_id, kind, recorded_by, recorded_at) "
+        "VALUES (%s, %s, 'block', 'past the module', %s)",
+        (tenant_id, seeded_other.agreement_uuids[OUTSIDE_ID], DAY),
+    )
     expected = GarageRegister(
-        garage=HOME.id, registrations=rows(("mine1", OUTSIDE_ID)),
-        agreements=(agreement_entry(OUTSIDE_ID),),
+        garage=HOME.id, registrations=rows(("m1ne1", OUTSIDE_ID)),
+        agreements=(agreement_entry(OUTSIDE_ID, not_covered_from=date(2026, 5, 6)),),
         agreements_not_covering_garage=(), agreements_not_found=(),
+    )
+    their_entry = agreement_entry(
+        OUTSIDE_ID, version=2, pauses=(their_pause,), blocked=True,
+        not_covered_from=date(2026, 5, 16),
     )
 
     def app_sees():
         garages = query(app, tenant_id, "SELECT count(*) FROM garages WHERE external_id = %s",
                         (HOME.id,))
         rows_ = query(app, tenant_id, "SELECT identity_normalised FROM vehicle_registrations")
-        return garages[0][0], sorted(i for (i,) in rows_)
+        (counts,) = query(
+            app, tenant_id,
+            "SELECT (SELECT count(*) FROM owner_exceptions), (SELECT count(*) FROM invoices), "
+            "(SELECT count(*) FROM agreement_pauses)",
+        )
+        return garages[0][0], sorted(i for (i,) in rows_), counts
 
-    assert app_sees() == (1, ["MINE-1", "mine1"])
+    assert app_sees() == (1, ["MINE-1", "m1ne1"], (1, 1, 0))
     assert _read(app, tenant_id) == expected
+    assert _read(app, other_tenant).agreements == (their_entry,)
 
-    tables = ("agreements", "agreement_garages", "garages", "vehicle_registrations")
+    tables = (
+        "agreements", "agreement_garages", "garages", "vehicle_registrations",
+        "owner_exceptions", "invoices", "agreement_pauses",
+    )
     with _row_security_off(owner, tables):
-        count, seen = app_sees()
-        assert count >= 2 and {"THEIRS-1", "theirs1", "MINE-1", "mine1"} <= set(seen)
+        count, seen, (exceptions, invoices, pauses) = app_sees()
+        assert count >= 2 and {"THEIRS-1", "the1rs1", "MINE-1", "m1ne1"} <= set(seen)
+        assert exceptions >= 3 and invoices >= 2 and pauses >= 1, (exceptions, invoices, pauses)
         assert _read(app, tenant_id) == expected
-        assert json.loads(_cli(tenant_id, HOME.id)[1])["agreements"][0]["version"] == 1
+        printed = json.loads(_cli(tenant_id, HOME.id)[1])["agreements"][0]
+        assert (printed["version"], printed["blocked"], printed["not_covered_from"]) == (
+            1, False, "2026-05-06")
         theirs = _read(app, other_tenant)
-        assert theirs.registrations == rows(("theirs1", OUTSIDE_ID))
-        assert theirs.agreements == (agreement_entry(OUTSIDE_ID, version=2),)
-    assert app_sees() == (1, ["MINE-1", "mine1"])
+        assert theirs.registrations == rows(("the1rs1", OUTSIDE_ID))
+        assert theirs.agreements == (their_entry,)
+    assert app_sees() == (1, ["MINE-1", "m1ne1"], (1, 1, 0))
     assert _read(app, tenant_id) == expected
 
 
@@ -458,7 +538,7 @@ def test_an_unreadable_garage_or_version_still_shows_its_register(app, tenant_id
     """The garage's timezone set raw to a zone that does not exist; the
     latest version given two overlapping pauses raw. The loaders and the
     door refuse on those rows (the control); the read at that garage answers
-    in full."""
+    in full -- the two pauses shown as stored (G63), never judged."""
     seeded = _seed(app, tenant_id, outside())
     _register(app, tenant_id, OUTSIDE_ID, "AB-123")
     home_uuid = seeded.garage_uuids[HOME.id]
@@ -485,7 +565,7 @@ def test_an_unreadable_garage_or_version_still_shows_its_register(app, tenant_id
     register = _read(app, tenant_id, OTHER.id)
     assert register == GarageRegister(
         garage=OTHER.id, registrations=rows(("AB-123", OUTSIDE_ID)),
-        agreements=(agreement_entry(OUTSIDE_ID),),
+        agreements=(agreement_entry(OUTSIDE_ID, pauses=overlapping),),
         agreements_not_covering_garage=(), agreements_not_found=(),
     )
     code, out, err = _cli(tenant_id, OTHER.id)
