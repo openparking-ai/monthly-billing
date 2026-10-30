@@ -11,12 +11,41 @@ a script that could make every isolation test pass for the wrong reason.
 
 Run as the database owner. The password is read from the environment and never
 from an argument, because arguments are visible in `ps` to every user on the box.
+It never reaches the server either: the script computes the SCRAM-SHA-256
+verifier PostgreSQL stores (``scram_verifier``) and sends that, so no statement
+-- and no server log that keeps statements -- carries the password itself.
+The verifier is put into the statement by ``psycopg.sql`` composition -- quoted
+as a literal, never interpolated as a string -- because ``ALTER ROLE`` is a
+utility statement and PostgreSQL binds no parameters into those: the first cut
+passed the password as a bind parameter, so the README's install step died on
+``syntax error at or near "$1"``, and nothing in the tree had ever run the
+script. A test now runs it against the test cluster
+(``tests/test_g12_rls_from_migration_0001.py``), and it prints nothing that
+contains the password.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+
+#: The role this script gives a login to.
+ROLE = "monthly_billing_app"
+
+
+def scram_verifier(connection, password: str, role: str = ROLE) -> str:
+    """The password as PostgreSQL stores it: a salted, iterated SCRAM-SHA-256
+    verifier, computed on THIS machine by libpq's own ``PQencryptPasswordConn``
+    (the password's SASLprep included), so the statement that sets it carries
+    the verifier and never the password. PostgreSQL stores a verifier it is
+    handed as it is. Anything but a SCRAM-SHA-256 verifier is refused here,
+    before a statement is sent."""
+    verifier = connection.pgconn.encrypt_password(
+        password.encode("utf-8"), role.encode("utf-8"), b"scram-sha-256"
+    ).decode("ascii")
+    if not verifier.startswith("SCRAM-SHA-256$"):
+        raise RuntimeError("libpq did not compute a SCRAM-SHA-256 verifier; nothing was sent.")
+    return verifier
 
 
 def main(argv: list[str]) -> int:
@@ -33,14 +62,19 @@ def main(argv: list[str]) -> int:
         return 2
 
     import psycopg
+    from psycopg import sql
 
     with psycopg.connect(argv[0]) as connection:
         connection.autocommit = True
+        verifier = scram_verifier(connection, password)
         with connection.cursor() as cursor:
             # ALTER, never CREATE: the role's attributes are the migration's, and
-            # this script may not be a route to changing them.
+            # this script may not be a route to changing them. A quoted LITERAL,
+            # not a bind parameter: utility statements take none.
             cursor.execute(
-                "ALTER ROLE monthly_billing_app LOGIN PASSWORD %s", (password,)
+                sql.SQL("ALTER ROLE monthly_billing_app LOGIN PASSWORD {}").format(
+                    sql.Literal(verifier)
+                )
             )
             cursor.execute(
                 "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = "

@@ -7,6 +7,13 @@ deleted and requires the second run to produce a duplicate -- if the run were
 idempotent by convention instead, that plant would change nothing and the
 control would be dead.
 
+**A RE-RUN THAT CANNOT BE PRICED TODAY IS STILL ALREADY_ISSUED.** An invoice
+issued before migration 0006 carries no tax position, and its garage may never
+have stated a set; a re-run of its period is refused by the tax step before any
+insert reaches the lock. The period is invoiced all the same, so the run reads
+the period's row back after the refusal. Its control plants that read away and
+requires red; the next period, which is not invoiced, is still refused by name.
+
 **OWNERSHIP IS BY PERIOD.** The first charge covers the period containing the
 start day and the one after; the run covers every later one. The tests here
 place one agreement in each situation and read what the run priced, by period.
@@ -246,3 +253,60 @@ def test_the_command_line_runs_it_and_exits_by_the_report(app, tenant_id, capsys
     assert main(argv) == 0
     assert "payer-acme: ALREADY_ISSUED" in capsys.readouterr().out
     assert len(_invoices(app, tenant_id)) == 1
+
+
+@pytest.mark.guarantee("G17")
+def test_a_re_run_that_cannot_be_priced_today_is_already_issued_not_refused(app, tenant_id):
+    """The May invoice was issued before migration 0006 -- the three tax-position
+    columns absent, together -- at a garage that has stated no tax set. A re-run
+    of May cannot be taxed today and need not be: the line is ALREADY_ISSUED, the
+    run is not refused (exit 0), and nothing is written. THE CONTROL is the next
+    period, which is not invoiced: it is still REFUSED by name for the missing
+    set (G51), so the answer is read from the period's row, not from the refusal."""
+    from monthly_billing.findings import REFUSAL_NO_TAX_SET_IN_FORCE
+    from monthly_billing.store.postgres import tenant
+    from monthly_billing.store.writes import guarded_insert
+
+    seeded = seed(
+        app, tenant_id, GARAGE, (simple_agreement(start_day=date(2026, 1, 5)),), tax_sets=None
+    )
+    may = period_containing(GARAGE, date(2026, 5, 1))
+    with tenant(app, tenant_id) as cursor:
+        guarded_insert(cursor, "invoices", {
+            "tenant_id": tenant_id,
+            "reference": invoice_reference(GARAGE, may, "payer-acme"),
+            "payer_id": seeded.payer_uuids["payer-acme"],
+            "garage_id": seeded.garage_uuid,
+            "currency": GARAGE.currency,
+            "period_start_day": may.start_day,
+            "issued_at": NOW,
+            "due_at": may.start_instant,
+        })
+        (invoice_uuid,) = cursor.fetchone()
+        guarded_insert(cursor, "invoice_lines", {
+            "tenant_id": tenant_id,
+            "invoice_id": invoice_uuid,
+            "kind": "full_period",
+            "label": f"ag-0001: period {may.start_day} to {may.end_day}",
+            "amount_minor": 12000,
+            "agreement_id": seeded.agreement_uuids["ag-0001"],
+            "agreement_version": 1,
+            "period_start_day": may.start_day,
+            "period_end_day": may.end_day,
+        })
+    app.commit()
+    lines = "SELECT kind, amount_minor, agreement_version FROM invoice_lines"
+    before = (_invoices(app, tenant_id), query(app, tenant_id, lines))
+
+    rerun = run_billing(app, tenant_id, GARAGE.id, date(2026, 5, 1), now=NOW)
+    assert [line.outcome for line in rerun.lines] == [RunOutcome.ALREADY_ISSUED], (
+        rerun.rendered()
+    )
+    assert not rerun.refused, "a re-run of an invoiced period is an answer, not a refusal"
+    assert (_invoices(app, tenant_id), query(app, tenant_id, lines)) == before
+
+    june = next_period_after(GARAGE, may)
+    following = run_billing(app, tenant_id, GARAGE.id, june.start_day, now=NOW)
+    (line,) = following.lines
+    assert line.outcome is RunOutcome.REFUSED and REFUSAL_NO_TAX_SET_IN_FORCE in line.detail
+    assert following.refused

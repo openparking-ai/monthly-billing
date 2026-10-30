@@ -672,6 +672,24 @@ GUARANTEES: dict[str, str] = {
         "home's midnight. The fields are additive: a reader that does not know them "
         "reads the register as before."
     ),
+    "G64": (
+        "AN INVOICE THAT OWES NOTHING IS PAID FROM ITS ISSUE. The billing run derives "
+        "`paid_at` in the transaction that writes the invoice, by G19's rule -- paid "
+        "when unreversed payments reach the total -- so an invoice whose total is zero "
+        "(an agreement priced at zero, or a zero subtotal, which yields no tax line) is "
+        "paid at its issue instant, and no car reads UNPAID_PAST_GRACE for it while it "
+        "owes nothing. Any other total is unpaid at issue: the derivation writes nothing, and "
+        "the issue marks nothing paid that a payment has not paid."
+    ),
+    "G65": (
+        "THE INSTRUMENT GUARD REFUSES ONE PAYER'S INVOICE, NEVER THE RUN. An invoice "
+        "row the store's guard refuses -- as it refuses every reference at a garage "
+        "whose id ends in nine digits that pass the routing checksum -- is that "
+        "payer's REFUSED line, naming the column and the shape and never the digits; "
+        "nothing is written for that payer, the payers after it are still processed, and "
+        "the command prints the report and exits 1. The guard is not loosened for a "
+        "reference, and the garage is stored as any garage is."
+    ),
 }
 
 

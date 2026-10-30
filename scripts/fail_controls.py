@@ -2810,6 +2810,63 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "    pauses = ()  # PLANTED: the version's pauses are not read",
         "the register carries no pause, so a lane covers a paused holder",
     ),
+    "G64": (
+        "tests/test_g64_a_zero_invoice_is_paid_at_issue.py",
+        "billing_run.py",
+        "    rederive_paid_at(cursor, invoice_uuid, now)",
+        "    pass  # PLANTED: paid_at is not derived at issue",
+        "FO-M15 PLANTED BACK: a $0 invoice is issued unpaid and nothing can pay it, so a "
+        "comped parker reads NOT COVERED, UNPAID_PAST_GRACE, from the day after grace",
+    ),
+    "G64/marks-paid": (
+        "tests/test_g64_a_zero_invoice_is_paid_at_issue.py",
+        "billing_run.py",
+        "    rederive_paid_at(cursor, invoice_uuid, now)",
+        '    cursor.execute("UPDATE invoices SET paid_at = %s WHERE id = %s", (now, invoice_uuid))'
+        "  # PLANTED",
+        "the issue SETS paid_at instead of deriving it, so an invoice that owes 12000 is "
+        "paid by being issued and its car is covered for ever",
+    ),
+    "G65": (
+        "tests/test_g65_the_guards_refusal_is_one_payers_line.py",
+        "billing_run.py",
+        "        except (Refused, UnpriceableCurrency, InstrumentLike) as refusal:",
+        "        except (Refused, UnpriceableCurrency) as refusal:  # PLANTED",
+        "FO-L66 PLANTED BACK: the guard's refusal of one invoice reference is not caught, so "
+        "the run stops at its first payer with nothing issued and no line for the rest",
+    ),
+    "G17/unpriceable-re-run": (
+        "tests/test_g17_the_run_issues_once.py",
+        "billing_run.py",
+        "                invoiced = _period_is_issued(cursor, stored.uuid, payer_uuid, "
+        "period.start_day)",
+        "                invoiced = False  # PLANTED: the period's row is not read back",
+        "OP-L26 PLANTED BACK: a re-run of an invoiced period that cannot be taxed today -- "
+        "no set in force at its due instant -- is REFUSED and exits non-zero",
+    ),
+    "G12/install-bind-parameter": (
+        "tests/test_g12_rls_from_migration_0001.py",
+        "scripts/ensure-app-role.py",
+        source(
+            '                sql.SQL("ALTER ROLE monthly_billing_app LOGIN PASSWORD {}").format(',
+            "                    sql.Literal(verifier)",
+            "                )",
+        ),
+        '                "ALTER ROLE monthly_billing_app LOGIN PASSWORD %s",'
+        " (password,)  # PLANTED",
+        "the install step's first cut planted back: the password as a bind parameter on "
+        "ALTER ROLE, which takes none, so the README's last install step dies on a syntax "
+        "error",
+    ),
+    "G12/install-sends-password": (
+        "tests/test_g12_rls_from_migration_0001.py",
+        "scripts/ensure-app-role.py",
+        "        verifier = scram_verifier(connection, password)",
+        "        verifier = password  # PLANTED: the password sent in place of its verifier",
+        "the install step sends the password itself, so it is in the statement and in any "
+        "server log that keeps statements; the login still works, which is why the test "
+        "reads what was sent",
+    ),
 }
 
 
