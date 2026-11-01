@@ -472,6 +472,22 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "OP-7-2 undone: an agreement whose first charge was never issued is COVERED "
         "for both first periods without paying anything",
     ),
+    "G18/start-day-stays": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "store/records.py",
+        "    if billed:\n        raise Refused(\n            REFUSAL_START_DAY_MOVED,",
+        "    if False:\n        raise Refused(\n            REFUSAL_START_DAY_MOVED,  # PLANTED",
+        "OP-7-3 undone: a version moves the start day after the first charge, the owned "
+        "periods move with it, and a period already paid is billed again",
+    ),
+    "G18/stored-periods-decide": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        "    if stored is not None:\n        return period.start_day in stored",
+        "    if False:  # PLANTED: start day decides\n        return period.start_day in stored",
+        "OP-7-3 undone: the run re-derives the first charge's periods from the latest "
+        "version's start day instead of the ones it was issued for",
+    ),
     "G19/reopen": (
         "tests/test_g19_paid_is_derived.py",
         "payments.py",

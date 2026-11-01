@@ -84,6 +84,7 @@ REFUSAL_VERSION_NOT_NEWER = "REFUSAL_VERSION_NOT_NEWER"
 REFUSAL_REASK_EXCEEDS_BALANCE = "REFUSAL_REASK_EXCEEDS_BALANCE"
 REFUSAL_REASK_KEY_EXPIRED = "REFUSAL_REASK_KEY_EXPIRED"
 REFUSAL_RESOLUTION_TOO_SOON = "REFUSAL_RESOLUTION_TOO_SOON"
+REFUSAL_START_DAY_MOVED = "REFUSAL_START_DAY_MOVED"
 REFUSAL_RESOLUTION_NEEDS_EVIDENCE = "REFUSAL_RESOLUTION_NEEDS_EVIDENCE"
 
 REFUSALS: dict[str, str] = {
@@ -213,6 +214,15 @@ REFUSALS: dict[str, str] = {
         "processor adapter's lookup to confirm there is NO charge under this "
         "attempt's key; no lookup, a lookup that cannot tell and one that found a "
         "charge are each refused, and nothing is written."
+    ),
+    REFUSAL_START_DAY_MOVED: (
+        "This version moves the agreement's start day, and the agreement has "
+        "already been billed -- its first charge is stored, or an invoice line "
+        "names it. The first charge's two periods were decided by the start day it "
+        "was issued under; moving it would move the periods the run leaves to the "
+        "first charge, and a period already paid would be billed again. Keep the "
+        "start day; a different start is a different agreement, or an owner's "
+        "exception with an amount."
     ),
     REFUSAL_ATTEMPT_ALREADY_RESOLVED: (
         "This attempt already has an outcome recorded. What the processor said is "

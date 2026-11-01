@@ -136,6 +136,7 @@ from ..findings import (
     REFUSAL_REGISTRAR_IS_OUTSIDE,
     REFUSAL_REGISTRAR_IS_THIS_MODULE,
     REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES,
+    REFUSAL_START_DAY_MOVED,
     REFUSAL_VEHICLE_ALREADY_REGISTERED,
     REFUSAL_VEHICLE_NOT_REGISTERED,
     REFUSAL_VERSION_NOT_NEWER,
@@ -336,6 +337,11 @@ def store_agreement(
                 "name another payer. The payer never changes; a different payer is a "
                 "different agreement.",
             )
+        # THE START DAY NEVER MOVES ONCE ANYTHING IS BILLED (OP-7-3): the first
+        # charge's two periods were decided by the start day it was issued
+        # under, and the run leaves exactly those to it -- moved, a period
+        # already paid falls to the run and is billed again.
+        _refuse_a_moved_start_day_once_billed(cursor, agreement, newest.uuid)
         # A PAUSE OVER A PAID PERIOD IS REFUSED BY NAME (G13), before any write:
         # only the days this version newly pauses -- a pause the newest version
         # already held was there when those periods were priced.
@@ -523,6 +529,28 @@ def _refuse_new_pause_days_over_paid_periods(
                     f"the cancellation from {cancelled[0]} on agreement {agreement.id!r} "
                     f"reaches into the issued period {period.start_day}..{period.end_day}.",
                 )
+
+
+def _refuse_a_moved_start_day_once_billed(
+    cursor: Any, agreement: Agreement, newest_uuid: UUID
+) -> None:
+    cursor.execute("SELECT start_day FROM agreements WHERE id = %s", (newest_uuid,))
+    (stored_start,) = cursor.fetchone()
+    if stored_start == agreement.start_day:
+        return
+    cursor.execute(
+        "SELECT EXISTS (SELECT 1 FROM first_charges WHERE agreement_external_id = %s) "
+        "OR EXISTS (SELECT 1 FROM invoice_lines l JOIN agreements a ON a.id = l.agreement_id "
+        "           WHERE a.external_id = %s)",
+        (agreement.id, agreement.id),
+    )
+    (billed,) = cursor.fetchone()
+    if billed:
+        raise Refused(
+            REFUSAL_START_DAY_MOVED,
+            f"agreement {agreement.id!r} version {agreement.version} starts "
+            f"{agreement.start_day}; the versions already billed start {stored_start}.",
+        )
 
 
 def _days_not_in(pause: Pause, earlier: tuple[Pause, ...]) -> list[tuple[date, date]]:

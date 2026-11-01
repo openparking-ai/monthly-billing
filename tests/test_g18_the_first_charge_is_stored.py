@@ -125,3 +125,76 @@ def test_a_start_on_the_billing_day_never_takes_the_payers_period_invoice_key(ap
     assert query(app, tenant_id,
                  "SELECT period_start_day FROM invoices ORDER BY period_start_day") == [
         (date(2026, 6, 29),), (date(2026, 6, 30),)]
+
+
+def _store_version(app, tenant_id, seeded, agreement):
+    from monthly_billing.store.records import store_agreement
+
+    try:
+        with tenant(app, tenant_id) as cursor:
+            store_agreement(cursor, tenant_id, GARAGE, seeded.garage_uuid,
+                            seeded.payer_uuids[agreement.payer_id], agreement,
+                            now=_at(date(2026, 6, 20)))
+    except BaseException:
+        app.rollback()
+        raise
+    app.commit()
+
+
+@pytest.mark.guarantee("G18")
+@pytest.mark.parametrize("billed_by", ["first charge", "period invoice"])
+def test_a_version_moving_the_start_day_after_it_was_billed_is_refused(
+    app, tenant_id, billed_by
+):
+    """OP-7-3. The run re-derived the first charge's periods from the LATEST
+    version's start day, so v2 moving the start from June 10 to July 5 moved
+    them to July and August: June's part period -- paid in the first charge --
+    fell to the run and was billed again. Once anything has been billed for
+    the agreement, a version that moves its start day is refused by name and
+    nothing is written."""
+    from monthly_billing.findings import REFUSAL_START_DAY_MOVED, Refused
+
+    if billed_by == "first charge":
+        seeded = seed(app, tenant_id, GARAGE, (simple_agreement(start_day=START),))
+        issue_first_charge(app, tenant_id, "ag-0001", now=_at(START, 8))
+        moved = date(2026, 7, 5)
+    else:
+        seeded = seed(app, tenant_id, GARAGE, (simple_agreement(start_day=date(2026, 1, 5)),))
+        run_billing(app, tenant_id, GARAGE.id, date(2026, 5, 15), now=_at(date(2026, 4, 30)))
+        moved = date(2026, 2, 1)
+    before = query(app, tenant_id, "SELECT count(*) FROM agreements")
+    with pytest.raises(Refused) as refused:
+        _store_version(app, tenant_id, seeded, simple_agreement(
+            version=2, start_day=moved))
+    assert refused.value.code == REFUSAL_START_DAY_MOVED
+    assert query(app, tenant_id, "SELECT count(*) FROM agreements") == before
+
+
+@pytest.mark.guarantee("G18")
+def test_the_start_day_may_move_before_anything_is_billed_and_a_price_change_keeps_it(
+    app, tenant_id
+):
+    """The over-reach control: nothing billed yet, the start day moves; after a
+    first charge, a version that keeps the start day (a price change) stores."""
+    seeded = seed(app, tenant_id, GARAGE, (simple_agreement(start_day=START),))
+    _store_version(app, tenant_id, seeded, simple_agreement(version=2, start_day=date(2026, 6, 12)))
+    issue_first_charge(app, tenant_id, "ag-0001", now=_at(date(2026, 6, 12), 8))
+    _store_version(app, tenant_id, seeded, simple_agreement(
+        version=3, start_day=date(2026, 6, 12), monthly_price_minor=13000))
+
+
+@pytest.mark.guarantee("G18")
+def test_the_stored_periods_decide_whatever_the_start_day_says():
+    """The run's half of OP-7-3: the periods a stored first charge owns are the
+    ones it was issued for, never ones re-derived from a start day."""
+    from monthly_billing.billing_run import owned_by_first_charge
+    from monthly_billing.cycle import period_containing
+
+    moved = simple_agreement(start_day=date(2026, 7, 5))
+    stored = (date(2026, 5, 31), date(2026, 6, 30))
+    june = period_containing(GARAGE, date(2026, 6, 15))
+    august = period_containing(GARAGE, date(2026, 8, 15))
+    assert owned_by_first_charge(GARAGE, moved, june, stored)
+    assert not owned_by_first_charge(GARAGE, moved, august, stored)
+    # The re-derivation the store no longer uses:
+    assert owned_by_first_charge(GARAGE, moved, august)
