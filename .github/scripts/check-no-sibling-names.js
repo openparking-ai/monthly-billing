@@ -21,20 +21,30 @@
  * tokenised and digested exactly as a line is.
  *
  * ---------------------------------------------------------------------------
- * WHY THE FORBIDDEN WORDS ARE NOT WRITTEN DOWN HERE
+ * WHY THE FORBIDDEN WORDS ARE NOT IN THIS REPOSITORY AT ALL
  * ---------------------------------------------------------------------------
- * A guard that spells out the words it forbids breaks the rule it enforces: the
- * words would then appear in this public repository, in this file. So they are
- * held as sha256 of the lowercased word, exactly as check-no-real-data.js holds
- * the addresses it protects. The report prints the digest and never the word.
+ * A guard that spells out the words it forbids breaks the rule it enforces. It
+ * used to hold them as unsalted sha256 of the lowercased word, each labelled
+ * with its kind -- and a short lowercase name is found from its unsalted digest
+ * by trying candidates, so a public list of them was a list of the names with
+ * one step in the way, and the labels said which were hostnames. The names
+ * that list protected are to be treated as disclosed.
  *
- * WHAT THE SELF-TEST PROVES, AND WHAT IT DOES NOT. It proves the MECHANISM:
- * that a token whose digest is on the list is found, in a real file, and
- * rejected. It cannot prove that any particular digest is the digest of the
- * right word -- nothing inside this repository can, because that would require
- * the word. Those digests were derived from the private source and their count
- * is recorded there. Stated rather than glossed, because a control that proves
- * less than it appears to is the failure this project catalogues.
+ * So the list is a CI SECRET, not a file: `SIBLING_NAMES_DIGESTS` holds an
+ * HMAC-SHA256 of each lowercased word under the key in `SIBLING_NAMES_HMAC_KEY`,
+ * hex, separated by whitespace or commas, and `SIBLING_NAMES_COUNT` holds how
+ * many there are. No kind travels with them. Without the key a digest cannot be
+ * tested against a guess, and the key is in no file. A scan with no list FAILS
+ * -- it does not pass for want of words, which is the evidence-that-cannot-be-
+ * negative failure this project catalogues. The report prints a prefix of the
+ * keyed digest and never the word.
+ *
+ * WHAT THE SELF-TEST PROVES, AND WHAT IT DOES NOT. It proves the MECHANISM,
+ * under a key it makes for itself: that a token whose keyed digest is on the
+ * list is found, in a real file, and rejected, and that the same word under
+ * another key is not. It cannot prove that the secret holds the right words --
+ * nothing inside this repository can, because that would require the words.
+ * They are derived from the private source, which records their count.
  *
  * ---------------------------------------------------------------------------
  * WHY TOKENS, NOT A REGULAR EXPRESSION
@@ -61,54 +71,41 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, unlinkSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 
 /**
- * sha256 of each forbidden word, lowercased, with no surrounding whitespace.
- *
- * **GENERATED, NOT HAND-KEPT.** The name set lives in the private repository at
- * `ops/openparking-forbidden-names.txt`, and this block is emitted by
- * `ops/gen-forbidden-digests.js` there. It used to be a hand-derived list and it
- * had DRIFTED: it protected six names while the rule named more, and nothing
- * inside this repository could tell -- the digests are opaque by design, so a
- * missing one is invisible from here. That is why the count below is asserted
- * and why the source is named: a reviewer with the private repo can run
- * `--check` against this file, and a reviewer without it can at least see that a
- * digest has gone missing.
- *
- * See the header for what the self-test does and does not establish about them.
+ * The keyed digests of the forbidden words, from the environment CI fills from
+ * its secrets -- see the header. Read when a real scan needs them, never by
+ * the self-test, which makes its own key. Fails closed: no key, no list, a
+ * malformed entry or a count that does not match is exit 1, never "clean".
  */
-const FORBIDDEN_DIGESTS = new Map([
-  ['d3e394e67f9131b18092127e96f33a3382d564e6a1659be338fd5f17dfd13594', 'a sibling product name'],
-  ['a1b55013d3ee4966ad46cf62d662dad1aacc2d10d49323b74ec635d578dec158', 'a sibling product name'],
-  ['8bca6dada231e0fd80bf5ff9ff16aa79de1fb8e7b11cd282c0ea251d78376e9d', 'a sibling product name'],
-  ['9261ceef0b969e70ac20f1510f07a1e0d8db05f20c75161a2ef43b4eba27a7aa', 'a sibling product name'],
-  ['b1a0d3ef78d71ce5530307f5784a737ef3a8dcf6f36d233f30196ebf955efeae', 'a sibling hostname'],
-  ['5ecd2797e0882c8cfdc5fb97c02d66e15a465de46bf5b01fb5e4c3691571108e', 'a sibling hostname'],
-  ['fff7f86bf30fe38006e16fec2f446580ee329300a4deb735b02c8d55e95667b0', 'a sibling product name'],
-  ['30288cbad7837b2e6d5178df8a944fb2296352c680b2d62c50abc35da91b7b15', 'a sibling product name'],
-  ['5e0176c9d2070a5a2a22bf74b4abed303654690d58d64221ccbd022af827abc4', 'a sibling product name'],
-  ['f6f6ead0bd85c3127bd5004115a60942d61204561649d9e713bf4f74058de4d1', 'a sibling product name'],
-  ['74953c9d406bceeacf22dd9a93605e0a5962858b8cfdbcb7562d429af8b2ae21', 'a sibling hostname'],
-]);
-
-//: The number of names the private source held when this block was generated.
-//: A digest deleted by hand -- the one edit nothing else here could notice -- is
-//: caught by this and nothing else, because every digest is opaque.
-//:
-//: 12 -> 11: one entry left the private source because it was never within
-//: the rule's scope, which names the estate's products and hostnames and
-//: nothing about the maintainer personally.
-const EXPECTED_DIGEST_COUNT = 11;
-
-if (FORBIDDEN_DIGESTS.size !== EXPECTED_DIGEST_COUNT) {
-  console.error(
-    `this guard holds ${FORBIDDEN_DIGESTS.size} digests and declares ` +
-      `${EXPECTED_DIGEST_COUNT}. A name has been added or removed without the ` +
-      `count moving with it. Regenerate from the private source rather than ` +
-      `editing either by hand.`,
-  );
-  process.exit(1);
+function forbiddenFromSecrets() {
+  const key = process.env.SIBLING_NAMES_HMAC_KEY ?? '';
+  const listed = (process.env.SIBLING_NAMES_DIGESTS ?? '').split(/[\s,]+/).filter(Boolean);
+  const declared = Number.parseInt(process.env.SIBLING_NAMES_COUNT ?? '', 10);
+  const problems = [];
+  if (!key) problems.push('SIBLING_NAMES_HMAC_KEY is not set');
+  if (!listed.length) problems.push('SIBLING_NAMES_DIGESTS is not set or empty');
+  if (listed.some((d) => !/^[0-9a-f]{64}$/.test(d))) {
+    problems.push('SIBLING_NAMES_DIGESTS holds an entry that is not 64 lowercase hex digits');
+  }
+  const digests = new Set(listed);
+  if (!Number.isInteger(declared) || declared !== digests.size) {
+    problems.push(
+      `SIBLING_NAMES_COUNT is ${process.env.SIBLING_NAMES_COUNT ?? 'unset'} and the list ` +
+        `holds ${digests.size} distinct digests`,
+    );
+  }
+  if (problems.length) {
+    console.error('The forbidden-name list could not be read, so nothing was scanned:');
+    for (const line of problems) console.error(`  ${line}`);
+    console.error(
+      'The list is a CI secret, generated from the private source. A scan without it ' +
+        'is not a clean scan.',
+    );
+    process.exit(1);
+  }
+  return { key, digests };
 }
 
 /** The one sanctioned mention of the maintainer, which is an instruction. */
@@ -118,7 +115,8 @@ const ATTRIBUTION = 'Built by 72 Knots Method by 72Knots.ai';
 //: LICENSE and a lockfile stay out: neither is ours to edit.
 const SKIP = /^(LICENSE|package-lock\.json)$/;
 
-const digestOf = (value) => createHash('sha256').update(value.trim().toLowerCase()).digest('hex');
+const digestOf = (key, value) =>
+  createHmac('sha256', key).update(value.trim().toLowerCase()).digest('hex');
 
 /**
  * Every run of letters in `text`, lowercased, with a case transition ending a
@@ -185,29 +183,35 @@ function commitMessages(range) {
     });
 }
 
-/** Report every forbidden token in `text`, by digest. Never prints the token. */
-function scan(where, text, digests) {
+/**
+ * Report every forbidden token in `text`, by keyed digest. Never prints the
+ * token. `forbidden` is `{ key, digests }`.
+ */
+function scan(where, text, forbidden) {
   const failures = [];
   const seen = new Set();
   for (const token of tokens(text)) {
-    const digest = digestOf(token);
-    if (!digests.has(digest) || seen.has(digest)) continue;
+    const digest = digestOf(forbidden.key, token);
+    if (!forbidden.digests.has(digest) || seen.has(digest)) continue;
     seen.add(digest);
-    failures.push(`${where}: ${digests.get(digest)} (sha256 ${digest.slice(0, 16)}...)`);
+    failures.push(`${where}: a forbidden name (hmac ${digest.slice(0, 12)}...)`);
   }
   return failures;
 }
 
-/** Report every forbidden token in each PATH, by digest. */
-function scanPaths(files, digests) {
-  return files.flatMap((file) => scan(`path ${file}`, file, digests));
+/** Report every forbidden token in each PATH, by keyed digest. */
+function scanPaths(files, forbidden) {
+  return files.flatMap((file) => scan(`path ${file}`, file, forbidden));
 }
 
 function selfTest() {
   //: A word this repository will never contain, so the control cannot pass by
   //: accident, and no forbidden word is needed to prove the mechanism fires.
   const control = 'zzqxcontrolword';
-  const digests = new Map([[digestOf(control), 'the self-test control word']]);
+  const key = randomBytes(32).toString('hex');
+  const digests = { key, digests: new Set([digestOf(key, control)]) };
+  //: Keyed: the same word's digest under another key is not on the list.
+  const otherKey = { key: randomBytes(32).toString('hex'), digests: digests.digests };
   const path = `.self-test-${process.pid}.tmp`;
 
   let planted;
@@ -238,10 +242,11 @@ function selfTest() {
   //: is found; a path holding a longer word that contains it is not.
   const namedPath = scanPaths([`test/fixtures/${control}/a.txt`, `docs/x-${control}.md`], digests);
   const innocentPath = scanPaths([`test/fixtures/xx${control}yy/a.txt`], digests);
+  const underAnotherKey = scan('another key', `a line that mentions ${control} once`, otherKey);
 
   const ok =
     planted.length === 1 && camel.length === 1 && clean.length === 0 && innocent.length === 0 &&
-    namedPath.length === 2 && innocentPath.length === 0;
+    namedPath.length === 2 && innocentPath.length === 0 && underAnotherKey.length === 0;
   if (!ok) {
     console.error('self-test FAILED — this guard cannot be trusted.');
     console.error(`  planted:  ${planted.length} (want 1)`);
@@ -250,10 +255,12 @@ function selfTest() {
     console.error(`  innocent: ${innocent.length} (want 0)`);
     console.error(`  path:     ${namedPath.length} (want 2)`);
     console.error(`  innocent path: ${innocentPath.length} (want 0)`);
+    console.error(`  another key: ${underAnotherKey.length} (want 0)`);
     return false;
   }
   console.log('self-test OK — a planted name fails, inside an identifier too, and in a path;');
-  console.log('               a clean line passes, and so does a longer word containing it.');
+  console.log('               a clean line passes, and so does a longer word containing it,');
+  console.log('               and the same word under another key does not match.');
   return true;
 }
 
@@ -304,7 +311,8 @@ function worktree() {
   try {
     writeFileSync(planted, `a line that mentions ${control} once\n`);
     writeFileSync(named, 'a line that mentions nothing of the sort\n');
-    const digests = new Map([[digestOf(control), 'the in-run control word']]);
+    const key = randomBytes(32).toString('hex');
+    const digests = { key, digests: new Set([digestOf(key, control)]) };
     const files = walk();
     caught = [...scanFiles(files, digests), ...scanPaths(files, digests)];
   } finally {
@@ -321,12 +329,13 @@ function worktree() {
   }
   console.log(`in-run control OK — the planted word was caught in ${planted} and in the path ${named}, and nowhere else.`);
 
+  const forbidden = forbiddenFromSecrets();
   const tracked = trackedFiles();
   const untracked = untrackedFiles();
   const built = builtFiles();
   const files = walk();
-  const failures = [...scanFiles(files, FORBIDDEN_DIGESTS), ...scanPaths(files, FORBIDDEN_DIGESTS)];
-  for (const { where, text } of commitMessages()) failures.push(...scan(where, text, FORBIDDEN_DIGESTS));
+  const failures = [...scanFiles(files, forbidden), ...scanPaths(files, forbidden)];
+  for (const { where, text } of commitMessages()) failures.push(...scan(where, text, forbidden));
   if (failures.length) {
     console.error('A name from the private estate appears in the working tree:\n');
     for (const line of failures) console.error(`  ${line}`);
@@ -343,9 +352,10 @@ function main() {
   if (process.argv[2] === '--worktree') return worktree();
 
   const range = process.argv[2];
+  const forbidden = forbiddenFromSecrets();
   const failures = [];
 
-  failures.push(...scanPaths(trackedFiles(), FORBIDDEN_DIGESTS));
+  failures.push(...scanPaths(trackedFiles(), forbidden));
 
   for (const file of trackedFiles()) {
     let text;
@@ -354,11 +364,11 @@ function main() {
     } catch {
       continue; // not text; nothing to read a name out of
     }
-    failures.push(...scan(file, text, FORBIDDEN_DIGESTS));
+    failures.push(...scan(file, text, forbidden));
   }
 
   for (const { where, text } of commitMessages(range)) {
-    failures.push(...scan(where, text, FORBIDDEN_DIGESTS));
+    failures.push(...scan(where, text, forbidden));
   }
 
   //: The attribution is an instruction and is checked for PRESENCE, not

@@ -47,10 +47,11 @@ jobs:
           node .github/scripts/check-no-real-data.js
 
       - name: No name from the maintainer's other software (self-test)
-        # Same shape, and the same reason. This guard holds its forbidden words
-        # as digests rather than spelling them, so its self-test proves the
-        # MECHANISM -- see the script's header for what that does and does not
-        # establish. It also asserts the attribution line is PRESENT.
+        # Same shape, and the same reason. The forbidden words are in no file:
+        # the guard reads keyed digests of them from the repository's secrets
+        # (the three steps below), so its self-test proves the MECHANISM under
+        # a key it makes for itself -- see the script's header for what that
+        # does and does not establish.
         run: node .github/scripts/check-no-sibling-names.js --self-test
 
       - name: No name from the maintainer's other software (this pull request)
@@ -61,17 +62,29 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
+          SIBLING_NAMES_HMAC_KEY: ${{ secrets.SIBLING_NAMES_HMAC_KEY }}
+          SIBLING_NAMES_DIGESTS: ${{ secrets.SIBLING_NAMES_DIGESTS }}
+          SIBLING_NAMES_COUNT: ${{ secrets.SIBLING_NAMES_COUNT }}
         run: node .github/scripts/check-no-sibling-names.js "$BASE..$HEAD"
 
       - name: No name from the maintainer's other software (whole history)
         if: github.event_name != 'pull_request'
+        env:
+          SIBLING_NAMES_HMAC_KEY: ${{ secrets.SIBLING_NAMES_HMAC_KEY }}
+          SIBLING_NAMES_DIGESTS: ${{ secrets.SIBLING_NAMES_DIGESTS }}
+          SIBLING_NAMES_COUNT: ${{ secrets.SIBLING_NAMES_COUNT }}
         run: node .github/scripts/check-no-sibling-names.js
 
       - name: No name from the maintainer's other software (working tree)
         # Tracked and untracked files, contents and paths, and every commit
         # message. Plants its own controls -- a word in a file, a word in a
         # file's name -- and requires each caught, in the same run, before the
-        # real scan is read.
+        # real scan is read. The list comes from the secrets, as above; without
+        # them the step fails rather than reporting a scan that read no list.
+        env:
+          SIBLING_NAMES_HMAC_KEY: ${{ secrets.SIBLING_NAMES_HMAC_KEY }}
+          SIBLING_NAMES_DIGESTS: ${{ secrets.SIBLING_NAMES_DIGESTS }}
+          SIBLING_NAMES_COUNT: ${{ secrets.SIBLING_NAMES_COUNT }}
         run: node .github/scripts/check-no-sibling-names.js --worktree
 
   test:
