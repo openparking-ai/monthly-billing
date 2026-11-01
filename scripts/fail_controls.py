@@ -464,6 +464,14 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "first charge already billed are billed again by the next run -- a new "
         "parker charged twice for the same month",
     ),
+    "G18/first-charge-owed-until-stored": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "entitlement_store.py",
+        "    if agreement.start_day <= day_of(at, tz) < following.end_day:",
+        "    if False:  # PLANTED: the first two periods are owed by nothing",
+        "OP-7-2 undone: an agreement whose first charge was never issued is COVERED "
+        "for both first periods without paying anything",
+    ),
     "G19/reopen": (
         "tests/test_g19_paid_is_derived.py",
         "payments.py",

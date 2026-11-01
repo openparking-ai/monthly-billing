@@ -126,7 +126,14 @@ GUARANTEES: dict[str, str] = {
         "A period is owned by exactly one of the first charge and the billing run, "
         "decided by PERIOD and never by line count: the run does not re-issue the "
         "two periods the first charge covered, and it does issue every period after "
-        "them."
+        "them. The first charge is a STORED invoice (`issue-first-charge`, migration "
+        "0010): priced and taxed once as `first-charge` prices it, under the one-invoice-"
+        "per-payer-per-day lock -- keyed on the start day, or the day before when that is "
+        "a period's first day, so never on a period invoice's key -- paid and charged "
+        "like any other, with a `first_charges` row naming the two periods it owns; one "
+        "per agreement. Until it is stored, an agreement's days inside those two periods "
+        "are owed from its start day: covered-in-store and the register's "
+        "`first_charge_owed` agree that it is not covered past grace."
     ),
     "G19": (
         "An invoice is paid only by unreversed payments summing to its total, and "
@@ -572,8 +579,9 @@ GUARANTEES: dict[str, str] = {
     ),
     "G54": (
         "THE FIRST CHARGE'S TWO PERIODS TAKE ONE TAX MOMENT -- A FUNCTION-LEVEL "
-        "GUARANTEE, because the first charge is computed from documents and stored "
-        "nowhere. `first-charge --tax-sets` taxes the invoice once, through the engine, "
+        "GUARANTEE for the document path; `issue-first-charge` stores the same "
+        "invoice taxed at the same moment (G18). `first-charge --tax-sets` taxes the "
+        "invoice once, through the engine, "
         "at `first_charge_due_at`: the start instant of the FIRST period it pays for. "
         "A set taking effect between its two periods prices neither. Without "
         "`--tax-sets` the output says, on its own lines, that the figure is UNTAXED."

@@ -103,6 +103,7 @@ THE_FIVE = (
 THE_AGREEMENT_FIELDS = (
     "agreement", "version", "registrar", "status", "cancelled_effective_day",
     "start_day", "pauses", "blocked", "not_covered_from", "access_hours", "lane_must_ask",
+    "first_charge_owed",
 )
 
 #: G45's list, and what a read BY GARAGE must not echo either: the home garage
@@ -197,11 +198,18 @@ def rows(*pairs: tuple[str, str]) -> tuple[GarageRegisterEntry, ...]:
     return tuple(GarageRegisterEntry(identity_normalised=i, agreement=a) for i, a in pairs)
 
 
+FIRST_OWED = {"not_covered_from": "2026-01-11", "until_day": "2026-02-28"}
+
+
 def agreement_entry(agreement_id: str, **overrides) -> RegisteredAgreement:
     return RegisteredAgreement(**{
         "agreement": agreement_id, "version": 1, "registrar": "outside", "status": "active",
         "cancelled_effective_day": None, "start_day": date(2026, 1, 5), "pauses": (),
-        "blocked": False, "not_covered_from": None, **overrides,
+        "blocked": False, "not_covered_from": None,
+        # No first charge is stored for these agreements: from January 5,
+        # grace 5, not covered from the 11th until the second period ends
+        # (OP-7-2).
+        "first_charge_owed": (date(2026, 1, 11), date(2026, 2, 28)), **overrides,
     })
 
 
@@ -242,11 +250,12 @@ def test_the_answer_is_five_fields_and_nothing_more_travels():
         {"agreement": "ag-a", "version": 3, "registrar": "outside", "status": "cancelled",
          "cancelled_effective_day": "2026-02-01", "start_day": "2026-01-05",
          "pauses": [{"from_day": "2026-01-10", "until_day": "2026-01-20"}], "blocked": True,
-         "not_covered_from": "2026-01-25", "access_hours": None, "lane_must_ask": False},
+         "not_covered_from": "2026-01-25", "access_hours": None, "lane_must_ask": False,
+         "first_charge_owed": FIRST_OWED},
         {"agreement": "ag-b", "version": 1, "registrar": "this_module", "status": "active",
          "cancelled_effective_day": None, "start_day": "2026-01-05", "pauses": [],
          "blocked": False, "not_covered_from": None, "access_hours": None,
-         "lane_must_ask": False},
+         "lane_must_ask": False, "first_charge_owed": FIRST_OWED},
     ]
     assert all(tuple(entry) == THE_AGREEMENT_FIELDS for entry in document["agreements"])
     for fragment in NEVER_TRAVELS_BY_GARAGE:
@@ -352,7 +361,7 @@ def test_a_cancelled_agreement_past_its_day_is_shown_with_its_rows(app, tenant_i
         "agreement": OUTSIDE_ID, "version": 2, "registrar": "outside", "status": "cancelled",
         "cancelled_effective_day": "2026-02-01", "start_day": "2026-01-05", "pauses": [],
         "blocked": False, "not_covered_from": None, "access_hours": None,
-        "lane_must_ask": False}]
+        "lane_must_ask": False, "first_charge_owed": FIRST_OWED}]
 
 
 @pytest.mark.guarantee("G48")
@@ -514,6 +523,7 @@ def test_another_tenants_garage_of_the_same_id_is_not_read_with_the_policy_on_an
     their_entry = agreement_entry(
         OUTSIDE_ID, version=2, pauses=(their_pause,), blocked=True,
         not_covered_from=date(2026, 5, 16),
+        first_charge_owed=(date(2026, 1, 21), date(2026, 2, 28)),  # their ten days too
     )
 
     def app_sees():

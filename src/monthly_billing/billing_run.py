@@ -69,8 +69,8 @@ it. Any other total is unpaid at issue and the derivation writes nothing.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -185,17 +185,149 @@ def invoice_reference(garage: Garage, period: BillingPeriod, payer_id: str) -> s
     return f"{garage.id}/{period.start_day.isoformat()}/{payer_id}"
 
 
-def owned_by_first_charge(garage: Garage, agreement: Agreement, period: BillingPeriod) -> bool:
+def owned_by_first_charge(
+    garage: Garage,
+    agreement: Agreement,
+    period: BillingPeriod,
+    stored: tuple[date, date] | None = None,
+) -> bool:
     """Whether ``period`` is one of the two the first charge already covered.
 
     The first charge takes the period containing the start day and the one after
     it. This compares PERIODS -- by their start day, which identifies a period at
     a garage -- and never counts lines, because a first charge with fees emits
     five lines and one without emits two, and both cover exactly two periods.
+
+    ``stored`` is the two period start days a STORED first charge owns
+    (``first_charges``, migration 0010). When given they decide, never the
+    latest version's start day: a version that moved the start day must not
+    move the periods a first charge was issued for (OP-7-3).
     """
+    if stored is not None:
+        return period.start_day in stored
     partial = period_containing(garage, agreement.start_day)
     following = next_period_after(garage, partial)
     return period.start_day in (partial.start_day, following.start_day)
+
+
+def stored_first_charges(cursor: Any, garage_uuid: Any) -> dict[str, tuple[date, date]]:
+    """The two owned period start days of every first charge stored at a home,
+    by agreement id."""
+    cursor.execute(
+        "SELECT agreement_external_id, first_period_start_day, second_period_start_day "
+        "FROM first_charges WHERE garage_id = %s",
+        (as_uuid(garage_uuid),),
+    )
+    return {agreement: (first, second) for agreement, first, second in cursor.fetchall()}
+
+
+def first_charge_day(garage: Garage, agreement: Agreement) -> date:
+    """The day a first charge's invoice is keyed on (migration 0010): the start
+    day, or the day before it when the agreement starts on a period's first
+    day -- never a period's first day, so never the key of a period invoice."""
+    partial = period_containing(garage, agreement.start_day)
+    if agreement.start_day == partial.start_day:
+        return agreement.start_day - timedelta(days=1)
+    return agreement.start_day
+
+
+def issue_first_charge(
+    connection: Any,
+    tenant_id: Any,
+    agreement_id: str,
+    *,
+    now: datetime,
+) -> RunLine:
+    """THE FIRST CHARGE, STORED (OP-7-2): the two lines ``first_charge``
+    prices, written as an invoice through the run's own path -- taxed once at
+    ``first_charge_due_at`` by the engine, under the invoice's one-per-payer-
+    per-day lock, ``paid_at`` derived -- and, in the same transaction, the
+    ``first_charges`` row naming the agreement, the invoice and the two periods
+    it owns. One per agreement, by constraint: a second issue is
+    ALREADY_ISSUED. The invoice is then paid, charged and judged like any other.
+    """
+    import psycopg  # the store extra; the engine never imports this module
+
+    from .invoice import first_charge, first_charge_due_at
+    from .store.records import latest_version_home, load_garage_by_uuid
+
+    tenant_id = as_uuid(tenant_id)
+    with tenant(connection, tenant_id) as cursor:
+        home_uuid = latest_version_home(cursor, tenant_id, agreement_id)
+        stored = load_garage_by_uuid(cursor, home_uuid)
+        garage = stored.garage
+        items = [
+            item for item in load_agreements_at_garage(cursor, home_uuid)
+            if item.agreement.id == agreement_id
+        ]
+        already = stored_first_charges(cursor, home_uuid).get(agreement_id)
+    connection.rollback()
+    if not items:
+        raise GarageNotFound(f"agreement {agreement_id!r} is not billed at its home garage.")
+    (item,) = items
+    agreement = item.agreement
+    payer_id = agreement.payer_id
+    if already is not None:
+        return RunLine(payer_id, RunOutcome.ALREADY_ISSUED,
+                       "the first charge of this agreement was already issued")
+    partial = period_containing(garage, agreement.start_day)
+    following = next_period_after(garage, partial)
+    invoice = replace(
+        first_charge(garage, agreement),
+        issued_for_period_start=first_charge_day(garage, agreement),
+    )
+    reference = f"{garage.id}/first-charge/{agreement.id}"
+    due_at = first_charge_due_at(garage, agreement)
+    try:
+        with tenant(connection, tenant_id) as cursor:
+            taxed = tax_an_invoice(
+                invoice, sets=load_tax_set_documents(cursor, home_uuid), at=due_at,
+            )
+            invoice_uuid = _persist(
+                cursor, tenant_id, taxed.invoice, position=taxed.position,
+                reference=reference, garage_uuid=home_uuid, payer_uuid=item.payer_uuid,
+                agreement_uuids={agreement.id: item.uuid}, due_at=due_at, now=now,
+            )
+            guarded_insert(
+                cursor,
+                "first_charges",
+                {
+                    "tenant_id": tenant_id,
+                    "garage_id": home_uuid,
+                    "agreement_external_id": agreement.id,
+                    "agreement_id": item.uuid,
+                    "invoice_id": invoice_uuid,
+                    "first_period_start_day": partial.start_day,
+                    "second_period_start_day": following.start_day,
+                    "second_period_end_day": following.end_day,
+                },
+            )
+            cursor.fetchone()
+        connection.commit()
+    except (Refused, UnpriceableCurrency, InstrumentLike) as refusal:
+        connection.rollback()
+        return RunLine(payer_id, RunOutcome.REFUSED, str(refusal), reference=reference)
+    except psycopg.errors.UniqueViolation as violation:
+        connection.rollback()
+        name = violation.diag.constraint_name
+        if name == "first_charges_one_per_agreement":
+            return RunLine(payer_id, RunOutcome.ALREADY_ISSUED,
+                           "the first charge of this agreement was already issued",
+                           reference=reference)
+        return RunLine(
+            payer_id, RunOutcome.CONSTRAINT_VIOLATED,
+            f"the database refused the first charge on {name!r}: the payer already has "
+            f"an invoice keyed on {invoice.issued_for_period_start}; nothing issued",
+            reference=reference,
+        )
+    issued = taxed.invoice
+    return RunLine(
+        payer_id, RunOutcome.ISSUED,
+        f"first charge: {len(issued.lines)} line(s), subtotal {issued.subtotal_minor}, tax "
+        f"{issued.total_minor - issued.subtotal_minor}, total {issued.total_minor} "
+        f"{issued.currency} minor",
+        reference=reference, total_minor=issued.total_minor,
+    )
 
 
 def run_billing(
@@ -233,11 +365,14 @@ def run_billing(
         try:
             with tenant(connection, tenant_id) as cursor:
                 items = load_agreements_at_garage(cursor, stored.uuid, payer_uuid)
+                first_charges = stored_first_charges(cursor, stored.uuid)
             connection.rollback()
             priced = tuple(
                 item.agreement
                 for item in items
-                if not owned_by_first_charge(garage, item.agreement, period)
+                if not owned_by_first_charge(
+                    garage, item.agreement, period, first_charges.get(item.agreement.id)
+                )
             )
             invoice = invoice_for_period(garage, priced, period, payer_id)
         except (Refused, InvalidAgreement, NotMinorUnits, UnpriceableCurrency) as refusal:

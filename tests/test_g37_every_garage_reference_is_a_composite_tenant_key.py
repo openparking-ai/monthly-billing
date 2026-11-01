@@ -62,6 +62,17 @@ CROSS_GARAGE_INSERTS = {
         "INSERT INTO agreement_garages (tenant_id, agreement_id, garage_id) VALUES (%s, %s, %s)",
         "agreement_garages_garage_in_tenant",
     ),
+    "first_charges": (
+        # Its invoice is written at agreement A's own home, so the only key the
+        # statement can trip is the first charge's own garage reference.
+        "WITH i AS (INSERT INTO invoices (tenant_id, reference, payer_id, garage_id, currency, "
+        "period_start_day, due_at) SELECT %s, 'fc-cross', payer_id, garage_id, 'USD', "
+        "'2026-01-02', now() FROM agreements WHERE id = %s RETURNING id) "
+        "INSERT INTO first_charges (tenant_id, garage_id, agreement_external_id, agreement_id, "
+        "invoice_id, first_period_start_day, second_period_start_day, second_period_end_day) "
+        "SELECT %s, %s, 'ag-cross', %s, i.id, '2026-01-01', '2026-02-01', '2026-03-01' FROM i",
+        "first_charges_garage_in_tenant",
+    ),
     "garage_tax_sets": (
         "INSERT INTO garage_tax_sets (tenant_id, garage_id, effective_from, rules, stated_by) "
         "VALUES (%s, %s, '1999-01-01T00:00:00Z', '[]', 'cross')",
@@ -79,6 +90,8 @@ def _params(table: str, tenant_id, garage, payer_a, agreement_a) -> tuple:
         return (tenant_id, garage, payer_a)
     if table == "agreement_garages":
         return (tenant_id, agreement_a, garage)
+    if table == "first_charges":
+        return (tenant_id, agreement_a, tenant_id, garage, agreement_a)
     return (tenant_id, payer_a, garage)
 
 

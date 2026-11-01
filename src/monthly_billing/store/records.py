@@ -1310,6 +1310,13 @@ class RegisteredAgreement:
       stay entered and leaves, which the register cannot know. Such an
       agreement is never covered by the register alone; the lane asks
       ``covered-in-store`` with the stay's entry instant.
+    * ``first_charge_owed`` -- while the agreement has no STORED first charge
+      (``first_charges``, migration 0010), the half-open days
+      [start day + grace + 1, end of the second period) on which it is not
+      covered: the run never bills those two periods, so nothing else in the
+      store says they are owed (OP-7-2). None once a first charge is stored --
+      its invoice is read like any other, through ``not_covered_from`` -- or
+      when the home garage cannot be read.
 
     Dates, times and flags: no amount, no invoice, no payer, no grace figure.
     Additive -- a reader that does not know these fields reads the first five
@@ -1327,6 +1334,7 @@ class RegisteredAgreement:
     not_covered_from: date | None
     access_hours: tuple[time, time] | None = None
     lane_must_ask: bool = False
+    first_charge_owed: tuple[date, date] | None = None
 
 
 @dataclass(frozen=True)
@@ -1428,6 +1436,14 @@ class GarageRegister:
                         }
                     ),
                     "lane_must_ask": each.lane_must_ask,
+                    "first_charge_owed": (
+                        None
+                        if each.first_charge_owed is None
+                        else {
+                            "not_covered_from": each.first_charge_owed[0].isoformat(),
+                            "until_day": each.first_charge_owed[1].isoformat(),
+                        }
+                    ),
                 }
                 for each in self.agreements
             ],
@@ -1586,7 +1602,38 @@ def _coverage_days(
         # An hour-limited stay is decided by its own entry and exit, never by
         # the days: the register does not cover it, the lane asks (OP-7-1).
         "lane_must_ask": access_hours is not None,
+        "first_charge_owed": _first_charge_owed_days(
+            cursor, latest, agreement_id, start_day, exceptions
+        ),
     }
+
+
+def _first_charge_owed_days(
+    cursor: Any, latest: _LatestVersion, agreement_id: str, start_day: date,
+    exceptions: tuple,
+) -> tuple[date, date] | None:
+    """The register's half of OP-7-2: the days an agreement with no stored
+    first charge is not covered, as ``covered-in-store`` decides them
+    (``entitlement_store.first_charge_owed_from``) -- owed from its start day,
+    grace and the owner's extensions counted, until its second period ends."""
+    from ..billing_run import stored_first_charges
+    from ..cycle import next_period_after, period_containing
+    from ..exceptions_by_owner import applied_grace_days
+
+    if agreement_id in stored_first_charges(cursor, latest.home_uuid):
+        return None
+    cursor.execute("SELECT external_id FROM garages WHERE id = %s", (latest.home_uuid,))
+    (home_id,) = cursor.fetchone()
+    try:
+        home = load_garage(cursor, home_id)
+    except Exception:  # noqa: BLE001 -- the read validates nothing it does not return
+        return None
+    if home is None:
+        return None
+    following = next_period_after(home.garage, period_containing(home.garage, start_day))
+    grace = applied_grace_days(home.garage.payment_grace_days, exceptions)
+    first = start_day + timedelta(days=grace + 1)
+    return (first, following.end_day) if first < following.end_day else None
 
 
 # ---------------------------------------------------------------------------
@@ -1629,6 +1676,22 @@ def load_garage(cursor: Any, external_id: str) -> StoredGarage | None:
             identity_rule=IdentityRule(rule),
         ),
     )
+
+
+def load_garage_by_uuid(cursor: Any, garage_uuid: Any) -> StoredGarage:
+    """A garage the store holds, by its uuid."""
+    cursor.execute("SELECT external_id FROM garages WHERE id = %s", (as_uuid(garage_uuid),))
+    row = cursor.fetchone()
+    stored = None if row is None else load_garage(cursor, row[0])
+    if stored is None:
+        raise GarageNotFound(f"no garage {garage_uuid} in the store.")
+    return stored
+
+
+def latest_version_home(cursor: Any, tenant_id: Any, agreement_id: str) -> UUID:
+    """The home garage's uuid of an agreement's latest version; NOT FOUND
+    when the tenant holds no version of it."""
+    return _latest_version_of(cursor, as_uuid(tenant_id), agreement_id).home_uuid
 
 
 def load_payers_at_garage(cursor: Any, garage_uuid: Any) -> tuple[tuple[UUID, str], ...]:

@@ -39,6 +39,7 @@ from store_harness import (
     DSN,
     app_connection,
     apply_migration,
+    apply_migrations_after,
     as_blind_owner,
     cluster_lock,
     migrate,
@@ -184,7 +185,9 @@ def test_0007_rekeys_the_folded_forms_and_leaves_exact_ones(schema_0006):
         (FOLDED.id, "g041t", "ag-0001"), (EXACT.id, "GO4IT", "ag-0001"),
     ])
     assert _rows(owner, LISTED) == [("CAR001", "car001"), ("GO4IT", "g041t")]
-    # And the module answers the reader's G041T at the folded garage.
+    # And the module answers the reader's G041T at the folded garage -- today's
+    # module, so the migrations after 0007 are applied before it reads.
+    apply_migrations_after(owner, "0007")
     app = app_connection(DSN)
     try:
         assert covered_from_store(app, tenant_id, FOLDED.id, "G041T", NOW).covered

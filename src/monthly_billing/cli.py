@@ -28,6 +28,7 @@ Against the store (the `store` extra, `MONTHLY_BILLING_DSN`, `--tenant`):
         --reversed-at 2026-05-12T10:00:00-06:00 --recorded-by operator
     monthly-billing covered-in-store --tenant T --garage G --vehicle ABC123 \\
         --at 2026-05-07T09:00:00-06:00
+    monthly-billing issue-first-charge --tenant T --agreement AG [--now ISO]
     monthly-billing pending-attempts --tenant T --invoice REF
     monthly-billing resolve-attempt --tenant T --attempt ID --outcome success \\
         --at 2026-05-07T09:05:00-06:00 --recorded-by operator --reference AUTH
@@ -258,6 +259,22 @@ def _run(args: argparse.Namespace) -> int:
     # answer and exits zero; the operator can run it twice without a shell
     # script deciding that was an error.
     return 1 if report.refused else 0
+
+
+def _issue_first_charge(args: argparse.Namespace) -> int:
+    from .billing_run import FAILED_OUTCOMES, issue_first_charge
+
+    line = issue_first_charge(
+        _connection(args),
+        args.tenant,
+        args.agreement,
+        now=datetime.fromisoformat(args.now) if args.now else datetime.now().astimezone(),
+    )
+    print(f"First charge of agreement {args.agreement}")
+    print(f"  {line.payer_id}: {line.outcome.value.upper()} — {line.detail}")
+    if line.reference:
+        print(f"  invoice {line.reference}")
+    return 1 if line.outcome in FAILED_OUTCOMES else 0
 
 
 def _record_payment(args: argparse.Namespace) -> int:
@@ -539,6 +556,15 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--period-containing", required=True, help="a day inside the period")
     run.add_argument("--now", help="the issue instant (ISO with offset); default: now")
     run.set_defaults(run=_run)
+
+    first = sub.add_parser(
+        "issue-first-charge",
+        help="store an agreement's first charge as an invoice (its first two periods)",
+    )
+    _store_arguments(first)
+    first.add_argument("--agreement", required=True, help="the agreement id")
+    first.add_argument("--now", help="the issue instant (ISO with offset); default: now")
+    first.set_defaults(run=_issue_first_charge)
 
     taxes = sub.add_parser(
         "state-tax-sets", help="state a garage's tax sets from a document; prints the whole list"

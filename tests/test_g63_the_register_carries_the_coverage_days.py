@@ -74,6 +74,9 @@ def _judge(entry: dict, day: date) -> bool:
         return False
     if entry["blocked"]:
         return False
+    owed = entry.get("first_charge_owed")
+    if owed and iso(owed["not_covered_from"]) <= day < iso(owed["until_day"]):
+        return False
     stop = iso(entry["not_covered_from"])
     return stop is None or day < stop
 

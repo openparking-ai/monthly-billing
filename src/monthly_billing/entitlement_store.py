@@ -132,6 +132,9 @@ def covered_from_store(
         # cross-row database backstop, and the contract says so.
         home = _home_garage(cursor, stored, chosen.agreement.garage_id)
         unpaid_since = _earliest_unpaid_due_at(cursor, chosen.payer_uuid, home.uuid)
+        first_owed = first_charge_owed_from(cursor, home, chosen.agreement, at)
+        if first_owed is not None:
+            unpaid_since = first_owed if unpaid_since is None else min(unpaid_since, first_owed)
         exceptions = _exceptions_for(cursor, chosen.agreement.id, chosen.payer_uuid, home.uuid)
     connection.rollback()
 
@@ -147,6 +150,33 @@ def covered_from_store(
         home_garage=replace(home.garage, payment_grace_days=grace),
         registrations=registrations,
     )
+
+
+def first_charge_owed_from(
+    cursor: Any, home: StoredGarage, agreement: Any, at: datetime
+) -> datetime | None:
+    """THE FIRST CHARGE'S PERIODS ARE OWED UNTIL ONE IS STORED (OP-7-2).
+
+    The run never bills the two periods the first charge covers, so before
+    the first charge is issued (``issue-first-charge``) the store holds no
+    invoice for them and nothing would read unpaid: a parker who never paid
+    was covered for up to two months. For an agreement with no stored first
+    charge, a day inside those two periods is owed from the start of its start
+    day, in the home's calendar -- grace runs from there as for any invoice.
+    None when a first charge is stored (its invoice is read like any other) or
+    the day is outside the two periods."""
+    from .billing_run import stored_first_charges
+    from .cycle import next_period_after, period_containing
+    from .localday import day_of, day_start, zone
+
+    if agreement.id in stored_first_charges(cursor, home.uuid):
+        return None
+    tz = zone(home.garage.timezone)
+    partial = period_containing(home.garage, agreement.start_day)
+    following = next_period_after(home.garage, partial)
+    if agreement.start_day <= day_of(at, tz) < following.end_day:
+        return day_start(agreement.start_day, tz)
+    return None
 
 
 def _home_garage(cursor: Any, asking: StoredGarage, home_id: str) -> StoredGarage:

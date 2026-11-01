@@ -122,6 +122,15 @@ def apply_migration(owner: Any, prefix: str) -> None:
         _apply(cursor, migration_path(prefix))
 
 
+def apply_migrations_after(owner: Any, prefix: str) -> None:
+    """Every migration after ``prefix``, in order: for a test that judged one
+    migration on its own and then reads with today's module, whose reads need
+    the schema as it ships."""
+    for path in sorted(MIGRATIONS.glob("*.sql")):
+        if path.name[:4] > prefix:
+            apply_migration(owner, path.name[:4])
+
+
 #: A role that owns the schema and can see NO row of a FORCE-RLS table: not a
 #: superuser, no BYPASSRLS. The shape a managed database's owner has, and the
 #: shape under which a backfill that reads the rows reads nothing.

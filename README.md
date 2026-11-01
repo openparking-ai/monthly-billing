@@ -24,6 +24,7 @@ answer the lane from what is actually owed.
 ```
 $ monthly-billing state-tax-sets --tenant T --garage garage-downtown \
       --sets tax_sets.json --stated-by owner
+$ monthly-billing issue-first-charge --tenant T --agreement ag-fleet-0007
 $ monthly-billing run --tenant T --garage garage-downtown --period-containing 2026-05-01
 $ monthly-billing record-payment --tenant T --invoice garage-downtown/2026-04-30/payer-acme \
       --method cheque --amount-minor 15936 --received-at 2026-05-08T10:00:00-06:00 \
@@ -37,6 +38,12 @@ $ monthly-billing release-vehicle --tenant T --agreement ag-fleet-0007 --vehicle
 $ monthly-billing show-register --tenant T --agreement ag-fleet-0007
 $ monthly-billing show-garage-register --tenant T --garage garage-downtown
 ```
+
+`issue-first-charge` stores an agreement's first charge -- the period containing
+its start day and the next one -- as an invoice, paid and charged like any
+other, with the two periods it owns recorded beside it; the run never bills
+them. Until it is issued, the agreement's days in those two periods are owed
+from its start day: covered through grace, not covered after it.
 
 Nothing wakes itself up: the run is a command the operator's platform calls on
 the billing day, and the platform is an ordinary client of it. `register-vehicle`
