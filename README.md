@@ -59,7 +59,10 @@ registration row at the garage as the identity stored there and the agreement
 it names, and for every agreement those rows name its latest version's
 registrar, status and cancellation day, and the days coverage is decided by --
 its start day and pauses, the owner's block, and the first day an unpaid
-invoice is past grace (dates and a flag only: no amount, no invoice, no payer);
+invoice is past grace (dates and a flag only: no amount, no invoice, no payer), and its
+access hours with `lane_must_ask`, true for any agreement with hours: the
+register cannot decide such a stay, so the lane asks `covered-in-store` with
+the stay's `--entered-at`;
 an agreement whose latest version no longer covers the garage is named, and so
 is an id the rows name that the store holds no version of -- shown, never a refusal of the whole read. Nothing of
 where else an agreement answers travels: not its home garage, not its covered

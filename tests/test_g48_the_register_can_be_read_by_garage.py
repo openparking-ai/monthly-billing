@@ -98,10 +98,11 @@ THE_FIVE = (
     "agreements_not_found",
 )
 #: The five columns of the latest version, then the four days the module
-#: decides coverage by (G63).
+#: decides coverage by (G63), then the access hours and the flag that sends an
+#: hour-limited agreement's stays to covered-in-store (OP-7-1).
 THE_AGREEMENT_FIELDS = (
     "agreement", "version", "registrar", "status", "cancelled_effective_day",
-    "start_day", "pauses", "blocked", "not_covered_from",
+    "start_day", "pauses", "blocked", "not_covered_from", "access_hours", "lane_must_ask",
 )
 
 #: G45's list, and what a read BY GARAGE must not echo either: the home garage
@@ -110,7 +111,10 @@ THE_AGREEMENT_FIELDS = (
 #: are the two of G45's words that DO travel here, as days (G63) -- a lane
 #: deciding by day needs them; nothing of money does.
 NEVER_TRAVELS_BY_GARAGE = (
-    *(fragment for fragment in NEVER_TRAVELS if fragment not in ("start", "pause")),
+    *(
+        fragment for fragment in NEVER_TRAVELS
+        if fragment not in ("start", "pause", "access")
+    ),
     "home", "covered_garage", "grace", "amount", "minor",
 )
 
@@ -238,10 +242,11 @@ def test_the_answer_is_five_fields_and_nothing_more_travels():
         {"agreement": "ag-a", "version": 3, "registrar": "outside", "status": "cancelled",
          "cancelled_effective_day": "2026-02-01", "start_day": "2026-01-05",
          "pauses": [{"from_day": "2026-01-10", "until_day": "2026-01-20"}], "blocked": True,
-         "not_covered_from": "2026-01-25"},
+         "not_covered_from": "2026-01-25", "access_hours": None, "lane_must_ask": False},
         {"agreement": "ag-b", "version": 1, "registrar": "this_module", "status": "active",
          "cancelled_effective_day": None, "start_day": "2026-01-05", "pauses": [],
-         "blocked": False, "not_covered_from": None},
+         "blocked": False, "not_covered_from": None, "access_hours": None,
+         "lane_must_ask": False},
     ]
     assert all(tuple(entry) == THE_AGREEMENT_FIELDS for entry in document["agreements"])
     for fragment in NEVER_TRAVELS_BY_GARAGE:
@@ -346,7 +351,8 @@ def test_a_cancelled_agreement_past_its_day_is_shown_with_its_rows(app, tenant_i
     assert printed["agreements"] == [{
         "agreement": OUTSIDE_ID, "version": 2, "registrar": "outside", "status": "cancelled",
         "cancelled_effective_day": "2026-02-01", "start_day": "2026-01-05", "pauses": [],
-        "blocked": False, "not_covered_from": None}]
+        "blocked": False, "not_covered_from": None, "access_hours": None,
+        "lane_must_ask": False}]
 
 
 @pytest.mark.guarantee("G48")

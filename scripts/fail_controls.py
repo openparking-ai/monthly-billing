@@ -2944,6 +2944,14 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "    pauses = ()  # PLANTED: the version's pauses are not read",
         "the register carries no pause, so a lane covers a paused holder",
     ),
+    "G63/hours-make-the-lane-ask": (
+        "tests/test_g63_the_register_carries_the_coverage_days.py",
+        "store/records.py",
+        '        "lane_must_ask": access_hours is not None,',
+        '        "lane_must_ask": False,  # PLANTED: the days alone decide an hour-limited stay',
+        "OP-7-1 undone: a register reader covers a 07:00-19:00 parker's overnight stay "
+        "that covered-in-store refuses, and the barrier opens free",
+    ),
     "G64": (
         "tests/test_g64_a_zero_invoice_is_paid_at_issue.py",
         "billing_run.py",

@@ -1302,9 +1302,19 @@ class RegisteredAgreement:
       nothing is unpaid. The payment state is the store's as of NOW, as it is
       for ``covered-in-store``.
 
-    Dates and a flag: no amount, no invoice, no payer, no grace figure.
+    * ``access_hours`` -- ``agreements.access_entry_from`` and
+      ``access_exit_by``, the garage-local times a stay must enter after and
+      leave by (``OUTSIDE_ACCESS_HOURS``), or None when the agreement has none.
+    * ``lane_must_ask`` -- true whenever ``access_hours`` is set (OP-7-1). The
+      days above cannot decide an hour-limited stay: it depends on when THIS
+      stay entered and leaves, which the register cannot know. Such an
+      agreement is never covered by the register alone; the lane asks
+      ``covered-in-store`` with the stay's entry instant.
+
+    Dates, times and flags: no amount, no invoice, no payer, no grace figure.
     Additive -- a reader that does not know these fields reads the first five
-    as before."""
+    as before, and a reader that does not know ``lane_must_ask`` must not be
+    used for an agreement with hours."""
 
     agreement: str
     version: int
@@ -1315,6 +1325,8 @@ class RegisteredAgreement:
     pauses: tuple[tuple[date, date], ...]
     blocked: bool
     not_covered_from: date | None
+    access_hours: tuple[time, time] | None = None
+    lane_must_ask: bool = False
 
 
 @dataclass(frozen=True)
@@ -1337,7 +1349,7 @@ class GarageRegister:
     and the agreement ids the rows name that the tenant holds no version of.
     Five keys, and the field set is derived from this class, so a sixth is
     seen the day it exists. NOTHING ELSE TRAVELS -- not the price, the payer,
-    the spots, the fees, the mandate, the access hours, an invoice or an
+    the spots, the fees, the mandate, an invoice or an
     amount, the home garage, the covered set, the version's own vehicle list
     or a registration's instant. A reader at a garage needs to know which cars
     an agreement holds HERE and on which days the agreement stands, not where
@@ -1407,6 +1419,15 @@ class GarageRegister:
                         if each.not_covered_from is None
                         else each.not_covered_from.isoformat()
                     ),
+                    "access_hours": (
+                        None
+                        if each.access_hours is None
+                        else {
+                            "entry_from": each.access_hours[0].strftime("%H:%M"),
+                            "exit_by": each.access_hours[1].strftime("%H:%M"),
+                        }
+                    ),
+                    "lane_must_ask": each.lane_must_ask,
                 }
                 for each in self.agreements
             ],
@@ -1516,10 +1537,15 @@ def _coverage_days(
     from ..exceptions_by_owner import applied_grace_days, is_blocked
 
     cursor.execute(
-        "SELECT start_day, payer_id FROM agreements WHERE tenant_id = %s AND id = %s",
+        "SELECT start_day, payer_id, access_entry_from, access_exit_by FROM agreements "
+        "WHERE tenant_id = %s AND id = %s",
         (tenant_id, latest.uuid),
     )
-    start_day, payer_uuid = cursor.fetchone()
+    start_day, payer_uuid, entry_from, exit_by = cursor.fetchone()
+    access_hours = (
+        None if entry_from is None or exit_by is None
+        else (_as_time(entry_from), _as_time(exit_by))
+    )
     cursor.execute(
         "SELECT from_day, until_day FROM agreement_pauses "
         "WHERE tenant_id = %s AND agreement_id = %s",
@@ -1556,6 +1582,10 @@ def _coverage_days(
         "pauses": pauses,
         "blocked": is_blocked(exceptions),
         "not_covered_from": not_covered_from,
+        "access_hours": access_hours,
+        # An hour-limited stay is decided by its own entry and exit, never by
+        # the days: the register does not cover it, the lane asks (OP-7-1).
+        "lane_must_ask": access_hours is not None,
     }
 
 
