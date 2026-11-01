@@ -216,6 +216,11 @@ def _exceptions_for(
     require red.
     """
     tenant_id = None if tenant_id is None else as_uuid(tenant_id)
+    # A grace extension on the AGREEMENT is bound to the invoice the owner was
+    # looking at (OP-7-9): it counts only when the earliest unpaid invoice --
+    # the one grace is judged on -- was already issued when it was recorded.
+    # Read with no such binding, ten days given for May's invoice were ten
+    # more on every invoice after, and several decisions added up for ever.
     # A block or an unblock on an invoice is read whatever the invoice's paid
     # state: a block the owner recorded is lifted by an unblock the owner
     # records, never by a cheque. A grace extension on an invoice is read only
@@ -228,12 +233,20 @@ def _exceptions_for(
               WHERE %s::uuid IS NULL OR tenant_id = %s) e
         LEFT JOIN agreements a ON a.id = e.agreement_id AND a.tenant_id = e.tenant_id
         LEFT JOIN invoices i ON i.id = e.invoice_id
-        WHERE a.external_id = %s
+        WHERE (a.external_id = %s
+               AND (e.kind <> 'extend_grace'
+                    OR e.recorded_at >= (
+                        SELECT u.issued_at FROM invoices u
+                        WHERE u.payer_id = %s AND u.garage_id = %s AND u.paid_at IS NULL
+                        ORDER BY greatest(u.due_at, u.issued_at), u.id LIMIT 1)))
            OR (i.payer_id = %s AND i.garage_id = %s
                AND (i.paid_at IS NULL OR e.kind IN ('block', 'unblock')))
         ORDER BY e.recorded_at
         """,
-        (tenant_id, tenant_id, agreement_external_id, payer_uuid, garage_uuid),
+        (
+            tenant_id, tenant_id, agreement_external_id, payer_uuid, garage_uuid,
+            payer_uuid, garage_uuid,
+        ),
     )
     out = []
     for row in cursor.fetchall():

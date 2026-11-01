@@ -542,6 +542,14 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "the store-backed call never reads a block, so the owner's decision to "
         "block an agreement reaches no barrier",
     ),
+    "G21/agreement-grace-bound": (
+        "tests/test_g21_covered_from_the_store.py",
+        "entitlement_store.py",
+        "               AND (e.kind <> 'extend_grace'",
+        "               AND (true  -- PLANTED: an agreement's extension never lapses",
+        "OP-7-9 undone: a grace extension given on the agreement for one invoice "
+        "extends every invoice after it, and several add up for ever",
+    ),
     "G21/grace-from-the-issue": (
         "tests/test_g21_covered_from_the_store.py",
         "entitlement_store.py",
@@ -597,10 +605,10 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
     "G25": (
         "tests/test_g25_exceptions_follow_the_agreement_identity.py",
         "entitlement_store.py",
-        "        WHERE a.external_id = %s",
+        "        WHERE (a.external_id = %s",
         source(
-            "        WHERE e.agreement_id = (SELECT id FROM agreements WHERE external_id = %s",
-            "                                ORDER BY version DESC LIMIT 1)  -- PLANTED",
+            "        WHERE (e.agreement_id = (SELECT id FROM agreements WHERE external_id = %s",
+            "                                 ORDER BY version DESC LIMIT 1)  -- PLANTED",
         ),
         "the owner's exceptions are read from ONE version's row again, so a block "
         "lifts and a grace extension vanishes on the day a price change stores the "

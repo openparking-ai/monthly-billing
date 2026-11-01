@@ -230,3 +230,33 @@ def test_grace_runs_from_the_issue_when_the_invoice_was_issued_late(app, tenant_
     app.rollback()
     (entry,) = register["agreements"]
     assert entry["not_covered_from"] == "2026-05-16"
+
+
+@pytest.mark.guarantee("G21")
+def test_an_agreement_level_grace_extension_is_bound_to_the_invoice_it_was_given_for(
+    app, tenant_id
+):
+    """OP-7-9. A grace extension recorded on the AGREEMENT applied to every
+    unpaid invoice for ever after: ten days given for May's invoice were still
+    ten extra days on June's, and a few such decisions added up to a parker
+    who never lapsed. It now counts only toward an unpaid invoice that was
+    already issued when the owner recorded it -- the one the owner was looking
+    at. May keeps its ten days; June gets the garage's own grace."""
+    seeded, may = _issued_unpaid(app, tenant_id)
+    (agreement_uuid,) = seeded.agreement_uuids.values()
+    record_agreement_exception(app, tenant_id, agreement_uuid, OwnerException(
+        id="ext-may", agreement_id="ag-0001", invoice_reference=None,
+        kind=ExceptionKind.EXTEND_GRACE, recorded_by="owner",
+        recorded_at=_at(date(2026, 5, 3)), extra_grace_days=10,
+    ))
+    assert covered_from_store(app, tenant_id, GARAGE.id, "CAR001", _at(date(2026, 5, 12))).covered
+    assert not covered_from_store(
+        app, tenant_id, GARAGE.id, "CAR001", _at(date(2026, 5, 16))).covered
+    record_payment(app, tenant_id, may, PaymentMethod.CHEQUE, 12000, _at(date(2026, 5, 14)),
+                   recorded_by="op")
+    june_issue = datetime(2026, 5, 31, 0, 30, tzinfo=TZ)
+    (june,) = run_billing(app, tenant_id, GARAGE.id, date(2026, 6, 1), now=june_issue).lines
+    assert june.reference
+    assert covered_from_store(app, tenant_id, GARAGE.id, "CAR001", _at(date(2026, 6, 5))).covered
+    answer = covered_from_store(app, tenant_id, GARAGE.id, "CAR001", _at(date(2026, 6, 6)))
+    assert not answer.covered, "May's extension was still extending June"

@@ -153,7 +153,9 @@ GUARANTEES: dict[str, str] = {
         "as the earliest instant an unpaid invoice was owed from -- the later of its "
         "due date and its issue, so an invoice issued late gets its whole grace "
         "(the register's not_covered_from is read the same way) -- and it HONOURS the "
-        "owner's grace extensions "
+        "owner's grace extensions -- one recorded on the agreement counts only toward "
+        "an unpaid invoice already issued when it was recorded, so it lapses with that "
+        "invoice and never adds to the next -- "
         "and blocks rather than reading the garage's base figure alone."
     ),
     "G22": (
