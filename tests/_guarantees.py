@@ -208,7 +208,13 @@ GUARANTEES: dict[str, str] = {
         "payment at its invoice, a reversal at its payment, an attempt at its invoice "
         "-- so a row cannot reference another tenant's even by a raw INSERT that the "
         "policy would let past, because a foreign-key check runs past row-level "
-        "security and the key does not."
+        "security and the key does not. The same holds for every other reference "
+        "(0009): every single-column key to a table other than `tenants` -- an "
+        "agreement's payer, a version's vehicles, pauses, fees, mandate and covered "
+        "garages, an invoice's payer and lines, an owner's exception -- has the "
+        "composite `(tenant_id, <column>)` key beside it, read from the catalogue; "
+        "and `record_agreement_exception` reads the agreement under the tenant's own "
+        "context first, raising LookupError and writing nothing when it is not visible."
     ),
     "G29": (
         "A payment is reversed at most once, for a reason that fits its method, and "

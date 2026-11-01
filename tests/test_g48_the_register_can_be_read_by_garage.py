@@ -479,15 +479,27 @@ def test_another_tenants_garage_of_the_same_id_is_not_read_with_the_policy_on_an
             ),
         )
     # And a row a system past the module could write: THIS tenant's block,
-    # hung on the OTHER tenant's agreement row (the key is the row's id
-    # alone). The policy never joins it to that agreement, so it blocks
+    # hung on the OTHER tenant's agreement row. Since 0009 the composite key
+    # refuses it to the application role (the control below), so it is
+    # written as the owner with the keys' triggers off -- a row past every
+    # lock. The policy never joins it to that agreement, so it blocks
     # nothing; with the policy off the read's join keeps it that way.
-    _raw(
-        app, tenant_id,
+    import psycopg
+
+    planted = (
         "INSERT INTO owner_exceptions (tenant_id, agreement_id, kind, recorded_by, recorded_at) "
         "VALUES (%s, %s, 'block', 'past the module', %s)",
         (tenant_id, seeded_other.agreement_uuids[OUTSIDE_ID], DAY),
     )
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        _raw(app, tenant_id, *planted)
+    app.rollback()
+    with owner.cursor() as cursor:
+        cursor.execute("SET session_replication_role = replica")
+        try:
+            cursor.execute(*planted)
+        finally:
+            cursor.execute("SET session_replication_role = origin")
     expected = GarageRegister(
         garage=HOME.id, registrations=rows(("m1ne1", OUTSIDE_ID)),
         agreements=(agreement_entry(OUTSIDE_ID, not_covered_from=date(2026, 5, 6)),),

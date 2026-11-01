@@ -620,6 +620,34 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "tenant A's invoice: the policy checks payments.tenant_id and the "
         "foreign-key check runs past row-level security",
     ),
+    "G28/agreement-keys": (
+        "tests/test_g28_money_history_points_into_its_own_tenant.py",
+        "migrations/0009_agreement_payer_and_invoice_references_in_tenant.sql",
+        source(
+            "ALTER TABLE owner_exceptions",
+            "  ADD CONSTRAINT owner_exceptions_agreement_in_tenant",
+            "    FOREIGN KEY (tenant_id, agreement_id) REFERENCES agreements (tenant_id, id) "
+            "ON DELETE CASCADE,",
+            "  ADD CONSTRAINT owner_exceptions_invoice_in_tenant",
+            "    FOREIGN KEY (tenant_id, invoice_id) REFERENCES invoices (tenant_id, id) "
+            "ON DELETE CASCADE;",
+        ),
+        "-- PLANTED: the owner's exceptions keep only 0001's single-column keys",
+        "OP-7-12 undone: a raw INSERT in tenant B hangs an owner's block or grace "
+        "extension on tenant A's agreement or invoice, the key checked past the policy",
+    ),
+    "G28/exception-reads-the-agreement": (
+        "tests/test_g28_money_history_points_into_its_own_tenant.py",
+        "exceptions_store.py",
+        source(
+            "        if cursor.fetchone() is None:",
+            "            connection.rollback()",
+            '            raise LookupError(f"no agreement {agreement_uuid} in this tenant.")',
+        ),
+        "        cursor.fetchone()  # PLANTED: the agreement's visibility is not checked",
+        "OP-7-12 undone: record_agreement_exception writes against an agreement uuid "
+        "the tenant cannot see; only the database key stands in the way",
+    ),
     "G29/reason": (
         "tests/test_g29_reversals_and_card_fields_are_refused_by_name.py",
         "payments.py",
