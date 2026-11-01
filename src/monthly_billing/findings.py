@@ -95,9 +95,11 @@ REFUSALS: dict[str, str] = {
         "CHARGE that is refused, not the billing."
     ),
     REFUSAL_PAUSE_OVERLAPS_A_PAID_PERIOD: (
-        "The pause covers days in a period that has already been paid. A paid "
-        "period is paid, and this module does not decide refunds or credits. The "
-        "owner records an exception with an amount, or moves the pause."
+        "The pause, or the cancellation, covers days in a period that has already "
+        "been invoiced -- paid or not, because nothing re-prices an issued invoice. "
+        "This module does not decide refunds or credits. The owner records an "
+        "exception with an amount (a credit on the invoice), or moves the pause or "
+        "the cancellation day."
     ),
     REFUSAL_NO_BILLING_DAY: (
         "The garage has not stated its billing day. It is one of the offered "

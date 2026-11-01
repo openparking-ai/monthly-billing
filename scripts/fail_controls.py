@@ -406,6 +406,22 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "period whole, so an owner pauses an account mid-period and the module "
         "silently decides a refund nobody authorised",
     ),
+    "G13/issued-not-only-paid": (
+        "tests/test_g13_a_pause_over_a_paid_period_refuses.py",
+        "store/records.py",
+        """        "WHERE a.external_id = %s AND l.kind <> 'tax'",""",
+        """        "WHERE a.external_id = %s AND i.paid_at IS NOT NULL",  # PLANTED: paid only""",
+        "OP-7-6 undone: a pause over an issued, unpaid month stores, and the payer "
+        "still owes the full month for days the owner paused",
+    ),
+    "G13/cancellation-judged": (
+        "tests/test_g13_a_pause_over_a_paid_period_refuses.py",
+        "store/records.py",
+        "    if cancelled is not None:\n        for period in paid:",
+        "    if False:  # PLANTED: a cancellation is never judged\n        for period in paid:",
+        "OP-7-6 undone: a cancellation from a day inside an issued month stores, and the "
+        "month is still owed in full",
+    ),
     "G17": (
         "tests/test_g17_the_run_issues_once.py",
         "migrations/0002_billing_run_payments_and_reversals.sql",

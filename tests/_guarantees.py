@@ -107,9 +107,10 @@ GUARANTEES: dict[str, str] = {
     "G13": (
         "A pause covering days in a period that has already been paid is REFUSED by "
         "name rather than credited or ignored -- and the STORE refuses it: before any "
-        "write, `store_agreement` reads the agreement's paid periods (the periods of its "
-        "invoice lines, by its identity across versions, whose invoice is paid) and "
-        "refuses a version that newly pauses a day inside one, naming the period. A "
+        "write, `store_agreement` reads the agreement's ISSUED periods, paid or not "
+        "(the periods of its invoice lines, by its identity across versions -- nothing "
+        "re-prices an issued invoice) and refuses a version that newly pauses a day "
+        "inside one, or newly cancels from a day inside one, naming the period. A "
         "pause the newest stored version already held is not newly paused, so a later "
         "version that keeps it stores; one that extends it is judged on the days it "
         "adds. This module does not decide refunds; the owner records an exception "

@@ -129,6 +129,7 @@ from ..findings import (
     REFUSAL_AGREEMENT_HOME_MOVED,
     REFUSAL_GARAGE_MISMATCH,
     REFUSAL_GARAGE_NOT_COVERED,
+    REFUSAL_PAUSE_OVERLAPS_A_PAID_PERIOD,
     REFUSAL_PAYER_CHANGED,
     REFUSAL_REGISTRAR_CHANGED,
     REFUSAL_REGISTRAR_IS_OUTSIDE,
@@ -464,10 +465,11 @@ def _refuse_new_pause_days_over_paid_periods(
     cursor: Any, home: Garage, agreement: Agreement, newest_uuid: UUID
 ) -> None:
     """THE STORE'S HALF OF G13: refuse, by name and before any write, a version
-    that newly pauses a day inside a period already paid.
+    that newly pauses -- or newly cancels -- a day inside a period already
+    ISSUED, paid or not (OP-7-6).
 
-    The paid periods are the periods of this agreement's invoice lines -- by
-    its IDENTITY, across every version -- whose invoice is paid. "Newly" is
+    The issued periods are the periods of this agreement's invoice lines -- by
+    its IDENTITY, across every version. "Newly" is
     measured against the newest stored version's pauses: a pause that was
     already there when a period was priced took its days out of that price, so
     storing a later version that keeps it (a price change, a car added) is not
@@ -479,13 +481,27 @@ def _refuse_new_pause_days_over_paid_periods(
     newly: list[tuple[date, date]] = []
     for pause in agreement.pauses:
         newly.extend(_days_not_in(pause, earlier))
-    if not newly:
+    # A CANCELLATION IS A PAUSE WITH NO END, and was never judged (OP-7-6):
+    # the days it newly takes away run from its day to the day the newest
+    # stored version already stopped on, or for ever.
+    cursor.execute("SELECT cancelled_effective_day FROM agreements WHERE id = %s", (newest_uuid,))
+    (stored_cancel,) = cursor.fetchone()
+    new_cancel = agreement.cancelled_effective_day
+    cancelled = (
+        (new_cancel, stored_cancel or date.max)
+        if new_cancel is not None and (stored_cancel is None or new_cancel < stored_cancel)
+        else None
+    )
+    if not newly and cancelled is None:
         return
+    # EVERY ISSUED PERIOD, paid or not (OP-7-6): nothing re-prices an issued
+    # invoice, so a pause or cancellation over an unpaid one left the payer
+    # owing the full period for days the owner took away.
     cursor.execute(
         "SELECT DISTINCT l.period_start_day, l.period_end_day FROM invoice_lines l "
         "JOIN invoices i ON i.id = l.invoice_id "
         "JOIN agreements a ON a.id = l.agreement_id "
-        "WHERE a.external_id = %s AND i.paid_at IS NOT NULL",
+        "WHERE a.external_id = %s AND l.kind <> 'tax'",
         (agreement.id,),
     )
     tz = zone(home.timezone)
@@ -498,6 +514,14 @@ def _refuse_new_pause_days_over_paid_periods(
     )
     for from_day, until_day in newly:
         refuse_pause_over_a_paid_period(agreement, from_day, until_day, paid)
+    if cancelled is not None:
+        for period in paid:
+            if cancelled[0] < period.end_day and cancelled[1] > period.start_day:
+                raise Refused(
+                    REFUSAL_PAUSE_OVERLAPS_A_PAID_PERIOD,
+                    f"the cancellation from {cancelled[0]} on agreement {agreement.id!r} "
+                    f"reaches into the issued period {period.start_day}..{period.end_day}.",
+                )
 
 
 def _days_not_in(pause: Pause, earlier: tuple[Pause, ...]) -> list[tuple[date, date]]:
