@@ -81,6 +81,7 @@ REFUSAL_TAX_NEEDS_THE_ENGINE = "REFUSAL_TAX_NEEDS_THE_ENGINE"
 REFUSAL_INVOICE_ALREADY_TAXED = "REFUSAL_INVOICE_ALREADY_TAXED"
 REFUSAL_PAYER_CHANGED = "REFUSAL_PAYER_CHANGED"
 REFUSAL_VERSION_NOT_NEWER = "REFUSAL_VERSION_NOT_NEWER"
+REFUSAL_REASK_EXCEEDS_BALANCE = "REFUSAL_REASK_EXCEEDS_BALANCE"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -171,7 +172,18 @@ REFUSALS: dict[str, str] = {
         "flight: the refusal names the attempt id, pending-attempts lists it, and an "
         "operator records what the processor says (resolve-attempt). A pending "
         "attempt whose last word is UNKNOWN is different: the next charge asks the "
-        "processor again under the same key, and is not refused."
+        "processor again under the same key, and is not refused -- unless a payment "
+        "since has taken the balance below what it reserved "
+        "(REFUSAL_REASK_EXCEEDS_BALANCE)."
+    ),
+    REFUSAL_REASK_EXCEEDS_BALANCE: (
+        "A charge attempt on this invoice is PENDING with an UNKNOWN answer, and the "
+        "invoice's balance is now below the amount that attempt reserved -- a cheque "
+        "or another payment landed since. Asking the processor again under the same "
+        "key would request the reserved amount, and if the first request never "
+        "reached the processor it would collect money no longer owed. Nothing is "
+        "asked and nothing is written; the attempt stays pending. Look it up at the "
+        "processor by its id and record what the processor says (resolve-attempt)."
     ),
     REFUSAL_ATTEMPT_ALREADY_RESOLVED: (
         "This attempt already has an outcome recorded. What the processor said is "

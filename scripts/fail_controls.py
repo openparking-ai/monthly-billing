@@ -1015,6 +1015,14 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "operator's has its decline reset by a method change recorded BEFORE it "
         "asked -- the count depends on a --at somebody typed",
     ),
+    "G31/reask-rereads-the-balance": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        "                if outstanding <= 0 or outstanding < pending.amount_minor:",
+        "                if False:  # PLANTED: the re-ask never re-reads what is owed",
+        "OP-7-5 undone: a cheque pays the invoice between an unknown answer and the "
+        "re-ask, and the re-ask still requests the full reserved amount",
+    ),
     "G31/index-by-name": (
         "tests/test_g31_a_charge_is_a_reservation_first.py",
         "charging.py",

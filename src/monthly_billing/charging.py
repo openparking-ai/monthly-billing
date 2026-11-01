@@ -49,11 +49,15 @@ row with no ``outcome`` row. In T1, under the lock:
   flight, or a worker died with it: refuse by name, ``REFUSAL_ATTEMPT_UNRESOLVED``,
   naming the attempt id. The operator's ``resolve_attempt`` is the way out.
 * pending and its last row is ``unknown`` -- the module already said it does
-  not know: write an ``ask`` row, commit, and ask the processor again with the
-  SAME attempt id as the idempotency key and the RESERVED amount and currency.
-  No new reservation, no fresh key, the three refusals not re-run -- this is
-  not a new charge; the request already left once, and a method change since
-  the reservation does not alter what is outstanding under that key. A real
+  not know: re-read the balance, and refuse by name
+  (``REFUSAL_REASK_EXCEEDS_BALANCE``) when it is zero or below the amount
+  reserved -- a payment since means the reserved amount is no longer owed, and
+  a request that never reached the processor would collect it. Otherwise write
+  an ``ask`` row, commit, and ask the processor again with the SAME attempt id
+  as the idempotency key and the RESERVED amount and currency. No new
+  reservation, no fresh key, the retry count and the mandate not re-run --
+  this is not a new charge; the request already left once, and a method change
+  since the reservation does not alter what is outstanding under that key. A real
   processor honours the key, so a repeated request charges once. There is no
   cap on re-asks: a processor that never answers grows the ``unknown`` log for
   as long as the scheduler calls, and one key is one charge at most.
@@ -133,6 +137,7 @@ from .findings import (
     REFUSAL_ATTEMPT_ALREADY_RESOLVED,
     REFUSAL_ATTEMPT_UNRESOLVED,
     REFUSAL_INVOICE_NAMES_NO_AGREEMENT,
+    REFUSAL_REASK_EXCEEDS_BALANCE,
     Refused,
 )
 from .invoice import Invoice, InvoiceLine, LineKind
@@ -418,8 +423,22 @@ def _reserve(
                 )
             if pending is not None:
                 # The module already said it does not know: ask again under the
-                # SAME key for what was RESERVED. Not a new charge, so the three
-                # refusals are not re-run and nothing new is reserved.
+                # SAME key for what was RESERVED. Not a new charge, so the retry
+                # count and the mandate are not re-run and nothing new is
+                # reserved -- but what is OWED is re-read, under this lock: a
+                # payment since the reservation means the reserved amount is no
+                # longer owed, and if the first request never reached the
+                # processor, asking again would collect it (OP-7-5).
+                now_owed = paid_state(cursor, invoice_uuid)
+                outstanding = now_owed.total_minor - now_owed.paid_minor
+                if outstanding <= 0 or outstanding < pending.amount_minor:
+                    raise Refused(
+                        REFUSAL_REASK_EXCEEDS_BALANCE,
+                        f"invoice {invoice_reference!r}: attempt {pending.attempt_id} "
+                        f"reserved {pending.amount_minor} and the balance is now "
+                        f"{outstanding}; look the attempt up at the processor and record "
+                        "what it says (resolve-attempt).",
+                    )
                 _log_row(
                     cursor, tenant_id, invoice_uuid, "ask", pending.attempt_id,
                     f"re-ask {pending.asks + 1} under the same key",

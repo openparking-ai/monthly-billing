@@ -327,25 +327,53 @@ def test_a_re_ask_that_is_answered_settles_the_one_attempt_with_one_payment(app,
 
 
 @pytest.mark.guarantee("G31")
-def test_a_re_ask_is_for_the_reserved_amount_whatever_was_paid_meanwhile(app, tenant_id):
-    """A method change, and a cheque, between the unknown and the re-ask: the
-    re-ask is not a new charge. It carries the RESERVED amount under the same
-    key, the three refusals are not re-run, and the success is recorded for
-    the reserved amount -- the invoice then reads overpaid, never silently."""
+def test_a_re_ask_is_for_the_reserved_amount_after_a_method_change(app, tenant_id):
+    """A method change between the unknown and the re-ask: the re-ask is not a
+    new charge. It carries the RESERVED amount under the same key, the retry
+    count is not re-run, and the success is recorded for the reserved amount."""
     from monthly_billing.charging import record_payment_method_changed
-    from monthly_billing.payments import record_payment
 
     reference = _issued(app, tenant_id)
     processor = _ChargesThenLosesTheAnswer(answers_on=2)
     first = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(1))
     record_payment_method_changed(app, tenant_id, reference, recorded_by="portal", now=_tick(2))
-    record_payment(
-        app, tenant_id, reference, PaymentMethod.CHEQUE, 12000, _tick(3), recorded_by="op"
-    )
     second = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(4))
     assert second.attempt_id == first.attempt_id
-    assert [a for a, _ in processor.calls] == [12000, 12000], "the re-ask re-read the balance"
-    assert second.paid is not None and second.paid.overpaid_minor == 12000
+    assert [a for a, _ in processor.calls] == [12000, 12000]
+    assert second.paid is not None and second.paid.paid and second.paid.overpaid_minor == 0
+
+
+@pytest.mark.guarantee("G31")
+@pytest.mark.parametrize("paid_meanwhile", [12000, 5000], ids=["in-full", "in-part"])
+def test_a_re_ask_is_refused_when_the_balance_fell_below_the_reservation(
+    app, tenant_id, paid_meanwhile
+):
+    """OP-7-5. The re-ask of an UNKNOWN attempt skipped the nothing-owed check:
+    a cheque that paid the invoice between the unknown and the re-ask was
+    followed by a request for the full reserved amount under the same key --
+    and when the first request had never reached the processor, that request
+    collected money nobody owed. Under the lock, the re-ask now re-reads the
+    balance and refuses by name when it is zero or below what was reserved:
+    nothing is asked, nothing is written, the attempt stays PENDING, and the
+    way out is a processor lookup recorded with resolve-attempt."""
+    from monthly_billing.findings import REFUSAL_REASK_EXCEEDS_BALANCE
+    from monthly_billing.payments import record_payment
+
+    reference = _issued(app, tenant_id)
+    processor = _ChargesThenLosesTheAnswer(answers_on=2)
+    first = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(1))
+    record_payment(
+        app, tenant_id, reference, PaymentMethod.CHEQUE, paid_meanwhile, _tick(3),
+        recorded_by="op",
+    )
+    kinds_before = _kinds(app, tenant_id)
+    with pytest.raises(Refused) as refused:
+        attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(4))
+    assert refused.value.code == REFUSAL_REASK_EXCEEDS_BALANCE
+    assert str(first.attempt_id) in str(refused.value)
+    assert len(processor.calls) == 1, "the re-ask reached the processor"
+    assert _kinds(app, tenant_id) == kinds_before
+    assert pending_attempts(app, tenant_id, reference) == (first.attempt_id,)
 
 
 @pytest.mark.guarantee("G31")
