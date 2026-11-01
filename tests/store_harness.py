@@ -289,3 +289,34 @@ needs_postgres = [
     pytest.mark.needs_postgres,
     pytest.mark.skipif(not DSN, reason="MONTHLY_BILLING_TEST_DSN is not set"),
 ]
+
+
+def age_attempt(attempt_id: Any, minutes: float) -> None:
+    """Move every row of one charge attempt back by ``minutes`` of the
+    database's clock, as the OWNER -- the application role cannot edit the
+    log. For the tests of the ages the module judges an attempt by (OP-7-7,
+    OP-7-8): a reservation's key lifetime, an in-flight request's minimum
+    age before an operator may resolve it."""
+    owner = connect(DSN)
+    owner.autocommit = True
+    try:
+        with owner.cursor() as cursor:
+            cursor.execute(
+                "UPDATE charge_attempts SET created_at = created_at - make_interval(secs => %s) "
+                "WHERE attempt_id = %s",
+                (minutes * 60, as_uuid(attempt_id)),
+            )
+    finally:
+        owner.close()
+
+
+class ConfirmsNoCharge:
+    """A processor lookup that found no charge under the key it was asked
+    about -- what an operator's adapter returns after looking the attempt up."""
+
+    def __init__(self) -> None:
+        self.asked: list = []
+
+    def charged(self, idempotency_key):
+        self.asked.append(idempotency_key)
+        return False

@@ -83,6 +83,8 @@ REFUSAL_PAYER_CHANGED = "REFUSAL_PAYER_CHANGED"
 REFUSAL_VERSION_NOT_NEWER = "REFUSAL_VERSION_NOT_NEWER"
 REFUSAL_REASK_EXCEEDS_BALANCE = "REFUSAL_REASK_EXCEEDS_BALANCE"
 REFUSAL_REASK_KEY_EXPIRED = "REFUSAL_REASK_KEY_EXPIRED"
+REFUSAL_RESOLUTION_TOO_SOON = "REFUSAL_RESOLUTION_TOO_SOON"
+REFUSAL_RESOLUTION_NEEDS_EVIDENCE = "REFUSAL_RESOLUTION_NEEDS_EVIDENCE"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -194,6 +196,21 @@ REFUSALS: dict[str, str] = {
         "Nothing is asked and nothing is written; the attempt stays pending. Look it "
         "up at the processor by its id and record what the processor says "
         "(resolve-attempt)."
+    ),
+    REFUSAL_RESOLUTION_TOO_SOON: (
+        "This attempt's request may still be IN FLIGHT: its last row -- the "
+        "reservation, or an ask -- is younger than the minimum age before an "
+        "operator may resolve it. The processor can still answer the worker, and an "
+        "outcome typed now could free a fresh key while the first request is "
+        "charging. Wait, then look it up at the processor and resolve it."
+    ),
+    REFUSAL_RESOLUTION_NEEDS_EVIDENCE: (
+        "The resolution carries no processor evidence. A SUCCESS needs the "
+        "processor's reference for the charge. A DECLINE or an ERROR ends the "
+        "attempt and lets the next charge use a FRESH key, so it needs the "
+        "processor adapter's lookup to confirm there is NO charge under this "
+        "attempt's key; no lookup, a lookup that cannot tell and one that found a "
+        "charge are each refused, and nothing is written."
     ),
     REFUSAL_ATTEMPT_ALREADY_RESOLVED: (
         "This attempt already has an outcome recorded. What the processor said is "

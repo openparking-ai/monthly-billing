@@ -133,7 +133,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from .findings import (
@@ -142,6 +142,8 @@ from .findings import (
     REFUSAL_INVOICE_NAMES_NO_AGREEMENT,
     REFUSAL_REASK_EXCEEDS_BALANCE,
     REFUSAL_REASK_KEY_EXPIRED,
+    REFUSAL_RESOLUTION_NEEDS_EVIDENCE,
+    REFUSAL_RESOLUTION_TOO_SOON,
     Refused,
 )
 from .invoice import Invoice, InvoiceLine, LineKind
@@ -300,6 +302,24 @@ def _load_attempt_rows(cursor: Any, invoice_uuid: Any) -> list[tuple[str, str | 
 #: reservation row's own ``created_at`` -- never the caller's ``now``, which is
 #: whatever was typed -- with an hour's margin (OP-7-7).
 REASK_KEY_LIFETIME_HOURS = 23
+
+#: How long an IN_FLIGHT attempt's last row -- the reservation, or an ask --
+#: must have stood, on the database's clock, before an operator may resolve
+#: it: until then the worker's request can still be at the processor and be
+#: answered, and an outcome typed now could free a fresh key while the first
+#: request charges (OP-7-8).
+RESOLVE_IN_FLIGHT_AFTER_MINUTES = 15
+
+
+class ProcessorLookup(Protocol):
+    """What the processor ADAPTER answers when asked about one idempotency
+    key: ``True`` -- the processor holds a charge under it; ``False`` -- it
+    confirms there is none; ``None`` -- it cannot tell. Only ``False`` lets an
+    operator close an attempt as a decline or an error, because that is what
+    lets the next charge use a fresh key."""
+
+    def charged(self, idempotency_key: UUID) -> bool | None: ...
+
 
 _PENDING_SQL = """
     SELECT a.attempt_id, a.amount_minor, a.currency,
@@ -614,6 +634,10 @@ def _settle(
                     REFUSAL_ATTEMPT_ALREADY_RESOLVED,
                     f"attempt {attempt_id!r} already has an outcome recorded.",
                 )
+            if not from_the_processor:
+                # Under the lock, so a worker's re-ask that began after the
+                # operator's read is seen here.
+                _refuse_while_in_flight(cursor, invoice_uuid, attempt_id)
             try:
                 guarded_insert(
                     cursor,
@@ -653,6 +677,28 @@ def _settle(
             )
     connection.commit()
     return retry, payment_id, paid, False
+
+
+def _refuse_while_in_flight(cursor: Any, invoice_uuid: UUID, attempt_id: UUID) -> None:
+    """An IN_FLIGHT attempt whose last row is younger than
+    ``RESOLVE_IN_FLIGHT_AFTER_MINUTES`` on the database's clock is refused."""
+    pending = next(
+        (p for p in _pending_rows(cursor, invoice_uuid) if p.attempt_id == attempt_id), None
+    )
+    if pending is None or pending.state != IN_FLIGHT:
+        return
+    cursor.execute(
+        "SELECT now() - %s < make_interval(mins => %s)",
+        (pending.last_row_at, RESOLVE_IN_FLIGHT_AFTER_MINUTES),
+    )
+    (too_soon,) = cursor.fetchone()
+    if too_soon:
+        raise Refused(
+            REFUSAL_RESOLUTION_TOO_SOON,
+            f"attempt {attempt_id} was last asked at {pending.last_row_at.isoformat()}; "
+            f"an in-flight attempt is resolved no sooner than "
+            f"{RESOLVE_IN_FLIGHT_AFTER_MINUTES} minutes after that.",
+        )
 
 
 def _record_late(
@@ -765,6 +811,7 @@ def resolve_attempt(
     *,
     recorded_by: str,
     now: datetime,
+    lookup: ProcessorLookup | None = None,
 ) -> ChargeOutcome:
     """The operator records what the processor said about a PENDING attempt.
 
@@ -772,6 +819,15 @@ def resolve_attempt(
     payment for the amount reserved, under the lock. An attempt that already
     has an outcome is refused by name; an id that names no reservation is not
     found.
+
+    **ONLY ON THE PROCESSOR'S EVIDENCE (OP-7-8).** An IN_FLIGHT attempt is not
+    resolved until its last row is ``RESOLVE_IN_FLIGHT_AFTER_MINUTES`` old (the
+    worker's request may still be answered); a SUCCESS needs the processor's
+    reference; a DECLINE or an ERROR -- after which the next charge mints a
+    fresh key -- needs ``lookup``, the processor adapter, to confirm there is
+    NO charge under this attempt's key. Each is refused by name, writing
+    nothing. The lookup is asked outside any lock: it is a call to the
+    processor.
     """
     tenant_id, attempt_id = as_uuid(tenant_id), as_uuid(attempt_id)
     with tenant(connection, tenant_id) as cursor:
@@ -780,10 +836,18 @@ def resolve_attempt(
             (attempt_id,),
         )
         row = cursor.fetchone()
+        if row is not None:
+            still_pending = any(
+                p.attempt_id == attempt_id for p in _pending_rows(cursor, as_uuid(row[0]))
+            )
+            if still_pending:
+                _refuse_while_in_flight(cursor, as_uuid(row[0]), attempt_id)
     connection.rollback()
     if row is None:
         raise AttemptNotFound(f"no attempt with id {attempt_id!r}.")
     invoice_uuid = as_uuid(row[0])
+    if still_pending:
+        _refuse_without_evidence(attempt_id, result, lookup)
     retry, payment_id, paid, _ = _settle(
         connection, tenant_id, invoice_uuid, attempt_id, result,
         recorded_by=recorded_by, now=now,
@@ -791,6 +855,27 @@ def resolve_attempt(
     return ChargeOutcome(
         result=result, retry=retry, attempt_id=attempt_id, payment_id=payment_id, paid=paid
     )
+
+
+def _refuse_without_evidence(
+    attempt_id: UUID, result: ChargeResult, lookup: ProcessorLookup | None
+) -> None:
+    if result.outcome is Outcome.SUCCESS:
+        if result.reference is None or not result.reference.strip():
+            raise Refused(
+                REFUSAL_RESOLUTION_NEEDS_EVIDENCE,
+                f"a SUCCESS for attempt {attempt_id} names no processor reference.",
+            )
+        return
+    found = None if lookup is None else lookup.charged(attempt_id)
+    if found is not False:
+        said = {None: "could not tell", True: "found a charge"}[found]
+        raise Refused(
+            REFUSAL_RESOLUTION_NEEDS_EVIDENCE,
+            f"a {result.outcome.value.upper()} for attempt {attempt_id} needs the "
+            "processor to confirm no charge under its key; "
+            + ("no lookup was given." if lookup is None else f"the lookup {said}."),
+        )
 
 
 def pending_attempts(connection: Any, tenant_id: Any, invoice_reference: str) -> tuple[UUID, ...]:
@@ -861,10 +946,13 @@ __all__ = [
     "IN_FLIGHT",
     "LATE",
     "ONE_OUTCOME_PER_ATTEMPT",
+    "REASK_KEY_LIFETIME_HOURS",
+    "RESOLVE_IN_FLIGHT_AFTER_MINUTES",
     "UNKNOWN",
     "AttemptNotFound",
     "ChargeOutcome",
     "PendingAttempt",
+    "ProcessorLookup",
     "attempt_charge",
     "list_pending_attempts",
     "pending_attempts",

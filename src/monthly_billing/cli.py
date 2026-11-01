@@ -30,7 +30,10 @@ Against the store (the `store` extra, `MONTHLY_BILLING_DSN`, `--tenant`):
         --at 2026-05-07T09:00:00-06:00
     monthly-billing pending-attempts --tenant T --invoice REF
     monthly-billing resolve-attempt --tenant T --attempt ID --outcome success \\
-        --at 2026-05-07T09:05:00-06:00 --recorded-by operator [--reference AUTH]
+        --at 2026-05-07T09:05:00-06:00 --recorded-by operator --reference AUTH
+    monthly-billing resolve-attempt --tenant T --attempt ID --outcome decline \
+        --at 2026-05-07T09:05:00-06:00 --recorded-by operator \
+        --no-charge-confirmed-by "processor dashboard, key searched"
     monthly-billing register-vehicle --tenant T --agreement AG --vehicle ABC123 \\
         [--at 2026-05-07T09:00:00-06:00]
     monthly-billing release-vehicle --tenant T --agreement AG --vehicle ABC123 [--garage G]
@@ -333,17 +336,32 @@ def _resolve_attempt(args: argparse.Namespace) -> int:
     from .charging import resolve_attempt
     from .payment import ChargeResult, Outcome
 
+    detail = args.detail or f"recorded by {args.recorded_by}"
+    lookup = None
+    if args.no_charge_confirmed_by:
+        # The command line has no processor adapter of its own: the operator
+        # looked the attempt's key up at the processor and found no charge,
+        # and says where -- that sentence is the evidence, and it is stored
+        # on the outcome row beside who recorded it (OP-7-8).
+        detail = f"{detail} (no charge under this key, per {args.no_charge_confirmed_by})"
+
+        class _OperatorLookedItUp:
+            def charged(self, idempotency_key):
+                return False
+
+        lookup = _OperatorLookedItUp()
     outcome = resolve_attempt(
         _connection(args),
         args.tenant,
         args.attempt,
         ChargeResult(
             outcome=Outcome(args.outcome),
-            detail=args.detail or f"recorded by {args.recorded_by}",
+            detail=detail,
             reference=args.reference,
         ),
         recorded_by=args.recorded_by,
         now=datetime.fromisoformat(args.at),
+        lookup=lookup,
     )
     print(f"attempt {args.attempt} resolved: {outcome.result.outcome.value}")
     if outcome.paid is not None:
@@ -578,6 +596,13 @@ def main(argv: list[str] | None = None) -> int:
     resolve.add_argument("--recorded-by", required=True)
     resolve.add_argument("--reference", help="the processor's reference for a success")
     resolve.add_argument("--detail", help="what the processor said, for a person")
+    resolve.add_argument(
+        "--no-charge-confirmed-by",
+        help=(
+            "required for decline or error: where the processor was asked about this "
+            "attempt's key and showed no charge (e.g. the dashboard search done)"
+        ),
+    )
     resolve.set_defaults(run=_resolve_attempt)
 
     register = sub.add_parser(

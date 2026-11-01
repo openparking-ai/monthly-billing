@@ -58,6 +58,18 @@ NOW = datetime(2026, 4, 30, 0, 30, tzinfo=TZ)
 BOUND = 3.0
 
 
+def _resolve(connection, tenant_id, attempt_id, result, **kwargs):
+    """resolve_attempt as an operator does it after OP-7-8: the in-flight
+    request given time to be answered, and the processor's lookup confirming
+    no charge for a decline or an error."""
+    from monthly_billing.charging import RESOLVE_IN_FLIGHT_AFTER_MINUTES
+    from store_harness import ConfirmsNoCharge, age_attempt
+
+    age_attempt(attempt_id, RESOLVE_IN_FLIGHT_AFTER_MINUTES + 1)
+    kwargs.setdefault("lookup", ConfirmsNoCharge())
+    return resolve_attempt(connection, tenant_id, attempt_id, result, **kwargs)
+
+
 def _card_shaped() -> str:
     body = "4" + "1" * 14
     for check in "0123456789":
@@ -156,10 +168,10 @@ def _attempt_resolved_twice(app, tenant_id, reference):
     finally:
         ch._settle = real
     (pending,) = pending_attempts(app, tenant_id, reference)
-    resolve_attempt(app, tenant_id, pending, ChargeResult(outcome=Outcome.DECLINE, detail="no"),
+    _resolve(app, tenant_id, pending, ChargeResult(outcome=Outcome.DECLINE, detail="no"),
                     recorded_by="op", now=_tick(2))
     with pytest.raises(Refused) as refused:
-        resolve_attempt(app, tenant_id, pending, ChargeResult(outcome=Outcome.DECLINE, detail="no"),
+        _resolve(app, tenant_id, pending, ChargeResult(outcome=Outcome.DECLINE, detail="no"),
                         recorded_by="op", now=_tick(3))
     assert refused.value.code == REFUSAL_ATTEMPT_ALREADY_RESOLVED
 

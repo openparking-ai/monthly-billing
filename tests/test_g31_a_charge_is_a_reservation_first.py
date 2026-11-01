@@ -77,6 +77,18 @@ TZ = ZoneInfo(GARAGE.timezone)
 NOW = datetime(2026, 4, 30, 0, 30, tzinfo=TZ)
 
 
+def _resolve(connection, tenant_id, attempt_id, result, **kwargs):
+    """resolve_attempt as an operator does it after OP-7-8: the in-flight
+    request given time to be answered, and the processor's lookup confirming
+    no charge for a decline or an error."""
+    from monthly_billing.charging import RESOLVE_IN_FLIGHT_AFTER_MINUTES, resolve_attempt
+    from store_harness import ConfirmsNoCharge, age_attempt
+
+    age_attempt(attempt_id, RESOLVE_IN_FLIGHT_AFTER_MINUTES + 1)
+    kwargs.setdefault("lookup", ConfirmsNoCharge())
+    return resolve_attempt(connection, tenant_id, attempt_id, result, **kwargs)
+
+
 class _WorkerDied(RuntimeError):
     """Stands in for the process dying: nothing after the raise runs."""
 
@@ -148,7 +160,7 @@ def test_a_death_after_the_reservation_leaves_a_pending_attempt_that_refuses_the
 
     # The operator records what the processor said: it declined. The invoice
     # may be charged again, and the decline counted toward the three.
-    resolved = resolve_attempt(
+    resolved = _resolve(
         app, tenant_id, pending, ChargeResult(outcome=Outcome.DECLINE, detail="declined"),
         recorded_by="operator", now=_tick(3),
     )
@@ -176,7 +188,7 @@ def test_a_death_after_the_processor_answered_leaves_a_pending_attempt_paid_once
     assert refused.value.code == REFUSAL_ATTEMPT_UNRESOLVED
     assert processor.calls == 1, "the restart charged the card again"
 
-    resolved = resolve_attempt(
+    resolved = _resolve(
         app, tenant_id, pending,
         ChargeResult(outcome=Outcome.SUCCESS, detail="approved", reference="auth-9"),
         recorded_by="operator", now=_tick(3),
@@ -210,9 +222,9 @@ def test_an_attempt_is_resolved_once_and_an_unknown_id_is_not_found(app, tenant_
     _charge_and_die(tenant_id, _Succeeds(), reference, "_settle", _tick(1))
     (pending,) = pending_attempts(app, tenant_id, reference)
     declined = ChargeResult(outcome=Outcome.DECLINE, detail="declined")
-    resolve_attempt(app, tenant_id, pending, declined, recorded_by="operator", now=_tick(2))
+    _resolve(app, tenant_id, pending, declined, recorded_by="operator", now=_tick(2))
     with pytest.raises(Refused) as refused:
-        resolve_attempt(app, tenant_id, pending, declined, recorded_by="operator", now=_tick(3))
+        _resolve(app, tenant_id, pending, declined, recorded_by="operator", now=_tick(3))
     assert refused.value.code == REFUSAL_ATTEMPT_ALREADY_RESOLVED
     assert query(
         app, tenant_id, "SELECT count(*) FROM charge_attempts WHERE kind = 'outcome'"
@@ -220,7 +232,7 @@ def test_an_attempt_is_resolved_once_and_an_unknown_id_is_not_found(app, tenant_
     from uuid import uuid4
 
     with pytest.raises(AttemptNotFound):
-        resolve_attempt(app, tenant_id, uuid4(), declined, recorded_by="operator", now=_tick(4))
+        _resolve(app, tenant_id, uuid4(), declined, recorded_by="operator", now=_tick(4))
 
 
 @pytest.mark.guarantee("G31")
@@ -232,6 +244,9 @@ def test_the_command_line_resolves_a_pending_attempt_and_accepts_only_the_enums_
     reference = _issued(app, tenant_id)
     _charge_and_die(tenant_id, _Succeeds(), reference, "_settle", _tick(1))
     (pending,) = pending_attempts(app, tenant_id, reference)
+    from store_harness import age_attempt
+
+    age_attempt(pending, ch.RESOLVE_IN_FLIGHT_AFTER_MINUTES + 1)
     dsn = f"{DSN} user=monthly_billing_app password={APP_PASSWORD}"
     argv = ["resolve-attempt", "--tenant", str(tenant_id), "--attempt", str(pending),
             "--outcome", "success", "--at", "2026-05-01T10:00:00-06:00",
@@ -250,6 +265,33 @@ def test_the_command_line_resolves_a_pending_attempt_and_accepts_only_the_enums_
         main([*argv[:5], "--outcome", "declined", *argv[7:]])
     assert stopped.value.code == 2
     assert "invalid choice: 'declined'" in capsys.readouterr().err
+
+
+@pytest.mark.guarantee("G31")
+def test_the_command_line_records_a_decline_only_with_the_no_charge_lookup_named(
+    app, tenant_id, capsys
+):
+    """OP-7-8 on the command line: a decline without --no-charge-confirmed-by is
+    refused by name and writes nothing; with it, the decline is recorded and
+    the outcome row says where the operator looked."""
+    from monthly_billing.findings import REFUSAL_RESOLUTION_NEEDS_EVIDENCE
+    from store_harness import age_attempt
+
+    reference = _issued(app, tenant_id)
+    _charge_and_die(tenant_id, _Succeeds(), reference, "_settle", _tick(1))
+    (pending,) = pending_attempts(app, tenant_id, reference)
+    age_attempt(pending, ch.RESOLVE_IN_FLIGHT_AFTER_MINUTES + 1)
+    dsn = f"{DSN} user=monthly_billing_app password={APP_PASSWORD}"
+    argv = ["resolve-attempt", "--tenant", str(tenant_id), "--attempt", str(pending),
+            "--outcome", "decline", "--at", "2026-05-01T10:00:00-06:00",
+            "--recorded-by", "operator", "--dsn", dsn]
+    assert main(argv) == 2
+    assert REFUSAL_RESOLUTION_NEEDS_EVIDENCE in capsys.readouterr().err
+    assert _kinds(app, tenant_id) == ["attempt"]
+    assert main([*argv, "--no-charge-confirmed-by", "processor dashboard search"]) == 0
+    (detail,) = query(app, tenant_id,
+                      "SELECT detail FROM charge_attempts WHERE kind = 'outcome'")[0]
+    assert "processor dashboard search" in detail
 
 
 class _ChargesThenLosesTheAnswer:
@@ -419,6 +461,102 @@ def test_a_re_ask_under_a_key_older_than_the_processor_keeps_it_is_refused(
 
 
 @pytest.mark.guarantee("G31")
+def test_an_in_flight_attempt_is_not_resolved_while_its_request_may_still_be_answered(
+    app, tenant_id
+):
+    """OP-7-8, the first half. resolve-attempt closed an IN_FLIGHT attempt the
+    moment it was asked, while the worker's request could still be at the
+    processor: an operator typing DECLINE a second after the reservation freed
+    a fresh key for the next charge. An in-flight attempt is resolved only once
+    its last row is RESOLVE_IN_FLIGHT_AFTER_MINUTES old on the database's clock."""
+    from monthly_billing.findings import REFUSAL_RESOLUTION_TOO_SOON
+    from store_harness import ConfirmsNoCharge, age_attempt
+
+    reference = _issued(app, tenant_id)
+    _charge_and_die(tenant_id, _Succeeds(), reference, "_settle", _tick(1))
+    (pending,) = pending_attempts(app, tenant_id, reference)
+    success = ChargeResult(outcome=Outcome.SUCCESS, detail="found it", reference="auth-1")
+    with pytest.raises(Refused) as refused:
+        resolve_attempt(app, tenant_id, pending, success, recorded_by="operator", now=_tick(2))
+    assert refused.value.code == REFUSAL_RESOLUTION_TOO_SOON
+    assert _kinds(app, tenant_id) == ["attempt"]
+    age_attempt(pending, ch.RESOLVE_IN_FLIGHT_AFTER_MINUTES + 1)
+    resolved = resolve_attempt(
+        app, tenant_id, pending, success, recorded_by="operator", now=_tick(2),
+        lookup=ConfirmsNoCharge(),
+    )
+    assert resolved.paid is not None and resolved.paid.paid
+
+
+@pytest.mark.guarantee("G31")
+def test_a_success_is_resolved_only_with_the_processors_reference(app, tenant_id):
+    """OP-7-8. A SUCCESS with no reference wrote a card payment nobody can find
+    at the processor. The reference is the evidence; without it, refused."""
+    from monthly_billing.findings import REFUSAL_RESOLUTION_NEEDS_EVIDENCE
+    from store_harness import age_attempt
+
+    reference = _issued(app, tenant_id)
+    _charge_and_die(tenant_id, _Succeeds(), reference, "_settle", _tick(1))
+    (pending,) = pending_attempts(app, tenant_id, reference)
+    age_attempt(pending, ch.RESOLVE_IN_FLIGHT_AFTER_MINUTES + 1)
+    for bare in (None, "  "):
+        with pytest.raises(Refused) as refused:
+            resolve_attempt(
+                app, tenant_id, pending,
+                ChargeResult(outcome=Outcome.SUCCESS, detail="trust me", reference=bare),
+                recorded_by="operator", now=_tick(2),
+            )
+        assert refused.value.code == REFUSAL_RESOLUTION_NEEDS_EVIDENCE
+    assert query(app, tenant_id, "SELECT count(*) FROM payments") == [(0,)]
+
+
+class _Lookup:
+    def __init__(self, answer):
+        self.answer = answer
+        self.asked: list = []
+
+    def charged(self, idempotency_key):
+        self.asked.append(idempotency_key)
+        return self.answer
+
+
+@pytest.mark.guarantee("G31")
+@pytest.mark.parametrize("lookup_says", [None, True, "no lookup"])
+@pytest.mark.parametrize("outcome", [Outcome.DECLINE, Outcome.ERROR])
+def test_a_non_success_is_resolved_only_when_the_processor_confirms_no_charge(
+    app, tenant_id, outcome, lookup_says
+):
+    """OP-7-8, the second half. A DECLINE or an ERROR resolution ends the
+    attempt and the next charge mints a FRESH key -- so if the processor did
+    charge under the old one, the payer is charged twice. The adapter's
+    lookup has to say, for this attempt's key, that there is no charge
+    (``False``); no lookup, a lookup that cannot tell (``None``) and one that
+    found a charge (``True``) are each refused by name and nothing is written."""
+    from monthly_billing.findings import REFUSAL_RESOLUTION_NEEDS_EVIDENCE
+    from store_harness import age_attempt
+
+    reference = _issued(app, tenant_id)
+    _charge_and_die(tenant_id, _Succeeds(), reference, "_settle", _tick(1))
+    (pending,) = pending_attempts(app, tenant_id, reference)
+    age_attempt(pending, ch.RESOLVE_IN_FLIGHT_AFTER_MINUTES + 1)
+    result = ChargeResult(outcome=outcome, detail="the operator says no")
+    lookup = None if lookup_says == "no lookup" else _Lookup(lookup_says)
+    with pytest.raises(Refused) as refused:
+        resolve_attempt(app, tenant_id, pending, result, recorded_by="operator",
+                        now=_tick(2), lookup=lookup)
+    assert refused.value.code == REFUSAL_RESOLUTION_NEEDS_EVIDENCE
+    if lookup is not None:
+        assert lookup.asked == [pending], "the lookup was not asked about this attempt's key"
+    assert _kinds(app, tenant_id) == ["attempt"]
+    # The control: the processor confirms no charge, and the decline is recorded.
+    confirmed = _Lookup(False)
+    resolve_attempt(app, tenant_id, pending, result, recorded_by="operator", now=_tick(3),
+                    lookup=confirmed)
+    assert confirmed.asked == [pending]
+    assert _kinds(app, tenant_id) == ["attempt", "outcome"]
+
+
+@pytest.mark.guarantee("G31")
 def test_a_control_processor_that_answers_cleanly_first_time_is_two_rows_and_nothing_owed(
     app, tenant_id
 ):
@@ -462,7 +600,7 @@ def test_an_unknown_tailed_attempt_can_be_resolved_by_the_operator_and_then_asks
     assert _kinds(app, tenant_id) == ["attempt", "unknown", "ask", "unknown"]
     assert len(set(processor.calls)) == 1 and len(processor.calls) == 2
     assert len(pending_attempts(app, tenant_id, reference)) == 1
-    resolved = resolve_attempt(
+    resolved = _resolve(
         app, tenant_id, first.attempt_id,
         ChargeResult(outcome=Outcome.SUCCESS, detail="reconciled", reference="auth-op"),
         recorded_by="operator", now=_tick(3),
@@ -508,7 +646,7 @@ def test_the_one_outcome_per_attempt_index_is_caught_by_name_when_reached(app, t
     def resolver():
         c = app_connection(DSN)
         try:
-            resolve_attempt(
+            _resolve(
                 c, tenant_id, pending,
                 ChargeResult(outcome=Outcome.SUCCESS, detail="approved", reference="ref-1"),
                 recorded_by=threading.current_thread().name, now=_tick(2),

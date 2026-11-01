@@ -1031,6 +1031,22 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "OP-7-7 undone: an unknown attempt is re-asked under a key the processor may "
         "have forgotten, which the processor treats as a new charge",
     ),
+    "G31/resolve-waits-for-in-flight": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        "    if too_soon:",
+        "    if False:  # PLANTED: an in-flight attempt is resolved the moment it is asked",
+        "OP-7-8 undone: the operator closes an attempt whose request may still be at "
+        "the processor, and a typed decline frees a fresh key while it charges",
+    ),
+    "G31/resolve-needs-a-confirmed-no-charge": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        "    if found is not False:",
+        "    if False:  # PLANTED: a decline or an error needs no processor lookup",
+        "OP-7-8 undone: a decline or an error is recorded with no processor evidence, "
+        "and the next charge's fresh key charges a payer the processor already charged",
+    ),
     "G31/index-by-name": (
         "tests/test_g31_a_charge_is_a_reservation_first.py",
         "charging.py",

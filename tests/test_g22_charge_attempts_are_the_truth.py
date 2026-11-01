@@ -47,6 +47,18 @@ TZ = ZoneInfo(GARAGE.timezone)
 NOW = datetime(2026, 4, 30, 0, 30, tzinfo=TZ)
 
 
+def _resolve(connection, tenant_id, attempt_id, result, **kwargs):
+    """resolve_attempt as an operator does it after OP-7-8: the in-flight
+    request given time to be answered, and the processor's lookup confirming
+    no charge for a decline or an error."""
+    from monthly_billing.charging import RESOLVE_IN_FLIGHT_AFTER_MINUTES, resolve_attempt
+    from store_harness import ConfirmsNoCharge, age_attempt
+
+    age_attempt(attempt_id, RESOLVE_IN_FLIGHT_AFTER_MINUTES + 1)
+    kwargs.setdefault("lookup", ConfirmsNoCharge())
+    return resolve_attempt(connection, tenant_id, attempt_id, result, **kwargs)
+
+
 class _Declines:
     def charge(self, request):
         return ChargeResult(outcome=Outcome.DECLINE, detail="insufficient funds")
@@ -244,7 +256,6 @@ def test_an_outcome_counts_toward_the_method_current_at_its_reservation(app, ten
     one as a DECLINE. That decline was asked of the OLD card, so it counts for
     nothing under the new one -- whether the operator dates the resolution
     after the change or (a typed --at) before it. Both read attempts=0."""
-    from monthly_billing.charging import resolve_attempt
 
     reference = _issued(app, tenant_id)
     for n in range(2):
@@ -255,7 +266,7 @@ def test_an_outcome_counts_toward_the_method_current_at_its_reservation(app, ten
     )
     assert state.attempts == 0
     at = _tick(4) if dated == "after the change" else _tick(2) + timedelta(minutes=30)
-    resolved = resolve_attempt(
+    resolved = _resolve(
         app, tenant_id, pending, ChargeResult(outcome=Outcome.DECLINE, detail="late decline"),
         recorded_by="operator", now=at,
     )
