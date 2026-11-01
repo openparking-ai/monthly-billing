@@ -365,6 +365,10 @@ def _pending_attempts(args: argparse.Namespace) -> int:
             f"  attempt {p.attempt_id}: {p.amount_minor} {p.currency} reserved, {p.state}, "
             f"asked again {p.asks} time(s)"
         )
+        if p.reserved_at is not None:
+            line += f", reserved at {p.reserved_at.isoformat()}"
+        if p.key_expired:
+            line += ", KEY EXPIRED: look it up at the processor, then resolve-attempt"
         if p.last_detail:
             line += f", last: {p.last_detail}"
         print(line)

@@ -1023,6 +1023,14 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "OP-7-5 undone: a cheque pays the invoice between an unknown answer and the "
         "re-ask, and the re-ask still requests the full reserved amount",
     ),
+    "G31/reask-key-lifetime": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        "                if pending.key_expired:",
+        "                if False:  # PLANTED: a key is re-asked however old it is",
+        "OP-7-7 undone: an unknown attempt is re-asked under a key the processor may "
+        "have forgotten, which the processor treats as a new charge",
+    ),
     "G31/index-by-name": (
         "tests/test_g31_a_charge_is_a_reservation_first.py",
         "charging.py",

@@ -376,6 +376,48 @@ def test_a_re_ask_is_refused_when_the_balance_fell_below_the_reservation(
     assert pending_attempts(app, tenant_id, reference) == (first.attempt_id,)
 
 
+def _age_reservation(owner, attempt_id, hours: float) -> None:
+    """Move the reservation's database instant back, as the OWNER -- the
+    application role cannot edit the log, which is the point of the log."""
+    with owner.cursor() as cursor:
+        cursor.execute(
+            "UPDATE charge_attempts SET created_at = created_at - make_interval(secs => %s) "
+            "WHERE attempt_id = %s",
+            (hours * 3600, attempt_id),
+        )
+
+
+@pytest.mark.guarantee("G31")
+def test_a_re_ask_under_a_key_older_than_the_processor_keeps_it_is_refused(
+    owner, app, tenant_id
+):
+    """OP-7-7. A pending UNKNOWN attempt was re-asked under its key however
+    old the key was, and a processor keeps an idempotency key for a bounded
+    time -- 24 hours is common. Past that, the same key is a NEW charge to the
+    processor: the second request collects again. The reservation's instant
+    is the row's own, assigned by the database; past 23 hours of the
+    database's clock the re-ask is refused by name, nothing is asked or
+    written, and the way out is a processor lookup and resolve-attempt."""
+    from monthly_billing.findings import REFUSAL_REASK_KEY_EXPIRED
+
+    reference = _issued(app, tenant_id)
+    processor = _ChargesThenLosesTheAnswer()
+    first = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(1))
+    _age_reservation(owner, first.attempt_id, 22)
+    second = attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(2))
+    assert second.unknown and len(processor.calls) == 2, "a 22-hour key is still asked again"
+    _age_reservation(owner, first.attempt_id, 1.5)
+    kinds_before = _kinds(app, tenant_id)
+    with pytest.raises(Refused) as refused:
+        attempt_charge(app, tenant_id, processor, reference, recorded_by="cron", now=_tick(3))
+    assert refused.value.code == REFUSAL_REASK_KEY_EXPIRED
+    assert str(first.attempt_id) in str(refused.value)
+    assert len(processor.calls) == 2, "an expired key reached the processor"
+    assert _kinds(app, tenant_id) == kinds_before
+    (listed,) = list_pending_attempts(app, tenant_id, reference)
+    assert listed.attempt_id == first.attempt_id and listed.reserved_at is not None
+
+
 @pytest.mark.guarantee("G31")
 def test_a_control_processor_that_answers_cleanly_first_time_is_two_rows_and_nothing_owed(
     app, tenant_id

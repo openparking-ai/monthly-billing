@@ -82,6 +82,7 @@ REFUSAL_INVOICE_ALREADY_TAXED = "REFUSAL_INVOICE_ALREADY_TAXED"
 REFUSAL_PAYER_CHANGED = "REFUSAL_PAYER_CHANGED"
 REFUSAL_VERSION_NOT_NEWER = "REFUSAL_VERSION_NOT_NEWER"
 REFUSAL_REASK_EXCEEDS_BALANCE = "REFUSAL_REASK_EXCEEDS_BALANCE"
+REFUSAL_REASK_KEY_EXPIRED = "REFUSAL_REASK_KEY_EXPIRED"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -184,6 +185,15 @@ REFUSALS: dict[str, str] = {
         "reached the processor it would collect money no longer owed. Nothing is "
         "asked and nothing is written; the attempt stays pending. Look it up at the "
         "processor by its id and record what the processor says (resolve-attempt)."
+    ),
+    REFUSAL_REASK_KEY_EXPIRED: (
+        "A charge attempt on this invoice is PENDING with an UNKNOWN answer, and its "
+        "reservation is older than a processor can be relied on to keep an "
+        "idempotency key (23 hours, by the database's clock). Past that, the same key "
+        "is a NEW charge to the processor, and asking again could collect twice. "
+        "Nothing is asked and nothing is written; the attempt stays pending. Look it "
+        "up at the processor by its id and record what the processor says "
+        "(resolve-attempt)."
     ),
     REFUSAL_ATTEMPT_ALREADY_RESOLVED: (
         "This attempt already has an outcome recorded. What the processor said is "

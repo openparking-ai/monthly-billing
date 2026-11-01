@@ -57,10 +57,13 @@ row with no ``outcome`` row. In T1, under the lock:
   as the idempotency key and the RESERVED amount and currency. No new
   reservation, no fresh key, the retry count and the mandate not re-run --
   this is not a new charge; the request already left once, and a method change
-  since the reservation does not alter what is outstanding under that key. A real
-  processor honours the key, so a repeated request charges once. There is no
-  cap on re-asks: a processor that never answers grows the ``unknown`` log for
-  as long as the scheduler calls, and one key is one charge at most.
+  since the reservation does not alter what is outstanding under that key.
+  And a key is relied on for ``REASK_KEY_LIFETIME_HOURS`` of the database's
+  clock from the reservation row's own instant: past it the re-ask is refused
+  by name (``REFUSAL_REASK_KEY_EXPIRED``), because a processor that has
+  forgotten the key treats the same key as a new charge. A real
+  processor honours the key, so a repeated request charges once inside the
+  key's lifetime; there is no cap on the number of re-asks inside it.
 * no pending attempt -- reserve as above.
 
 A worker resuming and an operator resolving at once: the first to write the
@@ -138,6 +141,7 @@ from .findings import (
     REFUSAL_ATTEMPT_UNRESOLVED,
     REFUSAL_INVOICE_NAMES_NO_AGREEMENT,
     REFUSAL_REASK_EXCEEDS_BALANCE,
+    REFUSAL_REASK_KEY_EXPIRED,
     Refused,
 )
 from .invoice import Invoice, InvoiceLine, LineKind
@@ -220,6 +224,15 @@ class PendingAttempt:
     last_detail: str
     #: How many times the processor has been asked again under this key.
     asks: int
+    #: The reservation's instant, as the database assigned it.
+    reserved_at: datetime | None = None
+    #: True when the reservation is older than ``REASK_KEY_LIFETIME_HOURS`` on
+    #: the database's clock: the key is no longer relied on, and the attempt is
+    #: not asked again (OP-7-7).
+    key_expired: bool = False
+    #: The instant of the attempt's last row (the reservation, an ask or an
+    #: unknown), as the database assigned it.
+    last_row_at: datetime | None = None
 
 
 class AttemptNotFound(LookupError):
@@ -281,13 +294,23 @@ def _load_attempt_rows(cursor: Any, invoice_uuid: Any) -> list[tuple[str, str | 
     ]
 
 
+#: How long a reservation's idempotency key is relied on: a processor keeps a
+#: key for a bounded time (24 hours is common), and past it the same key is a
+#: NEW charge to the processor. Judged on the database's clock against the
+#: reservation row's own ``created_at`` -- never the caller's ``now``, which is
+#: whatever was typed -- with an hour's margin (OP-7-7).
+REASK_KEY_LIFETIME_HOURS = 23
+
 _PENDING_SQL = """
     SELECT a.attempt_id, a.amount_minor, a.currency,
            last.kind, last.detail,
            (SELECT count(*) FROM charge_attempts k
-             WHERE k.attempt_id = a.attempt_id AND k.kind = 'ask')
+             WHERE k.attempt_id = a.attempt_id AND k.kind = 'ask'),
+           a.created_at,
+           now() - a.created_at > make_interval(hours => %s),
+           last.created_at
     FROM charge_attempts a
-    JOIN LATERAL (SELECT r.kind, r.detail FROM charge_attempts r
+    JOIN LATERAL (SELECT r.kind, r.detail, r.created_at FROM charge_attempts r
                    WHERE r.attempt_id = a.attempt_id
                    ORDER BY r.sequence DESC LIMIT 1) AS last ON true
     WHERE a.invoice_id = %s AND a.kind = 'attempt'
@@ -298,7 +321,7 @@ _PENDING_SQL = """
 
 
 def _pending_rows(cursor: Any, invoice_uuid: Any) -> list[PendingAttempt]:
-    cursor.execute(_PENDING_SQL, (invoice_uuid,))
+    cursor.execute(_PENDING_SQL, (REASK_KEY_LIFETIME_HOURS, invoice_uuid))
     return [
         PendingAttempt(
             attempt_id=as_uuid(attempt_id),
@@ -307,8 +330,14 @@ def _pending_rows(cursor: Any, invoice_uuid: Any) -> list[PendingAttempt]:
             state=UNKNOWN if last_kind == "unknown" else IN_FLIGHT,
             last_detail=last_detail if last_kind == "unknown" else "",
             asks=int(asks),
+            reserved_at=reserved_at,
+            key_expired=bool(expired),
+            last_row_at=last_at,
         )
-        for attempt_id, amount, currency, last_kind, last_detail, asks in cursor.fetchall()
+        for (
+            attempt_id, amount, currency, last_kind, last_detail, asks, reserved_at, expired,
+            last_at,
+        ) in cursor.fetchall()
     ]
 
 
@@ -429,6 +458,14 @@ def _reserve(
                 # payment since the reservation means the reserved amount is no
                 # longer owed, and if the first request never reached the
                 # processor, asking again would collect it (OP-7-5).
+                if pending.key_expired:
+                    raise Refused(
+                        REFUSAL_REASK_KEY_EXPIRED,
+                        f"invoice {invoice_reference!r}: attempt {pending.attempt_id} was "
+                        f"reserved at {pending.reserved_at.isoformat()}, more than "
+                        f"{REASK_KEY_LIFETIME_HOURS} hours ago; look it up at the processor "
+                        "and record what it says (resolve-attempt).",
+                    )
                 now_owed = paid_state(cursor, invoice_uuid)
                 outstanding = now_owed.total_minor - now_owed.paid_minor
                 if outstanding <= 0 or outstanding < pending.amount_minor:
