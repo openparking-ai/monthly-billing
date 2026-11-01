@@ -140,8 +140,11 @@ GUARANTEES: dict[str, str] = {
         "never edited, only added to -- and the store's instrument guard scans every "
         "row of theirs on the way in, as it does everywhere. The invoice's own lines "
         "and the owner's recorded decisions are history the same way -- no UPDATE, no "
-        "DELETE -- and an invoice cannot be deleted; it keeps UPDATE for the one "
-        "derived column, paid_at."
+        "DELETE -- and an invoice cannot be deleted; it keeps UPDATE on the one "
+        "derived column, paid_at, and on no other column (a column grant: the "
+        "invoice lock's FOR UPDATE needs no more). A stored agreement version -- "
+        "the agreement row, its vehicles, pauses and fees, and its mandate -- has "
+        "no UPDATE and no DELETE either: a new version is a new row."
     ),
     "G21": (
         "The store-backed entitlement call returns the pure function's answer and "

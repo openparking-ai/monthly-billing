@@ -77,7 +77,7 @@ Stated first, so nothing here is later read as a promise:
 | **G17** | A billing run is idempotent BY CONSTRAINT: the database holds one invoice per tenant, garage, payer and period, so a second run of the same period issues nothing, re-prices nothing, and says so per payer rather than erroring or duplicating. |
 | **G18** | A period is owned by exactly one of the first charge and the billing run, decided by PERIOD and never by line count: the run does not re-issue the two periods the first charge covered, and it does issue every period after them. |
 | **G19** | An invoice is paid only by unreversed payments summing to its total, and paid_at is DERIVED after each of the three events that can change that -- a payment, a reversal, an owner adjustment that moves the total. A reversal reopens the invoice from its ORIGINAL due date, never from the reversal. |
-| **G20** | Payments, reversals and charge attempts are append-only BY GRANT: the application role has no UPDATE and no DELETE on them, so money history is never edited, only added to -- and the store's instrument guard scans every row of theirs on the way in, as it does everywhere. The invoice's own lines and the owner's recorded decisions are history the same way -- no UPDATE, no DELETE -- and an invoice cannot be deleted; it keeps UPDATE for the one derived column, paid_at. |
+| **G20** | Payments, reversals and charge attempts are append-only BY GRANT: the application role has no UPDATE and no DELETE on them, so money history is never edited, only added to -- and the store's instrument guard scans every row of theirs on the way in, as it does everywhere. The invoice's own lines and the owner's recorded decisions are history the same way -- no UPDATE, no DELETE -- and an invoice cannot be deleted; it keeps UPDATE on the one derived column, paid_at, and on no other column (a column grant: the invoice lock's FOR UPDATE needs no more). A stored agreement version -- the agreement row, its vehicles, pauses and fees, and its mandate -- has no UPDATE and no DELETE either: a new version is a new row. |
 | **G21** | The store-backed entitlement call returns the pure function's answer and nothing else -- the same field set, no money -- with 'unpaid since' derived as the earliest unpaid due date, and it HONOURS the owner's grace extensions and blocks rather than reading the garage's base figure alone. |
 | **G22** | The charge log is the truth for retries, in the order it was RECORDED: the retry state is rebuilt from the persisted OUTCOME rows walked by the sequence the database assigned under the invoice lock -- never by the instant a caller typed -- and an outcome counts toward the payment method that was current when its RESERVATION was made. Three recorded non-success outcomes refuse the fourth by name; a recorded method change allows it -- and is allowed while an attempt is pending, because it moves no money; a success counts toward nothing and resets nothing; an unknown counts as nothing; and a restart forgets nothing because nothing lives outside the rows. |
 | **G23** | A charge is for the BALANCE -- the invoice's total minus its unreversed payments, read under the invoice lock through the same derivation that decides paid -- never the total; and a balance of nothing is refused by name BEFORE the processor is called and before any row is written, so a paid invoice is never charged again, a part-paid one is charged its remainder, and a fully waived one is not charged at all. A payment that lands between the reservation and the outcome does not cancel the card payment the processor made: it is recorded for the amount reserved and the invoice reads OVERPAID, never silently. |
@@ -523,17 +523,17 @@ may do to each table, read from the catalogue of a database migrated from
 <!-- GENERATED:grants -->
 | table | the application role may |
 |---|---|
-| `agreement_fees` | DELETE, INSERT, SELECT, UPDATE |
+| `agreement_fees` | INSERT, SELECT |
 | `agreement_garages` | INSERT, SELECT |
-| `agreement_pauses` | DELETE, INSERT, SELECT, UPDATE |
-| `agreement_vehicles` | DELETE, INSERT, SELECT, UPDATE |
-| `agreements` | DELETE, INSERT, SELECT, UPDATE |
+| `agreement_pauses` | INSERT, SELECT |
+| `agreement_vehicles` | INSERT, SELECT |
+| `agreements` | INSERT, SELECT |
 | `charge_attempts` | INSERT, SELECT |
 | `garage_tax_sets` | INSERT, SELECT |
 | `garages` | DELETE, INSERT, SELECT, UPDATE |
 | `invoice_lines` | INSERT, SELECT |
-| `invoices` | INSERT, SELECT, UPDATE |
-| `mandates` | DELETE, INSERT, SELECT, UPDATE |
+| `invoices` | INSERT, SELECT |
+| `mandates` | INSERT, SELECT |
 | `owner_exceptions` | INSERT, SELECT |
 | `payers` | DELETE, INSERT, SELECT, UPDATE |
 | `payment_reversals` | INSERT, SELECT |
@@ -541,7 +541,7 @@ may do to each table, read from the catalogue of a database migrated from
 | `tenants` | DELETE, INSERT, SELECT, UPDATE |
 | `vehicle_registrations` | DELETE, INSERT, SELECT, UPDATE |
 
-17 tables. 7 are append-only -- `agreement_garages`, `charge_attempts`, `garage_tax_sets`, `invoice_lines`, `owner_exceptions`, `payment_reversals`, `payments` -- and `invoices` keeps UPDATE and loses DELETE: `paid_at` is derived by the application after every payment, reversal and adjustment, and that is the one column it writes. The rest carry the DML the application needs to store documents.
+17 tables. 13 are append-only -- `agreement_fees`, `agreement_garages`, `agreement_pauses`, `agreement_vehicles`, `agreements`, `charge_attempts`, `garage_tax_sets`, `invoice_lines`, `invoices`, `mandates`, `owner_exceptions`, `payment_reversals`, `payments` -- and  keep UPDATE and lose DELETE: `paid_at` is derived by the application after every payment, reversal and adjustment, and that is the one column it writes. The rest carry the DML the application needs to store documents.
 <!-- END:grants -->
 
 The charge log is the truth for retries, in the order it was recorded -- the

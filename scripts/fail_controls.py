@@ -644,6 +644,26 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "the invoice's lines and the owner's decisions can be edited and deleted by "
         "the application role again, so 'a paid period is paid' rests on code alone",
     ),
+    "G20/invoice-column-grant": (
+        "tests/test_g20_money_history_is_append_only.py",
+        "migrations/0008_invoice_paid_at_only_and_versions_append_only.sql",
+        "REVOKE UPDATE ON invoices FROM monthly_billing_app;",
+        "-- PLANTED: 0002's table-wide UPDATE on invoices stands",
+        "OP-7-14 undone: the application role can rewrite an issued invoice's payer, "
+        "period, due instant or reference, not only its derived paid_at",
+    ),
+    "G20/versions": (
+        "tests/test_g20_money_history_is_append_only.py",
+        "migrations/0008_invoice_paid_at_only_and_versions_append_only.sql",
+        source(
+            "REVOKE UPDATE, DELETE ON",
+            "  agreements, agreement_vehicles, agreement_pauses, agreement_fees, mandates",
+            "FROM monthly_billing_app;",
+        ),
+        "-- PLANTED: a stored version stays editable",
+        "OP-7-14 undone: a stored agreement version -- the price an invoice line names, "
+        "the terms a mandate was agreed in -- can be edited or deleted in place",
+    ),
     "G21/prose": (
         "tests/test_g21_covered_from_the_store.py",
         "entitlement_store.py",
