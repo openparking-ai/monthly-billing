@@ -98,7 +98,10 @@ class AdditionalFee:
     without anybody adding a rule type for it.
 
     ``effective_from`` is what decides which invoice a ONE_TIME line lands on: the
-    first invoice whose period contains it. Without it a one-time fee would land
+    first invoice whose period contains it -- and, in the store's run, the first
+    invoice issued on or after it that has not billed it yet, so a fee added
+    after its period was invoiced, or in a period with no billable day, is not
+    dropped (OP-7-11). Without it a one-time fee would land
     on whichever invoice happened to run next, which is a different answer
     depending on when somebody pressed a button.
     """

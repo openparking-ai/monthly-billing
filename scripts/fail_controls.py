@@ -223,7 +223,7 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
             "                period_end_day=period.end_day,",
             "            )",
             "        )",
-            "        lines.extend(_fee_lines(agreement, period, prorated=days != period.days))",
+            "        lines.extend(_fee_lines(",
         ),
         source(
             "                agreement_version=1,  # PLANTED: every line claims v1",
@@ -231,7 +231,7 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
             "                period_end_day=period.end_day,",
             "            )",
             "        )",
-            "        lines.extend(_fee_lines(agreement, period, prorated=days != period.days))",
+            "        lines.extend(_fee_lines(",
         ),
         "an invoice line records version 1 whatever priced it, so a paid period "
         "can no longer be checked against the document that priced it",
@@ -487,6 +487,21 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "    if False:  # PLANTED: start day decides\n        return period.start_day in stored",
         "OP-7-3 undone: the run re-derives the first charge's periods from the latest "
         "version's start day instead of the ones it was issued for",
+    ),
+    "G18/one-time-fee-carried": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "invoice.py",
+        "    if one_time_due is not None:",
+        "    if False:  # PLANTED: a one-time fee lands only on the period holding its day",
+        "OP-7-11 undone: a one-time fee added after its period was invoiced, or in a "
+        "period with no billable day, is billed nowhere",
+    ),
+    "G18/one-time-fee-once": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        "    return tuple(fee for fee in candidates if not already(fee))",
+        "    return tuple(candidates)  # PLANTED: a billed fee is billed again",
+        "OP-7-11's other half: a carried one-time fee lands on every invoice after its day",
     ),
     "G19/reopen": (
         "tests/test_g19_paid_is_derived.py",

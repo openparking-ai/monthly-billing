@@ -221,6 +221,55 @@ def stored_first_charges(cursor: Any, garage_uuid: Any) -> dict[str, tuple[date,
     return {agreement: (first, second) for agreement, first, second in cursor.fetchall()}
 
 
+def _one_time_fees_due(
+    cursor: Any,
+    garage: Garage,
+    agreement: Agreement,
+    period: BillingPeriod,
+    stored: tuple[date, date] | None,
+) -> tuple:
+    """THE ONE-TIME FEES THIS PERIOD'S INVOICE CARRIES (OP-7-11): every one
+    whose day is before the period ends and that no invoice line of the
+    agreement already bills -- so a fee added after its period was invoiced,
+    or in a period with no billable day, lands on the first invoice issued on
+    or after its day, once.
+
+    Billed means a ``one_time_fee`` line of the agreement's identity under the
+    fee's label and day (``one_time_fee_label``), or -- written before that
+    label existed -- under its bare label on a line whose period holds its day.
+    A fee whose day is inside the first charge's two periods is the first
+    charge's alone, stored there or not: the run never carries it."""
+    from .invoice import one_time_fee_label
+
+    first = (
+        period_containing(garage, stored[1])
+        if stored is not None
+        else next_period_after(garage, period_containing(garage, agreement.start_day))
+    )
+    candidates = [
+        fee for fee in agreement.one_time_fees()
+        if first.end_day <= fee.effective_from < period.end_day
+    ]
+    if not candidates:
+        return ()
+    cursor.execute(
+        "SELECT l.label, l.period_start_day, l.period_end_day FROM invoice_lines l "
+        "JOIN agreements a ON a.id = l.agreement_id "
+        "WHERE a.external_id = %s AND l.kind = 'one_time_fee'",
+        (agreement.id,),
+    )
+    billed = cursor.fetchall()
+
+    def already(fee) -> bool:
+        return any(
+            label == one_time_fee_label(fee)
+            or (label == f"{fee.label} (one-time)" and start <= fee.effective_from < end)
+            for label, start, end in billed
+        )
+
+    return tuple(fee for fee in candidates if not already(fee))
+
+
 def first_charge_day(garage: Garage, agreement: Agreement) -> date:
     """The day a first charge's invoice is keyed on (migration 0010): the start
     day, or the day before it when the agreement starts on a period's first
@@ -366,15 +415,21 @@ def run_billing(
             with tenant(connection, tenant_id) as cursor:
                 items = load_agreements_at_garage(cursor, stored.uuid, payer_uuid)
                 first_charges = stored_first_charges(cursor, stored.uuid)
-            connection.rollback()
-            priced = tuple(
-                item.agreement
-                for item in items
-                if not owned_by_first_charge(
-                    garage, item.agreement, period, first_charges.get(item.agreement.id)
+                priced = tuple(
+                    item.agreement
+                    for item in items
+                    if not owned_by_first_charge(
+                        garage, item.agreement, period, first_charges.get(item.agreement.id)
+                    )
                 )
-            )
-            invoice = invoice_for_period(garage, priced, period, payer_id)
+                due = {
+                    agreement.id: _one_time_fees_due(
+                        cursor, garage, agreement, period, first_charges.get(agreement.id)
+                    )
+                    for agreement in priced
+                }
+            connection.rollback()
+            invoice = invoice_for_period(garage, priced, period, payer_id, one_time_due=due)
         except (Refused, InvalidAgreement, NotMinorUnits, UnpriceableCurrency) as refusal:
             connection.rollback()
             lines.append(RunLine(payer_id, RunOutcome.REFUSED, str(refusal)))

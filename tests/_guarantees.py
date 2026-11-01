@@ -136,7 +136,12 @@ GUARANTEES: dict[str, str] = {
         "`first_charge_owed` agree that it is not covered past grace. The run decides "
         "the owned periods from the stored row, never from the latest version's start "
         "day, and once anything is billed for the agreement a version that moves its "
-        "start day is refused by name."
+        "start day is refused by name. A ONE-TIME FEE IS BILLED ONCE: the run carries "
+        "every one whose day is before the period ends and that no line of the "
+        "agreement bills yet -- labelled with its day, its identity -- so one added "
+        "after its period was invoiced, or falling in a period with no billable day, "
+        "lands on the next invoice; one inside the first charge's periods is the first "
+        "charge's alone."
     ),
     "G19": (
         "An invoice is paid only by unreversed payments summing to its total, and "

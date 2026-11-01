@@ -198,3 +198,78 @@ def test_the_stored_periods_decide_whatever_the_start_day_says():
     assert not owned_by_first_charge(GARAGE, moved, august, stored)
     # The re-derivation the store no longer uses:
     assert owned_by_first_charge(GARAGE, moved, august)
+
+
+def _one_time(label: str, day: date, amount: int = 2500):
+    from monthly_billing.agreement import AdditionalFee, FeeCadence
+
+    return AdditionalFee(label=label, amount_minor=amount, cadence=FeeCadence.ONE_TIME,
+                         effective_from=day)
+
+
+def _fee_lines(app, tenant_id):
+    return query(
+        app, tenant_id,
+        "SELECT i.period_start_day, l.label, l.amount_minor FROM invoice_lines l "
+        "JOIN invoices i ON i.id = l.invoice_id WHERE l.kind = 'one_time_fee' "
+        "ORDER BY i.period_start_day, l.label",
+    )
+
+
+@pytest.mark.guarantee("G18")
+def test_a_one_time_fee_added_after_its_period_was_invoiced_lands_on_the_next_invoice(
+    app, tenant_id
+):
+    """OP-7-11. A one-time fee landed only on the invoice for the period
+    CONTAINING its day. Added in a version stored after that period was
+    invoiced, it was billed nowhere, ever. It now lands on the first invoice
+    the run issues on or after its day, tracked by the fee's identity, and
+    once only."""
+    seeded = seed(app, tenant_id, GARAGE, (simple_agreement(start_day=date(2026, 1, 5)),))
+    run_billing(app, tenant_id, GARAGE.id, date(2026, 5, 15), now=_at(date(2026, 4, 30)))
+    _store_version(app, tenant_id, seeded, simple_agreement(
+        version=2, start_day=date(2026, 1, 5),
+        additional_fees=(_one_time("Key card", date(2026, 5, 12)),),
+    ))
+    run_billing(app, tenant_id, GARAGE.id, date(2026, 6, 15), now=_at(date(2026, 5, 31)))
+    run_billing(app, tenant_id, GARAGE.id, date(2026, 7, 15), now=_at(date(2026, 6, 30)))
+    assert _fee_lines(app, tenant_id) == [
+        (date(2026, 5, 31), "Key card (one-time, 2026-05-12)", 2500)]
+
+
+@pytest.mark.guarantee("G18")
+def test_a_one_time_fee_in_a_period_with_no_billable_day_waits_for_the_next_invoice(
+    app, tenant_id
+):
+    """OP-7-11. A one-time fee in a period the agreement is paused for the
+    whole of was dropped with the period's lines. It now waits for the first
+    invoice that bills the agreement."""
+    from monthly_billing.agreement import Pause
+
+    seed(app, tenant_id, GARAGE, (simple_agreement(
+        start_day=date(2026, 1, 5),
+        pauses=(Pause(from_day=date(2026, 5, 31), until_day=date(2026, 6, 30)),),
+        additional_fees=(_one_time("Lost fob", date(2026, 6, 3)),),
+    ),))
+    (june,) = run_billing(app, tenant_id, GARAGE.id, date(2026, 6, 15),
+                          now=_at(date(2026, 5, 31))).lines
+    assert june.outcome is RunOutcome.NOTHING_BILLABLE
+    run_billing(app, tenant_id, GARAGE.id, date(2026, 7, 15), now=_at(date(2026, 6, 30)))
+    run_billing(app, tenant_id, GARAGE.id, date(2026, 8, 15), now=_at(date(2026, 7, 31)))
+    assert _fee_lines(app, tenant_id) == [
+        (date(2026, 6, 30), "Lost fob (one-time, 2026-06-03)", 2500)]
+
+
+@pytest.mark.guarantee("G18")
+def test_a_one_time_fee_inside_the_first_charge_is_the_first_charges_alone(app, tenant_id):
+    """Never twice: a one-time fee whose day falls in the first charge's two
+    periods is the first charge's, whether that was stored or taken before
+    this store kept first charges -- the run never carries it."""
+    seed(app, tenant_id, GARAGE, (simple_agreement(
+        start_day=START, additional_fees=(_one_time("Signup", START),),
+    ),))
+    issue_first_charge(app, tenant_id, "ag-0001", now=_at(START, 8))
+    for day in (date(2026, 8, 15), date(2026, 9, 15)):
+        run_billing(app, tenant_id, GARAGE.id, day, now=_at(day.replace(day=1)))
+    labels = [label for _, label, _ in _fee_lines(app, tenant_id)]
+    assert labels == ["Signup (one-time)"], labels

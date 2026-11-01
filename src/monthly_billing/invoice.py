@@ -144,6 +144,7 @@ def _fee_lines(
     period: BillingPeriod,
     *,
     prorated: bool,
+    one_time_due: tuple | None = None,
 ) -> list[InvoiceLine]:
     """The additional fee lines falling in ``period``.
 
@@ -182,6 +183,24 @@ def _fee_lines(
             )
         )
 
+    if one_time_due is not None:
+        # THE STORE'S RUN (OP-7-11): the one-time fees it found due -- on or
+        # before this period, and on no invoice yet -- each labelled with its
+        # day, which is how the next run knows it was billed.
+        for fee in one_time_due:
+            lines.append(
+                InvoiceLine(
+                    kind=LineKind.ONE_TIME_FEE,
+                    label=one_time_fee_label(fee),
+                    amount_minor=fee.amount_minor,
+                    agreement_id=agreement.id,
+                    agreement_version=agreement.version,
+                    period_start_day=period.start_day,
+                    period_end_day=period.end_day,
+                )
+            )
+        return lines
+
     for fee in agreement.one_time_fees():
         if period.contains(fee.effective_from):
             lines.append(
@@ -196,6 +215,12 @@ def _fee_lines(
                 )
             )
     return lines
+
+
+def one_time_fee_label(fee) -> str:
+    """The label a one-time fee is stored under by the run: the fee's own label
+    and its day -- the fee's identity on an invoice (OP-7-11)."""
+    return f"{fee.label} (one-time, {fee.effective_from.isoformat()})"
 
 
 def first_charge(garage: Garage, agreement: Agreement) -> Invoice:
@@ -275,11 +300,18 @@ def invoice_for_period(
     agreements: tuple[Agreement, ...],
     period: BillingPeriod,
     payer_id: str,
+    *,
+    one_time_due: dict[str, tuple] | None = None,
 ) -> Invoice:
     """One payer's invoice for one garage and one period, itemising each agreement.
 
     Every agreement under the payer contributes its own lines, labelled with its
     own id, so a company paying for twelve parkers can see which twelve.
+
+    ``one_time_due`` is the store's: by agreement id, the one-time fees that
+    land on THIS invoice because none has been billed yet and their day is on
+    or before the period (OP-7-11). Without it, a one-time fee lands on the
+    period containing its day, as the document path has always priced it.
     """
     validate_currency(garage.currency, f"garage[{garage.id}].currency")
 
@@ -308,7 +340,10 @@ def invoice_for_period(
                 period_end_day=period.end_day,
             )
         )
-        lines.extend(_fee_lines(agreement, period, prorated=days != period.days))
+        lines.extend(_fee_lines(
+            agreement, period, prorated=days != period.days,
+            one_time_due=None if one_time_due is None else one_time_due.get(agreement.id, ()),
+        ))
 
     return Invoice(
         payer_id=payer_id,
