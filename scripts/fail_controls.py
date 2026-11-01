@@ -383,6 +383,20 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "reads the catalogue rather than a list of table names, so it finds this "
         "without anybody adding the table to anything",
     ),
+    "G12/cli-refuses-a-bypassing-dsn": (
+        "tests/test_g12_rls_from_migration_0001.py",
+        "cli.py",
+        source(
+            "        assert_role_cannot_bypass_rls(connection)",
+            "    except AssertionError as refusal:",
+        ),
+        source(
+            "        pass  # PLANTED: the DSN's role is never checked",
+            "    except AssertionError as refusal:",
+        ),
+        "OP-7-13 undone: a store command run with the owner's or a superuser's DSN "
+        "reads and writes across every tenant, the row policy inert for it",
+    ),
     "G13": (
         "tests/test_g13_a_pause_over_a_paid_period_refuses.py",
         "cycle.py",

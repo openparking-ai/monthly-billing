@@ -207,12 +207,23 @@ def _check_agreement(args: argparse.Namespace) -> int:
 
 
 def _connection(args: argparse.Namespace):
-    from .store.postgres import connect
+    from .store.postgres import assert_role_cannot_bypass_rls, connect
 
     dsn = args.dsn or os.environ.get("MONTHLY_BILLING_DSN")
     if not dsn:
         raise SystemExit("a store command needs --dsn or MONTHLY_BILLING_DSN.")
     connection = connect(dsn)
+    # Tenant isolation is the row policy, and a superuser or a BYPASSRLS role
+    # is never stopped by one: under the owner's DSN every command here reads
+    # and writes across every tenant. Refused before anything runs (OP-7-13).
+    try:
+        assert_role_cannot_bypass_rls(connection)
+    except AssertionError as refusal:
+        connection.close()
+        raise SystemExit(
+            f"REFUSED — the store commands do not run as this role: {refusal}"
+        ) from None
+    connection.rollback()  # the check's read; nothing of a command's runs in it
     connection.autocommit = False
     return connection
 
