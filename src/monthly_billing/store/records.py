@@ -113,6 +113,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from ..agreement import (
     AccessHours,
@@ -1502,9 +1503,9 @@ def _coverage_days(
     the money state at its HOME as ``entitlement_store.covered_from_store``
     reads it -- the same exceptions read, the same "earliest unpaid" rule and
     the same grace arithmetic -- turned into a day. Builds no ``Agreement`` and
-    no ``Garage``, and needs no zone: an invoice is due at the start instant of
-    its period, so the home-calendar day it falls due on IS its stored
-    ``period_start_day``.
+    no ``Garage``; the home's zone is read to turn the instant grace runs from
+    -- the later of the invoice's ``due_at`` and ``issued_at`` -- into a day of
+    the home's calendar.
 
     ``is_covered`` answers UNPAID_PAST_GRACE once more than ``grace`` home
     days have passed since that day, so the first such day is
@@ -1531,20 +1532,24 @@ def _coverage_days(
     exceptions = _exceptions_for(
         cursor, agreement_id, payer_uuid, latest.home_uuid, tenant_id=tenant_id
     )
+    # The later of due_at and issued_at, as covered-in-store reads it
+    # (OP-7-10): a late-issued invoice's grace runs from its issue. Turned
+    # into a day of the HOME's calendar, the clock grace is judged on.
     cursor.execute(
-        "SELECT min(period_start_day) FROM invoices "
+        "SELECT min(greatest(due_at, issued_at)) FROM invoices "
         "WHERE tenant_id = %s AND payer_id = %s AND garage_id = %s AND paid_at IS NULL",
         (tenant_id, payer_uuid, latest.home_uuid),
     )
-    (due_day,) = cursor.fetchone()
+    (owed_since,) = cursor.fetchone()
     not_covered_from = None
-    if due_day is not None:
+    if owed_since is not None:
         cursor.execute(
-            "SELECT payment_grace_days FROM garages WHERE tenant_id = %s AND id = %s",
+            "SELECT payment_grace_days, timezone FROM garages WHERE tenant_id = %s AND id = %s",
             (tenant_id, latest.home_uuid),
         )
-        (base_grace,) = cursor.fetchone()
+        base_grace, home_zone = cursor.fetchone()
         grace = applied_grace_days(base_grace, exceptions)
+        due_day = owed_since.astimezone(ZoneInfo(home_zone)).date()
         not_covered_from = due_day + timedelta(days=grace + 1)
     return {
         "start_day": start_day,

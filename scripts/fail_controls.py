@@ -542,6 +542,14 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "the store-backed call never reads a block, so the owner's decision to "
         "block an agreement reaches no barrier",
     ),
+    "G21/grace-from-the-issue": (
+        "tests/test_g21_covered_from_the_store.py",
+        "entitlement_store.py",
+        '        "SELECT min(greatest(due_at, issued_at)) FROM invoices "',
+        '        "SELECT min(due_at) FROM invoices "  # PLANTED: grace from the period start',
+        "OP-7-10 undone: an invoice issued after its period began is past grace the "
+        "moment it is written, and the car reads NOT COVERED before anyone was billed",
+    ),
     "G22": (
         "tests/test_g22_charge_attempts_are_the_truth.py",
         "charging.py",

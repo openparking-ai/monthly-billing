@@ -150,7 +150,10 @@ GUARANTEES: dict[str, str] = {
     "G21": (
         "The store-backed entitlement call returns the pure function's answer and "
         "nothing else -- the same field set, no money -- with 'unpaid since' derived "
-        "as the earliest unpaid due date, and it HONOURS the owner's grace extensions "
+        "as the earliest instant an unpaid invoice was owed from -- the later of its "
+        "due date and its issue, so an invoice issued late gets its whole grace "
+        "(the register's not_covered_from is read the same way) -- and it HONOURS the "
+        "owner's grace extensions "
         "and blocks rather than reading the garage's base figure alone."
     ),
     "G22": (

@@ -163,9 +163,14 @@ def _home_garage(cursor: Any, asking: StoredGarage, home_id: str) -> StoredGarag
 
 
 def _earliest_unpaid_due_at(cursor: Any, payer_uuid: Any, garage_uuid: Any) -> datetime | None:
-    """``garage_uuid`` is the agreement's HOME -- see the module docstring."""
+    """``garage_uuid`` is the agreement's HOME -- see the module docstring.
+
+    Grace runs from the LATER of ``due_at`` and ``issued_at`` (OP-7-10): an
+    invoice the run issued after its period began cannot have been owed for
+    longer than it has existed, and counting from the period's start put a
+    late-issued invoice past grace the moment it was written."""
     cursor.execute(
-        "SELECT min(due_at) FROM invoices "
+        "SELECT min(greatest(due_at, issued_at)) FROM invoices "
         "WHERE payer_id = %s AND garage_id = %s AND paid_at IS NULL",
         (payer_uuid, garage_uuid),
     )
