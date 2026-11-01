@@ -319,6 +319,14 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "four sails through -- one space away from blind, in the form these values "
         "are most often pasted",
     ),
+    "G9/separator-runs": (
+        "tests/test_g9_no_instrument_survives.py",
+        "sensitive.py",
+        'rf"(?<![0-9])(?:[0-9]{_SEPARATOR}{{0,3}}){{12,22}}[0-9](?![0-9])"',
+        'r"(?<![0-9])(?:[0-9][ -]?){12,22}[0-9](?![0-9])"  # PLANTED: one space or hyphen',
+        "OP-7-15 undone: only a single space or hyphen joins digit groups again, so the "
+        "same number behind two spaces, a dot or a tab is stored",
+    ),
     "G9/repository": (
         "tests/test_g9_no_instrument_survives.py",
         "money.py",
