@@ -355,7 +355,7 @@ def _resolve_attempt(args: argparse.Namespace) -> int:
 
     detail = args.detail or f"recorded by {args.recorded_by}"
     lookup = None
-    if args.no_charge_confirmed_by:
+    if args.no_charge_confirmed_by and args.no_charge_confirmed_by.strip():
         # The command line has no processor adapter of its own: the operator
         # looked the attempt's key up at the processor and found no charge,
         # and says where -- that sentence is the evidence, and it is stored

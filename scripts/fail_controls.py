@@ -1185,6 +1185,14 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "OP-7-8 undone: a decline or an error is recorded with no processor evidence, "
         "and the next charge's fresh key charges a payer the processor already charged",
     ),
+    "G31/blank-evidence-refused": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "cli.py",
+        "    if args.no_charge_confirmed_by and args.no_charge_confirmed_by.strip():",
+        "    if args.no_charge_confirmed_by:  # PLANTED: a blank answer is evidence",
+        "a decline recorded with --no-charge-confirmed-by of a single space: no "
+        "evidence at all, and the next charge mints a fresh key",
+    ),
     "G31/index-by-name": (
         "tests/test_g31_a_charge_is_a_reservation_first.py",
         "charging.py",

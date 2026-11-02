@@ -287,6 +287,9 @@ def test_the_command_line_records_a_decline_only_with_the_no_charge_lookup_named
             "--recorded-by", "operator", "--dsn", dsn]
     assert main(argv) == 2
     assert REFUSAL_RESOLUTION_NEEDS_EVIDENCE in capsys.readouterr().err
+    # The review: a blank "where I looked" is no evidence either.
+    assert main([*argv, "--no-charge-confirmed-by", "  "]) == 2
+    assert REFUSAL_RESOLUTION_NEEDS_EVIDENCE in capsys.readouterr().err
     assert _kinds(app, tenant_id) == ["attempt"]
     assert main([*argv, "--no-charge-confirmed-by", "processor dashboard search"]) == 0
     (detail,) = query(app, tenant_id,
