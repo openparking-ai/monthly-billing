@@ -510,3 +510,30 @@ def test_a_first_charge_on_a_billing_day_never_reads_as_that_periods_invoice(app
     (line,) = run_billing(app, tenant_id, GARAGE.id, date(2026, 7, 15),
                           now=_at(date(2026, 6, 30), 2)).lines
     assert line.outcome is RunOutcome.CONSTRAINT_VIOLATED, line
+
+
+@pytest.mark.guarantee("G18")
+def test_an_owners_grace_extension_counts_while_the_first_charge_is_owed(app, tenant_id):
+    """The review's side effect of OP-7-9: an agreement-level extension counts
+    only toward an invoice issued before it was recorded, and before the first
+    charge is issued there is no invoice -- so the owner's ten extra days for a
+    new parker counted for nothing. While the first charge is owed, the
+    extension counts from the agreement's start: start June 10, grace 5, ten
+    more given on June 12 -- covered through June 25, not covered from the
+    26th, and the register says the same day."""
+    from monthly_billing.exceptions_by_owner import ExceptionKind, OwnerException
+    from monthly_billing.exceptions_store import record_agreement_exception
+
+    seeded = seed(app, tenant_id, GARAGE, (simple_agreement(start_day=START),))
+    record_agreement_exception(app, tenant_id, seeded.agreement_uuids["ag-0001"], OwnerException(
+        id="ext-new", agreement_id="ag-0001", invoice_reference=None,
+        kind=ExceptionKind.EXTEND_GRACE, recorded_by="owner",
+        recorded_at=_at(date(2026, 6, 12)), extra_grace_days=10,
+    ))
+    assert _covered(app, tenant_id, date(2026, 6, 18))
+    assert _covered(app, tenant_id, date(2026, 6, 25))
+    assert not _covered(app, tenant_id, date(2026, 6, 26))
+    with tenant(app, tenant_id) as cursor:
+        (entry,) = show_garage_register(cursor, tenant_id, GARAGE.id).as_document()["agreements"]
+    app.rollback()
+    assert entry["first_charge_owed"]["not_covered_from"] == "2026-06-26"

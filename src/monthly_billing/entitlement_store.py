@@ -249,6 +249,9 @@ def _exceptions_for(
     # A grace extension on the AGREEMENT is bound to the invoice the owner was
     # looking at (OP-7-9): it counts only when the earliest unpaid invoice --
     # the one grace is judged on -- was already issued when it was recorded.
+    # With no unpaid invoice -- a new parker whose first charge is still owed
+    # and not yet issued -- it counts when recorded on or after the
+    # agreement's start, so the owner's days for that parker are not lost.
     # Read with no such binding, ten days given for May's invoice were ten
     # more on every invoice after, and several decisions added up for ever.
     # A block or an unblock on an invoice is read whatever the invoice's paid
@@ -265,10 +268,12 @@ def _exceptions_for(
         LEFT JOIN invoices i ON i.id = e.invoice_id
         WHERE (a.external_id = %s
                AND (e.kind <> 'extend_grace'
-                    OR e.recorded_at >= (
-                        SELECT u.issued_at FROM invoices u
-                        WHERE u.payer_id = %s AND u.garage_id = %s AND u.paid_at IS NULL
-                        ORDER BY greatest(u.due_at, u.issued_at), u.id LIMIT 1)))
+                    OR e.recorded_at >= coalesce(
+                        (SELECT u.issued_at FROM invoices u
+                         WHERE u.payer_id = %s AND u.garage_id = %s AND u.paid_at IS NULL
+                         ORDER BY greatest(u.due_at, u.issued_at), u.id LIMIT 1),
+                        (SELECT min(s.start_day)::timestamptz FROM agreements s
+                         WHERE s.external_id = a.external_id AND s.tenant_id = a.tenant_id))))
            OR (i.payer_id = %s AND i.garage_id = %s
                AND (i.paid_at IS NULL OR e.kind IN ('block', 'unblock')))
         ORDER BY e.recorded_at

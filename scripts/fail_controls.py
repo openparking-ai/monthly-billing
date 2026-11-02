@@ -656,6 +656,14 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "OP-7-9 undone: a grace extension given on the agreement for one invoice "
         "extends every invoice after it, and several add up for ever",
     ),
+    "G18/grace-counts-while-first-charge-owed": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "entitlement_store.py",
+        "                        (SELECT min(s.start_day)::timestamptz FROM agreements s",
+        "                        (SELECT NULL::timestamptz FROM agreements s  -- PLANTED",
+        "an owner's grace extension for a new parker counts for nothing until the first "
+        "charge is issued, and the parker reads NOT COVERED inside the days given",
+    ),
     "G21/grace-from-the-issue": (
         "tests/test_g21_covered_from_the_store.py",
         "entitlement_store.py",
