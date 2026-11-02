@@ -77,9 +77,14 @@ from typing import Any
 from .agreement import Agreement, InvalidAgreement
 from .currency import UnpriceableCurrency
 from .cycle import BillingPeriod, next_period_after, period_containing
-from .findings import REFUSAL_FIRST_CHARGE_DAY_ISSUED, Refused
+from .findings import (
+    REFUSAL_FIRST_CHARGE_DAY_ISSUED,
+    REFUSAL_FIRST_CHARGE_PAST_ITS_PERIODS,
+    Refused,
+)
 from .garage import Garage
 from .invoice import Invoice, invoice_for_period
+from .localday import day_of, zone
 from .money import NotMinorUnits
 from .payments import rederive_paid_at
 from .sensitive import InstrumentLike
@@ -270,6 +275,21 @@ def _one_time_fees_due(
     return tuple(fee for fee in candidates if not already(fee))
 
 
+def _agreements_with_invoice_lines(
+    cursor: Any, agreement_ids: list[str], *, first_charge: bool
+) -> set[str]:
+    """The agreement ids, by identity across versions, that a line of a first-
+    charge invoice (``first_charge``) or of any other invoice names."""
+    cursor.execute(
+        "SELECT DISTINCT a.external_id FROM invoice_lines l "
+        "JOIN invoices i ON i.id = l.invoice_id "
+        "JOIN agreements a ON a.id = l.agreement_id "
+        "WHERE a.external_id = ANY(%s) AND i.first_charge = %s",
+        (agreement_ids, first_charge),
+    )
+    return {agreement for (agreement,) in cursor.fetchall()}
+
+
 def issue_first_charge(
     connection: Any,
     tenant_id: Any,
@@ -288,7 +308,11 @@ def issue_first_charge(
     spot signed up. So the invoice carries every agreement of this payer at
     this home that starts on the same day and has no first charge yet --
     ``first_charge``'s two lines for each, kept separate -- and one
-    ``first_charges`` row for each. The invoice is keyed on (payer, sign-up
+    ``first_charges`` row for each. Refused by name
+    (``REFUSAL_FIRST_CHARGE_PAST_ITS_PERIODS``) once ``now`` is on or after the
+    end of the second period or an invoice already bills the agreement; a
+    same-day spot an invoice already bills is never swept into the batch. The
+    invoice is keyed on (payer, sign-up
     day, first charge) -- its own key, so it never meets the payer's period
     invoice or a first charge of another day (migration 0010). Asked again for
     any of them it is ALREADY_ISSUED. A spot stored for the same payer and day AFTER that
@@ -307,6 +331,12 @@ def issue_first_charge(
         garage = stored.garage
         at_home = load_agreements_at_garage(cursor, home_uuid)
         already = stored_first_charges(cursor, home_uuid)
+        ids = [i.agreement.id for i in at_home]
+        billed = _agreements_with_invoice_lines(cursor, ids, first_charge=False)
+        # Read after ``already``: a same-day issue committed in between shows
+        # here, and its spots are already issued, not billed elsewhere.
+        already = {**already, **dict.fromkeys(
+            _agreements_with_invoice_lines(cursor, ids, first_charge=True), ())}
     connection.rollback()
     asked = [item for item in at_home if item.agreement.id == agreement_id]
     if not asked:
@@ -317,18 +347,32 @@ def issue_first_charge(
         return RunLine(payer_id, RunOutcome.ALREADY_ISSUED,
                        "the first charge of this agreement was already issued")
     start_day = item.agreement.start_day
-    # Every spot of this payer signed up on this day, not yet first-charged.
+    partial = period_containing(garage, start_day)
+    following = next_period_after(garage, partial)
+    # NEVER FOR PERIODS ALREADY OVER (the independent review): a first charge
+    # pays its two periods in advance. Issued on or after the second one ends,
+    # or for an agreement an invoice already bills, it would bill periods this
+    # store never billed and that were settled outside it.
+    if day_of(now, zone(garage.timezone)) >= following.end_day or agreement_id in billed:
+        refusal = Refused(
+            REFUSAL_FIRST_CHARGE_PAST_ITS_PERIODS,
+            f"agreement {agreement_id!r} starts {start_day}; its second period ended "
+            f"{following.end_day}"
+            + ("; an invoice already bills it." if agreement_id in billed else "."),
+        )
+        return RunLine(payer_id, RunOutcome.REFUSED, str(refusal))
+    # Every spot of this payer signed up on this day, not yet first-charged and
+    # billed by nothing.
     batch = sorted(
         (
             other for other in at_home
             if other.payer_uuid == item.payer_uuid
             and other.agreement.start_day == start_day
             and other.agreement.id not in already
+            and other.agreement.id not in billed
         ),
         key=lambda other: other.agreement.id,
     )
-    partial = period_containing(garage, start_day)
-    following = next_period_after(garage, partial)
     day = start_day  # the first charge's own key: (payer, sign-up day, first_charge)
     invoice = replace(
         first_charge(garage, item.agreement),
@@ -373,7 +417,12 @@ def issue_first_charge(
     except psycopg.errors.UniqueViolation as violation:
         connection.rollback()
         name = violation.diag.constraint_name
-        if name == "first_charges_one_per_agreement":
+        with tenant(connection, tenant_id) as cursor:
+            # A same-day issue that ran at once with this one may already
+            # hold this spot: then the answer is that, not a refusal.
+            mine_now = agreement_id in stored_first_charges(cursor, home_uuid)
+        connection.rollback()
+        if name == "first_charges_one_per_agreement" or mine_now:
             return RunLine(payer_id, RunOutcome.ALREADY_ISSUED,
                            "the first charge of this agreement was already issued",
                            reference=reference)

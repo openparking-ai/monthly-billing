@@ -86,6 +86,7 @@ REFUSAL_REASK_KEY_EXPIRED = "REFUSAL_REASK_KEY_EXPIRED"
 REFUSAL_RESOLUTION_TOO_SOON = "REFUSAL_RESOLUTION_TOO_SOON"
 REFUSAL_START_DAY_MOVED = "REFUSAL_START_DAY_MOVED"
 REFUSAL_FIRST_CHARGE_DAY_ISSUED = "REFUSAL_FIRST_CHARGE_DAY_ISSUED"
+REFUSAL_FIRST_CHARGE_PAST_ITS_PERIODS = "REFUSAL_FIRST_CHARGE_PAST_ITS_PERIODS"
 REFUSAL_RESOLUTION_NEEDS_EVIDENCE = "REFUSAL_RESOLUTION_NEEDS_EVIDENCE"
 
 REFUSALS: dict[str, str] = {
@@ -233,6 +234,15 @@ REFUSALS: dict[str, str] = {
         "has no first-charge invoice yet -- each sign-up day is its own first "
         "charge -- and issue that, or the owner records an exception with an amount "
         "on the issued invoice."
+    ),
+    REFUSAL_FIRST_CHARGE_PAST_ITS_PERIODS: (
+        "This agreement is past its first charge: the day it was asked for is on or "
+        "after the end of its second period, or an invoice already bills it. A first "
+        "charge pays for the period containing the start day and the one after it, "
+        "in advance; issued now it would bill periods already over -- ones this "
+        "store never billed and that were settled outside it -- and leave the payer "
+        "owing them again. Nothing is written. If those periods are truly unpaid, "
+        "the owner records them as an exception with an amount."
     ),
     REFUSAL_ATTEMPT_ALREADY_RESOLVED: (
         "This attempt already has an outcome recorded. What the processor said is "

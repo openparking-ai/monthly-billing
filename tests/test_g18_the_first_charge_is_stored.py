@@ -385,3 +385,128 @@ def test_spots_signed_up_on_consecutive_days_the_second_a_billing_day_are_both_c
                        _at(date(2026, 7, 1)), recorded_by="operator")
     for car in ("CAR001", "CAR777"):
         assert covered_from_store(app, tenant_id, GARAGE.id, car, _at(date(2026, 7, 10))).covered
+
+
+@pytest.mark.guarantee("G18")
+@pytest.mark.parametrize("why", ["past its periods", "already billed"])
+def test_a_first_charge_is_refused_for_an_agreement_past_its_first_two_periods(
+    app, tenant_id, why
+):
+    """The independent review's required change. issue-first-charge had no
+    age limit: for an agreement that started 2025-01-05 it issued an invoice
+    for the December and January periods -- long past, never billed by this
+    store, settled outside it -- leaving the payer owing again, NOT COVERED
+    after grace, and chargeable. A first charge is refused by name, writing
+    nothing, once the day it is issued is on or after the end of the second
+    period, or once any invoice line already names the agreement."""
+    from monthly_billing.findings import REFUSAL_FIRST_CHARGE_PAST_ITS_PERIODS
+
+    if why == "past its periods":
+        seed(app, tenant_id, GARAGE, (simple_agreement(start_day=date(2025, 1, 5)),))
+        now = _at(date(2026, 6, 10))
+    else:
+        seed(app, tenant_id, GARAGE, (simple_agreement(start_day=START),))
+        # A run of a later period has already billed the agreement.
+        run_billing(app, tenant_id, GARAGE.id, date(2026, 8, 15), now=_at(date(2026, 7, 31)))
+        now = _at(date(2026, 6, 20))
+    before = query(app, tenant_id, "SELECT count(*) FROM invoices")
+    line = issue_first_charge(app, tenant_id, "ag-0001", now=now)
+    assert line.outcome is RunOutcome.REFUSED, line
+    assert REFUSAL_FIRST_CHARGE_PAST_ITS_PERIODS in line.detail
+    assert query(app, tenant_id, "SELECT count(*) FROM invoices") == before
+    assert query(app, tenant_id, "SELECT count(*) FROM first_charges") == [(0,)]
+
+
+@pytest.mark.guarantee("G18")
+def test_a_first_charge_issued_on_the_last_day_of_its_second_period_still_issues(
+    app, tenant_id
+):
+    """The control on the one above: inside the window, however late, it issues."""
+    seed(app, tenant_id, GARAGE, (simple_agreement(start_day=START),))
+    line = issue_first_charge(app, tenant_id, "ag-0001", now=_at(date(2026, 7, 30)))
+    assert line.outcome is RunOutcome.ISSUED, line
+
+
+@pytest.mark.guarantee("G18")
+def test_a_spot_already_billed_is_left_off_a_same_day_batch(app, tenant_id):
+    """A same-day spot that a run has already billed is never swept into the
+    batch with the one asked about: only the unbilled spot is charged."""
+    seed(app, tenant_id, GARAGE, (simple_agreement(start_day=START), _second_spot()))
+    with tenant(app, tenant_id) as cursor:
+        cursor.execute(
+            "INSERT INTO invoices (tenant_id, reference, payer_id, garage_id, currency, "
+            "period_start_day, due_at, issued_at) SELECT tenant_id, 'outside-ag-0002', payer_id, "
+            "garage_id, 'USD', '2026-09-30', now(), now() FROM agreements "
+            "WHERE external_id = 'ag-0002' RETURNING id",
+        )
+        (invoice_id,) = cursor.fetchone()
+        cursor.execute(
+            "INSERT INTO invoice_lines (tenant_id, invoice_id, kind, label, amount_minor, "
+            "agreement_id, agreement_version, period_start_day, period_end_day) "
+            "SELECT tenant_id, %s, 'full_period', 'x', 0, id, 1, '2026-09-30', '2026-10-31' "
+            "FROM agreements WHERE external_id = 'ag-0002'", (invoice_id,),
+        )
+    app.commit()
+    line = issue_first_charge(app, tenant_id, "ag-0001", now=_at(START, 8))
+    assert line.outcome is RunOutcome.ISSUED, line
+    assert query(app, tenant_id,
+                 "SELECT agreement_external_id FROM first_charges") == [("ag-0001",)]
+
+
+@pytest.mark.guarantee("G18")
+def test_two_spots_issued_at_once_both_answer_already_issued_not_refused(app, tenant_id):
+    """The review's race: two issue calls for two spots of one payer and day.
+    The slower one finds the day's invoice already holds its spot -- it was
+    batched -- and answers ALREADY_ISSUED, never the late-spot refusal that
+    would send the operator to move a start day."""
+    import monthly_billing.billing_run as br
+    from store_harness import DSN, app_connection
+
+    seed(app, tenant_id, GARAGE, (simple_agreement(start_day=START), _second_spot()))
+    real = br.tax_an_invoice
+    raced = {"done": False}
+    app_other = app_connection(DSN)
+
+    def the_faster_call_commits_first(*args, **kwargs):
+        # Both calls have read; the faster one issues and commits before the
+        # slower one writes -- the window a stale read leaves open.
+        if not raced["done"]:
+            raced["done"] = True
+            faster = issue_first_charge(app_other, tenant_id, "ag-0001", now=_at(START, 8))
+            assert faster.outcome is RunOutcome.ISSUED, faster
+        return real(*args, **kwargs)
+
+    br.tax_an_invoice = the_faster_call_commits_first
+    try:
+        slower = issue_first_charge(app, tenant_id, "ag-0002", now=_at(START, 8))
+    finally:
+        br.tax_an_invoice = real
+        app_other.close()
+    assert slower.outcome is RunOutcome.ALREADY_ISSUED, slower
+
+
+@pytest.mark.guarantee("G18")
+def test_a_first_charge_on_a_billing_day_never_reads_as_that_periods_invoice(app, tenant_id):
+    """The review's green plant: the run's read-back of "is this period
+    invoiced?" must look at PERIOD invoices only. A payer with a first charge
+    signed up on a billing day, whose period invoice is then stopped by another
+    constraint (a reference already taken), must be told CONSTRAINT_VIOLATED --
+    nothing issued -- never ALREADY_ISSUED because the first charge sits on
+    that day."""
+    seed(app, tenant_id, GARAGE, (
+        simple_agreement(start_day=date(2026, 1, 5)),
+        simple_agreement(id="ag-0002", start_day=date(2026, 6, 30), vehicles=("CAR777",)),
+    ))
+    first = issue_first_charge(app, tenant_id, "ag-0002", now=_at(date(2026, 6, 30), 1))
+    assert first.outcome is RunOutcome.ISSUED, first
+    with tenant(app, tenant_id) as cursor:
+        cursor.execute(
+            "INSERT INTO invoices (tenant_id, reference, payer_id, garage_id, currency, "
+            "period_start_day, due_at) SELECT tenant_id, %s, payer_id, garage_id, 'USD', "
+            "'2020-01-01', now() FROM agreements WHERE external_id = 'ag-0001'",
+            (f"{GARAGE.id}/2026-06-30/payer-acme",),
+        )
+    app.commit()
+    (line,) = run_billing(app, tenant_id, GARAGE.id, date(2026, 7, 15),
+                          now=_at(date(2026, 6, 30), 2)).lines
+    assert line.outcome is RunOutcome.CONSTRAINT_VIOLATED, line

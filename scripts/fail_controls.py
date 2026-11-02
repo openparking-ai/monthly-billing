@@ -536,6 +536,31 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "the day-before key returns: spots signed up on consecutive days, the second on a "
         "billing day, collide and the second paying customer is refused",
     ),
+    "G18/no-first-charge-for-past-periods": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        "    if day_of(now, zone(garage.timezone)) >= following.end_day or agreement_id in billed:",
+        "    if False:  # PLANTED: a first charge for periods long over is issued",
+        "the review's required change undone: issue-first-charge bills an old "
+        "agreement's first two periods, long settled outside the store, and the payer "
+        "owes them again",
+    ),
+    "G18/period-read-back-ignores-first-charges": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        '        "AND NOT first_charge",\n        (garage_uuid, payer_uuid, start_day),',
+        '        "",  # PLANTED\n        (garage_uuid, payer_uuid, start_day),',
+        "the run's read-back counts a first charge on a billing day as that period's "
+        "invoice, and a period invoice stopped by another constraint reads ALREADY_ISSUED",
+    ),
+    "G18/racing-spot-is-already-issued": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        '        if name == "first_charges_one_per_agreement" or mine_now:',
+        '        if name == "first_charges_one_per_agreement":  # PLANTED',
+        "two same-day spots issued at once: the slower is told to move its start day "
+        "though its spot is already on the issued invoice",
+    ),
     "G19/reopen": (
         "tests/test_g19_paid_is_derived.py",
         "payments.py",
