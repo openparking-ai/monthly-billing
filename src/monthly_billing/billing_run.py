@@ -69,7 +69,7 @@ it. Any other total is unpaid at issue and the derivation writes nothing.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from enum import Enum
 from typing import Any
@@ -77,9 +77,14 @@ from typing import Any
 from .agreement import Agreement, InvalidAgreement
 from .currency import UnpriceableCurrency
 from .cycle import BillingPeriod, next_period_after, period_containing
-from .findings import Refused
+from .findings import (
+    REFUSAL_FIRST_CHARGE_DAY_ISSUED,
+    REFUSAL_FIRST_CHARGE_PAST_ITS_PERIODS,
+    Refused,
+)
 from .garage import Garage
 from .invoice import Invoice, invoice_for_period
+from .localday import day_of, zone
 from .money import NotMinorUnits
 from .payments import rederive_paid_at
 from .sensitive import InstrumentLike
@@ -185,17 +190,273 @@ def invoice_reference(garage: Garage, period: BillingPeriod, payer_id: str) -> s
     return f"{garage.id}/{period.start_day.isoformat()}/{payer_id}"
 
 
-def owned_by_first_charge(garage: Garage, agreement: Agreement, period: BillingPeriod) -> bool:
+def owned_by_first_charge(
+    garage: Garage,
+    agreement: Agreement,
+    period: BillingPeriod,
+    stored: tuple[date, date] | None = None,
+) -> bool:
     """Whether ``period`` is one of the two the first charge already covered.
 
     The first charge takes the period containing the start day and the one after
     it. This compares PERIODS -- by their start day, which identifies a period at
     a garage -- and never counts lines, because a first charge with fees emits
     five lines and one without emits two, and both cover exactly two periods.
+
+    ``stored`` is the two period start days a STORED first charge owns
+    (``first_charges``, migration 0010). When given they decide, never the
+    latest version's start day: a version that moved the start day must not
+    move the periods a first charge was issued for (OP-7-3).
     """
+    if stored is not None:
+        return period.start_day in stored
     partial = period_containing(garage, agreement.start_day)
     following = next_period_after(garage, partial)
     return period.start_day in (partial.start_day, following.start_day)
+
+
+def stored_first_charges(cursor: Any, garage_uuid: Any) -> dict[str, tuple[date, date]]:
+    """The two owned period start days of every first charge stored at a home,
+    by agreement id."""
+    cursor.execute(
+        "SELECT agreement_external_id, first_period_start_day, second_period_start_day "
+        "FROM first_charges WHERE garage_id = %s",
+        (as_uuid(garage_uuid),),
+    )
+    return {agreement: (first, second) for agreement, first, second in cursor.fetchall()}
+
+
+def _one_time_fees_due(
+    cursor: Any,
+    garage: Garage,
+    agreement: Agreement,
+    period: BillingPeriod,
+    stored: tuple[date, date] | None,
+) -> tuple:
+    """THE ONE-TIME FEES THIS PERIOD'S INVOICE CARRIES (OP-7-11): every one
+    whose day is before the period ends and that no invoice line of the
+    agreement already bills -- so a fee added after its period was invoiced,
+    or in a period with no billable day, lands on the first invoice issued on
+    or after its day, once.
+
+    Billed means a ``one_time_fee`` line of the agreement's identity under the
+    fee's label and day (``one_time_fee_label``), or -- written before that
+    label existed -- under its bare label on a line whose period holds its day.
+    A fee whose day is inside the first charge's two periods is the first
+    charge's alone, stored there or not: the run never carries it."""
+    from .invoice import one_time_fee_label
+
+    first = (
+        period_containing(garage, stored[1])
+        if stored is not None
+        else next_period_after(garage, period_containing(garage, agreement.start_day))
+    )
+    candidates = [
+        fee for fee in agreement.one_time_fees()
+        if first.end_day <= fee.effective_from < period.end_day
+    ]
+    if not candidates:
+        return ()
+    cursor.execute(
+        "SELECT l.label, l.period_start_day, l.period_end_day FROM invoice_lines l "
+        "JOIN agreements a ON a.id = l.agreement_id "
+        "WHERE a.external_id = %s AND l.kind = 'one_time_fee'",
+        (agreement.id,),
+    )
+    billed = cursor.fetchall()
+
+    def already(fee) -> bool:
+        return any(
+            label == one_time_fee_label(fee)
+            or (label == f"{fee.label} (one-time)" and start <= fee.effective_from < end)
+            for label, start, end in billed
+        )
+
+    return tuple(fee for fee in candidates if not already(fee))
+
+
+def _agreements_with_invoice_lines(
+    cursor: Any, agreement_ids: list[str], *, first_charge: bool
+) -> set[str]:
+    """The agreement ids, by identity across versions, that a line of a first-
+    charge invoice (``first_charge``) or of any other invoice names."""
+    cursor.execute(
+        "SELECT DISTINCT a.external_id FROM invoice_lines l "
+        "JOIN invoices i ON i.id = l.invoice_id "
+        "JOIN agreements a ON a.id = l.agreement_id "
+        "WHERE a.external_id = ANY(%s) AND i.first_charge = %s",
+        (agreement_ids, first_charge),
+    )
+    return {agreement for (agreement,) in cursor.fetchall()}
+
+
+def issue_first_charge(
+    connection: Any,
+    tenant_id: Any,
+    agreement_id: str,
+    *,
+    now: datetime,
+) -> RunLine:
+    """THE FIRST CHARGE, STORED (OP-7-2): written as an invoice through the
+    run's own path -- taxed once at ``first_charge_due_at`` by the engine,
+    under the invoice's one-per-payer-per-day lock, ``paid_at`` derived -- and,
+    in the same transaction, one ``first_charges`` row per agreement on it,
+    naming the invoice and the two periods that agreement owns.
+
+    **ONE INVOICE PER PAYER AND SIGN-UP DAY, FOR EVERY SPOT.** The owner's
+    rule: the first charge is paid on the sign-up day and collects for every
+    spot signed up. So the invoice carries every agreement of this payer at
+    this home that starts on the same day and has no first charge yet --
+    ``first_charge``'s two lines for each, kept separate -- and one
+    ``first_charges`` row for each. Refused by name
+    (``REFUSAL_FIRST_CHARGE_PAST_ITS_PERIODS``) once ``now`` is on or after the
+    end of the second period or an invoice already bills the agreement; a
+    same-day spot an invoice already bills is never swept into the batch. The
+    invoice is keyed on (payer, sign-up
+    day, first charge) -- its own key, so it never meets the payer's period
+    invoice or a first charge of another day (migration 0010). Asked again for
+    any of them it is ALREADY_ISSUED. A spot stored for the same payer and day AFTER that
+    invoice was issued is refused by name (``REFUSAL_FIRST_CHARGE_DAY_ISSUED``),
+    writing nothing: an issued invoice is never added to.
+    """
+    import psycopg  # the store extra; the engine never imports this module
+
+    from .invoice import first_charge, first_charge_due_at
+    from .store.records import latest_version_home, load_garage_by_uuid
+
+    tenant_id = as_uuid(tenant_id)
+    with tenant(connection, tenant_id) as cursor:
+        home_uuid = latest_version_home(cursor, tenant_id, agreement_id)
+        stored = load_garage_by_uuid(cursor, home_uuid)
+        garage = stored.garage
+        at_home = load_agreements_at_garage(cursor, home_uuid)
+        already = stored_first_charges(cursor, home_uuid)
+        ids = [i.agreement.id for i in at_home]
+        billed = _agreements_with_invoice_lines(cursor, ids, first_charge=False)
+        # Read after ``already``: a same-day issue committed in between shows
+        # here, and its spots are already issued, not billed elsewhere.
+        already = {**already, **dict.fromkeys(
+            _agreements_with_invoice_lines(cursor, ids, first_charge=True), ())}
+    connection.rollback()
+    asked = [item for item in at_home if item.agreement.id == agreement_id]
+    if not asked:
+        raise GarageNotFound(f"agreement {agreement_id!r} is not billed at its home garage.")
+    (item,) = asked
+    payer_id = item.agreement.payer_id
+    if agreement_id in already:
+        return RunLine(payer_id, RunOutcome.ALREADY_ISSUED,
+                       "the first charge of this agreement was already issued")
+    start_day = item.agreement.start_day
+    partial = period_containing(garage, start_day)
+    following = next_period_after(garage, partial)
+    # NEVER FOR PERIODS ALREADY OVER (the independent review): a first charge
+    # pays its two periods in advance. Issued on or after the second one ends,
+    # or for an agreement an invoice already bills, it would bill periods this
+    # store never billed and that were settled outside it.
+    if day_of(now, zone(garage.timezone)) >= following.end_day or agreement_id in billed:
+        refusal = Refused(
+            REFUSAL_FIRST_CHARGE_PAST_ITS_PERIODS,
+            f"agreement {agreement_id!r} starts {start_day}; its second period ended "
+            f"{following.end_day}"
+            + ("; an invoice already bills it." if agreement_id in billed else "."),
+        )
+        return RunLine(payer_id, RunOutcome.REFUSED, str(refusal))
+    # Every spot of this payer signed up on this day, not yet first-charged and
+    # billed by nothing.
+    batch = sorted(
+        (
+            other for other in at_home
+            if other.payer_uuid == item.payer_uuid
+            and other.agreement.start_day == start_day
+            and other.agreement.id not in already
+            and other.agreement.id not in billed
+        ),
+        key=lambda other: other.agreement.id,
+    )
+    day = start_day  # the first charge's own key: (payer, sign-up day, first_charge)
+    invoice = replace(
+        first_charge(garage, item.agreement),
+        issued_for_period_start=day,
+        lines=tuple(
+            line for other in batch for line in first_charge(garage, other.agreement).lines
+        ),
+    )
+    reference = f"{garage.id}/first-charge/{payer_id}/{start_day.isoformat()}"
+    due_at = first_charge_due_at(garage, item.agreement)
+    try:
+        with tenant(connection, tenant_id) as cursor:
+            taxed = tax_an_invoice(
+                invoice, sets=load_tax_set_documents(cursor, home_uuid), at=due_at,
+            )
+            invoice_uuid = _persist(
+                cursor, tenant_id, taxed.invoice, position=taxed.position,
+                reference=reference, garage_uuid=home_uuid, payer_uuid=item.payer_uuid,
+                agreement_uuids={other.agreement.id: other.uuid for other in batch},
+                due_at=due_at, now=now, first_charge=True,
+            )
+            for other in batch:
+                guarded_insert(
+                    cursor,
+                    "first_charges",
+                    {
+                        "tenant_id": tenant_id,
+                        "garage_id": home_uuid,
+                        "agreement_external_id": other.agreement.id,
+                        "agreement_id": other.uuid,
+                        "invoice_id": invoice_uuid,
+                        "first_period_start_day": partial.start_day,
+                        "second_period_start_day": following.start_day,
+                        "second_period_end_day": following.end_day,
+                    },
+                )
+                cursor.fetchone()
+        connection.commit()
+    except (Refused, UnpriceableCurrency, InstrumentLike) as refusal:
+        connection.rollback()
+        return RunLine(payer_id, RunOutcome.REFUSED, str(refusal), reference=reference)
+    except psycopg.errors.UniqueViolation as violation:
+        connection.rollback()
+        name = violation.diag.constraint_name
+        with tenant(connection, tenant_id) as cursor:
+            # A same-day issue that ran at once with this one may already
+            # hold this spot: then the answer is that, not a refusal.
+            mine_now = agreement_id in stored_first_charges(cursor, home_uuid)
+        connection.rollback()
+        if name == "first_charges_one_per_agreement" or mine_now:
+            return RunLine(payer_id, RunOutcome.ALREADY_ISSUED,
+                           "the first charge of this agreement was already issued",
+                           reference=reference)
+        with tenant(connection, tenant_id) as cursor:
+            cursor.execute(
+                "SELECT 1 FROM invoices i "
+                "WHERE i.garage_id = %s AND i.payer_id = %s AND i.period_start_day = %s "
+                "AND i.first_charge",
+                (home_uuid, item.payer_uuid, day),
+            )
+            day_taken_by_a_first_charge = cursor.fetchone() is not None
+        connection.rollback()
+        if day_taken_by_a_first_charge:
+            refusal = Refused(
+                REFUSAL_FIRST_CHARGE_DAY_ISSUED,
+                f"agreement {agreement_id!r} starts {start_day}; payer {payer_id!r} already "
+                f"has its first-charge invoice keyed on {day}.",
+            )
+            return RunLine(payer_id, RunOutcome.REFUSED, str(refusal), reference=reference)
+        return RunLine(
+            payer_id, RunOutcome.CONSTRAINT_VIOLATED,
+            f"the database refused the first charge on {name!r}: the payer already has "
+            f"an invoice keyed on {day}; nothing issued",
+            reference=reference,
+        )
+    issued = taxed.invoice
+    return RunLine(
+        payer_id, RunOutcome.ISSUED,
+        f"first charge for {len(batch)} agreement(s) "
+        f"({', '.join(other.agreement.id for other in batch)}): {len(issued.lines)} line(s), "
+        f"subtotal {issued.subtotal_minor}, tax {issued.total_minor - issued.subtotal_minor}, "
+        f"total {issued.total_minor} {issued.currency} minor",
+        reference=reference, total_minor=issued.total_minor,
+    )
 
 
 def run_billing(
@@ -233,13 +494,22 @@ def run_billing(
         try:
             with tenant(connection, tenant_id) as cursor:
                 items = load_agreements_at_garage(cursor, stored.uuid, payer_uuid)
+                first_charges = stored_first_charges(cursor, stored.uuid)
+                priced = tuple(
+                    item.agreement
+                    for item in items
+                    if not owned_by_first_charge(
+                        garage, item.agreement, period, first_charges.get(item.agreement.id)
+                    )
+                )
+                due = {
+                    agreement.id: _one_time_fees_due(
+                        cursor, garage, agreement, period, first_charges.get(agreement.id)
+                    )
+                    for agreement in priced
+                }
             connection.rollback()
-            priced = tuple(
-                item.agreement
-                for item in items
-                if not owned_by_first_charge(garage, item.agreement, period)
-            )
-            invoice = invoice_for_period(garage, priced, period, payer_id)
+            invoice = invoice_for_period(garage, priced, period, payer_id, one_time_due=due)
         except (Refused, InvalidAgreement, NotMinorUnits, UnpriceableCurrency) as refusal:
             connection.rollback()
             lines.append(RunLine(payer_id, RunOutcome.REFUSED, str(refusal)))
@@ -365,9 +635,11 @@ def run_billing(
 
 
 def _period_is_issued(cursor: Any, garage_uuid: Any, payer_uuid: Any, start_day: date) -> bool:
-    """The fact the period lock guards, read directly."""
+    """The fact the period lock guards, read directly: a PERIOD invoice, never a
+    first charge, which has its own key (migration 0010)."""
     cursor.execute(
-        "SELECT 1 FROM invoices WHERE garage_id = %s AND payer_id = %s AND period_start_day = %s",
+        "SELECT 1 FROM invoices WHERE garage_id = %s AND payer_id = %s AND period_start_day = %s "
+        "AND NOT first_charge",
         (garage_uuid, payer_uuid, start_day),
     )
     return cursor.fetchone() is not None
@@ -385,6 +657,7 @@ def _persist(
     agreement_uuids: dict[str, Any],
     due_at: datetime,
     now: datetime,
+    first_charge: bool = False,
 ) -> Any:
     """The invoice row -- with the tax position that priced it -- and its lines,
     through the chokepoint, in the caller's transaction. A tax line names no
@@ -405,6 +678,7 @@ def _persist(
             "subtotal_minor": position.subtotal_minor,
             "tax_set_effective_from": position.tax_set_effective_from,
             "tax_sets_seen": position.tax_sets_seen,
+            "first_charge": first_charge,
         },
     )
     (invoice_uuid,) = cursor.fetchone()

@@ -51,6 +51,7 @@ from store_harness import (
     DSN,
     app_connection,
     apply_migration,
+    apply_migrations_after,
     as_blind_owner,
     cluster_lock,
     migrate,
@@ -374,7 +375,9 @@ def test_the_forward_repair_places_the_home_row_for_every_version_a_blind_0004_l
     )
     assert _owner_rows(owner, ROWS_OFF_THEIR_TENANT) == [(0,)], "each row under its own tenant"
     # The rows are the ones the module reads: the lane at ag-A's home is
-    # answered by ag-A version 2 through the store.
+    # answered by ag-A version 2 through the store -- today's module, so the
+    # migrations after 0005 are applied before it reads.
+    apply_migrations_after(owner, "0005")
     app = app_connection(DSN)
     try:
         answer = covered_from_store(

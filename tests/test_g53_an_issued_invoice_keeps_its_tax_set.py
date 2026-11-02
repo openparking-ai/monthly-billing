@@ -102,13 +102,20 @@ def test_an_adjustment_after_a_backdated_set_retaxes_at_the_recorded_set(app, te
         ("tax_sets_seen", "7"),
     ],
 )
-def test_the_tax_position_columns_refuse_an_update_by_name(app, tenant_id, column, value):
+def test_the_tax_position_columns_refuse_an_update_by_name(app, owner, tenant_id, column, value):
     (line,) = issue(app, tenant_id, sets=TAXED).lines
-    with tenant(app, tenant_id) as cursor, pytest.raises(psycopg.errors.CheckViolation) as bad:
+    # The application role cannot update the column at all (0008: UPDATE on
+    # paid_at alone). The trigger is the second lock, for a role that can try.
+    with tenant(app, tenant_id) as cursor, pytest.raises(psycopg.errors.InsufficientPrivilege):
         cursor.execute(
             f"UPDATE invoices SET {column} = {value} WHERE reference = %s", (line.reference,)
         )
     app.rollback()
+    with owner.cursor() as cursor, pytest.raises(psycopg.errors.CheckViolation) as bad:
+        cursor.execute(
+            f"UPDATE invoices SET {column} = {value} WHERE reference = %s AND tenant_id = %s",
+            (line.reference, tenant_id),
+        )
     assert bad.value.diag.constraint_name == "invoices_tax_position_is_immutable"
     assert column in str(bad.value)
     # The control: the derived column the grant exists for still writes.

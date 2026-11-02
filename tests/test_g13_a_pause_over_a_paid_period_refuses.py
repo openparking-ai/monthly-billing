@@ -172,18 +172,58 @@ def test_the_store_refuses_a_version_pausing_a_paid_month_and_writes_nothing(app
 
 @pytest.mark.guarantee("G13")
 @_store_backed
-def test_the_store_accepts_a_pause_after_the_paid_month_and_over_an_unpaid_one(app, tenant_id):
-    """The over-reach controls, must stay green: a pause that starts where the
-    paid month ends stores; so does one over a month that is issued and NOT
-    paid -- the guarantee is about paid periods, and nothing else changed."""
+def test_the_store_accepts_a_pause_after_the_issued_months(app, tenant_id):
+    """The over-reach control, must stay green: a pause that starts where the
+    last issued month ends stores, paid or not."""
     seeded = seed(app, tenant_id, STORE_GARAGE, (_version(1),))
     _issue(app, tenant_id, date(2026, 5, 1), paid=True)
     _store(app, tenant_id, seeded, _version(2, (date(2026, 5, 31), date(2026, 6, 10))))
     _issue(app, tenant_id, date(2026, 6, 1), paid=False)
-    _store(app, tenant_id, seeded, _version(3, (date(2026, 5, 31), date(2026, 6, 20))))
+    _store(app, tenant_id, seeded, _version(3, (date(2026, 6, 30), date(2026, 7, 20))))
     assert query(app, tenant_id, "SELECT version FROM agreements ORDER BY version") == [
         (1,), (2,), (3,)
     ]
+
+
+@pytest.mark.guarantee("G13")
+@_store_backed
+def test_the_store_refuses_a_pause_over_an_issued_unpaid_month(app, tenant_id):
+    """OP-7-6. A pause over a month that was ISSUED and not yet paid was
+    accepted -- the guarantee read paid periods only -- and nothing re-prices
+    an issued invoice, so the payer still owed the full month for days the
+    owner had paused. Any issued period is judged now: the owner records a
+    credit with an amount, or moves the pause."""
+    seeded = seed(app, tenant_id, STORE_GARAGE, (_version(1),))
+    _issue(app, tenant_id, date(2026, 6, 1), paid=False)
+    counts = _counts(app, tenant_id)
+    with pytest.raises(Refused) as refused:
+        _store(app, tenant_id, seeded, _version(2, (date(2026, 6, 10), date(2026, 6, 20))))
+    assert refused.value.code == REFUSAL_PAUSE_OVERLAPS_A_PAID_PERIOD
+    assert "2026-05-31..2026-06-30" in str(refused.value)
+    assert _counts(app, tenant_id) == counts
+
+
+@pytest.mark.guarantee("G13")
+@_store_backed
+@pytest.mark.parametrize("paid", [True, False], ids=["paid", "unpaid"])
+def test_the_store_refuses_a_cancellation_inside_an_issued_month(app, tenant_id, paid):
+    """OP-7-6. A cancellation is a pause with no end, and it was never judged
+    at all: a version cancelling from June 10 stored over June's issued
+    invoice, and June was still owed in full. Refused by name; a cancellation
+    from the day the issued months end stores."""
+    from monthly_billing.agreement import Status
+
+    seeded = seed(app, tenant_id, STORE_GARAGE, (_version(1),))
+    _issue(app, tenant_id, date(2026, 6, 1), paid=paid)
+    counts = _counts(app, tenant_id)
+    with pytest.raises(Refused) as refused:
+        _store(app, tenant_id, seeded, _version(
+            2, status=Status.CANCELLED, cancelled_effective_day=date(2026, 6, 10)))
+    assert refused.value.code == REFUSAL_PAUSE_OVERLAPS_A_PAID_PERIOD
+    assert "cancellation" in str(refused.value) and "2026-05-31..2026-06-30" in str(refused.value)
+    assert _counts(app, tenant_id) == counts
+    _store(app, tenant_id, seeded, _version(
+        2, status=Status.CANCELLED, cancelled_effective_day=date(2026, 6, 30)))
 
 
 @pytest.mark.guarantee("G13")

@@ -132,6 +132,9 @@ def covered_from_store(
         # cross-row database backstop, and the contract says so.
         home = _home_garage(cursor, stored, chosen.agreement.garage_id)
         unpaid_since = _earliest_unpaid_due_at(cursor, chosen.payer_uuid, home.uuid)
+        first_owed = first_charge_owed_from(cursor, home, chosen.agreement, at)
+        if first_owed is not None:
+            unpaid_since = first_owed if unpaid_since is None else min(unpaid_since, first_owed)
         exceptions = _exceptions_for(cursor, chosen.agreement.id, chosen.payer_uuid, home.uuid)
     connection.rollback()
 
@@ -149,6 +152,33 @@ def covered_from_store(
     )
 
 
+def first_charge_owed_from(
+    cursor: Any, home: StoredGarage, agreement: Any, at: datetime
+) -> datetime | None:
+    """THE FIRST CHARGE'S PERIODS ARE OWED UNTIL ONE IS STORED (OP-7-2).
+
+    The run never bills the two periods the first charge covers, so before
+    the first charge is issued (``issue-first-charge``) the store holds no
+    invoice for them and nothing would read unpaid: a parker who never paid
+    was covered for up to two months. For an agreement with no stored first
+    charge, a day inside those two periods is owed from the start of its start
+    day, in the home's calendar -- grace runs from there as for any invoice.
+    None when a first charge is stored (its invoice is read like any other) or
+    the day is outside the two periods."""
+    from .billing_run import stored_first_charges
+    from .cycle import next_period_after, period_containing
+    from .localday import day_of, day_start, zone
+
+    if agreement.id in stored_first_charges(cursor, home.uuid):
+        return None
+    tz = zone(home.garage.timezone)
+    partial = period_containing(home.garage, agreement.start_day)
+    following = next_period_after(home.garage, partial)
+    if agreement.start_day <= day_of(at, tz) < following.end_day:
+        return day_start(agreement.start_day, tz)
+    return None
+
+
 def _home_garage(cursor: Any, asking: StoredGarage, home_id: str) -> StoredGarage:
     """The garage that bills the chosen agreement -- the asking garage itself
     when the agreement is homed here, which is every single-garage agreement."""
@@ -163,9 +193,14 @@ def _home_garage(cursor: Any, asking: StoredGarage, home_id: str) -> StoredGarag
 
 
 def _earliest_unpaid_due_at(cursor: Any, payer_uuid: Any, garage_uuid: Any) -> datetime | None:
-    """``garage_uuid`` is the agreement's HOME -- see the module docstring."""
+    """``garage_uuid`` is the agreement's HOME -- see the module docstring.
+
+    Grace runs from the LATER of ``due_at`` and ``issued_at`` (OP-7-10): an
+    invoice the run issued after its period began cannot have been owed for
+    longer than it has existed, and counting from the period's start put a
+    late-issued invoice past grace the moment it was written."""
     cursor.execute(
-        "SELECT min(due_at) FROM invoices "
+        "SELECT min(greatest(due_at, issued_at)) FROM invoices "
         "WHERE payer_id = %s AND garage_id = %s AND paid_at IS NULL",
         (payer_uuid, garage_uuid),
     )
@@ -211,6 +246,14 @@ def _exceptions_for(
     require red.
     """
     tenant_id = None if tenant_id is None else as_uuid(tenant_id)
+    # A grace extension on the AGREEMENT is bound to the invoice the owner was
+    # looking at (OP-7-9): it counts only when the earliest unpaid invoice --
+    # the one grace is judged on -- was already issued when it was recorded.
+    # With no unpaid invoice -- a new parker whose first charge is still owed
+    # and not yet issued -- it counts when recorded on or after the
+    # agreement's start, so the owner's days for that parker are not lost.
+    # Read with no such binding, ten days given for May's invoice were ten
+    # more on every invoice after, and several decisions added up for ever.
     # A block or an unblock on an invoice is read whatever the invoice's paid
     # state: a block the owner recorded is lifted by an unblock the owner
     # records, never by a cheque. A grace extension on an invoice is read only
@@ -223,12 +266,22 @@ def _exceptions_for(
               WHERE %s::uuid IS NULL OR tenant_id = %s) e
         LEFT JOIN agreements a ON a.id = e.agreement_id AND a.tenant_id = e.tenant_id
         LEFT JOIN invoices i ON i.id = e.invoice_id
-        WHERE a.external_id = %s
+        WHERE (a.external_id = %s
+               AND (e.kind <> 'extend_grace'
+                    OR e.recorded_at >= coalesce(
+                        (SELECT u.issued_at FROM invoices u
+                         WHERE u.payer_id = %s AND u.garage_id = %s AND u.paid_at IS NULL
+                         ORDER BY greatest(u.due_at, u.issued_at), u.id LIMIT 1),
+                        (SELECT min(s.start_day)::timestamptz FROM agreements s
+                         WHERE s.external_id = a.external_id AND s.tenant_id = a.tenant_id))))
            OR (i.payer_id = %s AND i.garage_id = %s
                AND (i.paid_at IS NULL OR e.kind IN ('block', 'unblock')))
         ORDER BY e.recorded_at
         """,
-        (tenant_id, tenant_id, agreement_external_id, payer_uuid, garage_uuid),
+        (
+            tenant_id, tenant_id, agreement_external_id, payer_uuid, garage_uuid,
+            payer_uuid, garage_uuid,
+        ),
     )
     out = []
     for row in cursor.fetchall():

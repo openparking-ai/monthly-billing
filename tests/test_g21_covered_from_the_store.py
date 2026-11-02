@@ -204,3 +204,59 @@ def test_the_command_line_asks_the_store_and_exits_by_the_answer(app, tenant_id,
     assert main(["covered-in-store", *store, "--garage", "no-such-garage", "--vehicle", "CAR001",
                  "--at", _at(date(2026, 5, 7)).isoformat()]) == 2
     assert "NOT FOUND" in capsys.readouterr().err
+
+
+@pytest.mark.guarantee("G21")
+def test_grace_runs_from_the_issue_when_the_invoice_was_issued_late(app, tenant_id):
+    """OP-7-10. Grace was counted from the period's start (``due_at``) even
+    when the run issued the invoice later -- an invoice issued ten days late
+    on a five-day grace was past grace the moment it existed, and the car was
+    NOT COVERED before the payer had been asked for anything. Grace now runs
+    from the later of ``due_at`` and ``issued_at``, in the home's calendar,
+    in the coverage call and in the garage register alike."""
+    from monthly_billing.store.postgres import tenant
+    from monthly_billing.store.records import show_garage_register
+
+    seed(app, tenant_id, GARAGE, (simple_agreement(start_day=date(2026, 1, 5)),))
+    late = datetime(2026, 5, 10, 8, 0, tzinfo=TZ)  # the period began April 30
+    (line,) = run_billing(app, tenant_id, GARAGE.id, date(2026, 5, 1), now=late).lines
+    assert line.reference
+    for day, covered in ((date(2026, 5, 12), True), (date(2026, 5, 15), True),
+                         (date(2026, 5, 16), False)):
+        answer = covered_from_store(app, tenant_id, GARAGE.id, "CAR001", _at(day))
+        assert answer.covered is covered, (day, answer.reason)
+    with tenant(app, tenant_id) as cursor:
+        register = show_garage_register(cursor, tenant_id, GARAGE.id).as_document()
+    app.rollback()
+    (entry,) = register["agreements"]
+    assert entry["not_covered_from"] == "2026-05-16"
+
+
+@pytest.mark.guarantee("G21")
+def test_an_agreement_level_grace_extension_is_bound_to_the_invoice_it_was_given_for(
+    app, tenant_id
+):
+    """OP-7-9. A grace extension recorded on the AGREEMENT applied to every
+    unpaid invoice for ever after: ten days given for May's invoice were still
+    ten extra days on June's, and a few such decisions added up to a parker
+    who never lapsed. It now counts only toward an unpaid invoice that was
+    already issued when the owner recorded it -- the one the owner was looking
+    at. May keeps its ten days; June gets the garage's own grace."""
+    seeded, may = _issued_unpaid(app, tenant_id)
+    (agreement_uuid,) = seeded.agreement_uuids.values()
+    record_agreement_exception(app, tenant_id, agreement_uuid, OwnerException(
+        id="ext-may", agreement_id="ag-0001", invoice_reference=None,
+        kind=ExceptionKind.EXTEND_GRACE, recorded_by="owner",
+        recorded_at=_at(date(2026, 5, 3)), extra_grace_days=10,
+    ))
+    assert covered_from_store(app, tenant_id, GARAGE.id, "CAR001", _at(date(2026, 5, 12))).covered
+    assert not covered_from_store(
+        app, tenant_id, GARAGE.id, "CAR001", _at(date(2026, 5, 16))).covered
+    record_payment(app, tenant_id, may, PaymentMethod.CHEQUE, 12000, _at(date(2026, 5, 14)),
+                   recorded_by="op")
+    june_issue = datetime(2026, 5, 31, 0, 30, tzinfo=TZ)
+    (june,) = run_billing(app, tenant_id, GARAGE.id, date(2026, 6, 1), now=june_issue).lines
+    assert june.reference
+    assert covered_from_store(app, tenant_id, GARAGE.id, "CAR001", _at(date(2026, 6, 5))).covered
+    answer = covered_from_store(app, tenant_id, GARAGE.id, "CAR001", _at(date(2026, 6, 6)))
+    assert not answer.covered, "May's extension was still extending June"

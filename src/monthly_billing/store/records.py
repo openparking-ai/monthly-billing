@@ -113,6 +113,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from ..agreement import (
     AccessHours,
@@ -129,11 +130,13 @@ from ..findings import (
     REFUSAL_AGREEMENT_HOME_MOVED,
     REFUSAL_GARAGE_MISMATCH,
     REFUSAL_GARAGE_NOT_COVERED,
+    REFUSAL_PAUSE_OVERLAPS_A_PAID_PERIOD,
     REFUSAL_PAYER_CHANGED,
     REFUSAL_REGISTRAR_CHANGED,
     REFUSAL_REGISTRAR_IS_OUTSIDE,
     REFUSAL_REGISTRAR_IS_THIS_MODULE,
     REFUSAL_RELEASE_AMBIGUOUS_ACROSS_GARAGES,
+    REFUSAL_START_DAY_MOVED,
     REFUSAL_VEHICLE_ALREADY_REGISTERED,
     REFUSAL_VEHICLE_NOT_REGISTERED,
     REFUSAL_VERSION_NOT_NEWER,
@@ -334,6 +337,11 @@ def store_agreement(
                 "name another payer. The payer never changes; a different payer is a "
                 "different agreement.",
             )
+        # THE START DAY NEVER MOVES ONCE ANYTHING IS BILLED (OP-7-3): the first
+        # charge's two periods were decided by the start day it was issued
+        # under, and the run leaves exactly those to it -- moved, a period
+        # already paid falls to the run and is billed again.
+        _refuse_a_moved_start_day_once_billed(cursor, agreement, newest.uuid)
         # A PAUSE OVER A PAID PERIOD IS REFUSED BY NAME (G13), before any write:
         # only the days this version newly pauses -- a pause the newest version
         # already held was there when those periods were priced.
@@ -464,10 +472,11 @@ def _refuse_new_pause_days_over_paid_periods(
     cursor: Any, home: Garage, agreement: Agreement, newest_uuid: UUID
 ) -> None:
     """THE STORE'S HALF OF G13: refuse, by name and before any write, a version
-    that newly pauses a day inside a period already paid.
+    that newly pauses -- or newly cancels -- a day inside a period already
+    ISSUED, paid or not (OP-7-6).
 
-    The paid periods are the periods of this agreement's invoice lines -- by
-    its IDENTITY, across every version -- whose invoice is paid. "Newly" is
+    The issued periods are the periods of this agreement's invoice lines -- by
+    its IDENTITY, across every version. "Newly" is
     measured against the newest stored version's pauses: a pause that was
     already there when a period was priced took its days out of that price, so
     storing a later version that keeps it (a price change, a car added) is not
@@ -479,13 +488,27 @@ def _refuse_new_pause_days_over_paid_periods(
     newly: list[tuple[date, date]] = []
     for pause in agreement.pauses:
         newly.extend(_days_not_in(pause, earlier))
-    if not newly:
+    # A CANCELLATION IS A PAUSE WITH NO END, and was never judged (OP-7-6):
+    # the days it newly takes away run from its day to the day the newest
+    # stored version already stopped on, or for ever.
+    cursor.execute("SELECT cancelled_effective_day FROM agreements WHERE id = %s", (newest_uuid,))
+    (stored_cancel,) = cursor.fetchone()
+    new_cancel = agreement.cancelled_effective_day
+    cancelled = (
+        (new_cancel, stored_cancel or date.max)
+        if new_cancel is not None and (stored_cancel is None or new_cancel < stored_cancel)
+        else None
+    )
+    if not newly and cancelled is None:
         return
+    # EVERY ISSUED PERIOD, paid or not (OP-7-6): nothing re-prices an issued
+    # invoice, so a pause or cancellation over an unpaid one left the payer
+    # owing the full period for days the owner took away.
     cursor.execute(
         "SELECT DISTINCT l.period_start_day, l.period_end_day FROM invoice_lines l "
         "JOIN invoices i ON i.id = l.invoice_id "
         "JOIN agreements a ON a.id = l.agreement_id "
-        "WHERE a.external_id = %s AND i.paid_at IS NOT NULL",
+        "WHERE a.external_id = %s AND l.kind <> 'tax'",
         (agreement.id,),
     )
     tz = zone(home.timezone)
@@ -498,6 +521,36 @@ def _refuse_new_pause_days_over_paid_periods(
     )
     for from_day, until_day in newly:
         refuse_pause_over_a_paid_period(agreement, from_day, until_day, paid)
+    if cancelled is not None:
+        for period in paid:
+            if cancelled[0] < period.end_day and cancelled[1] > period.start_day:
+                raise Refused(
+                    REFUSAL_PAUSE_OVERLAPS_A_PAID_PERIOD,
+                    f"the cancellation from {cancelled[0]} on agreement {agreement.id!r} "
+                    f"reaches into the issued period {period.start_day}..{period.end_day}.",
+                )
+
+
+def _refuse_a_moved_start_day_once_billed(
+    cursor: Any, agreement: Agreement, newest_uuid: UUID
+) -> None:
+    cursor.execute("SELECT start_day FROM agreements WHERE id = %s", (newest_uuid,))
+    (stored_start,) = cursor.fetchone()
+    if stored_start == agreement.start_day:
+        return
+    cursor.execute(
+        "SELECT EXISTS (SELECT 1 FROM first_charges WHERE agreement_external_id = %s) "
+        "OR EXISTS (SELECT 1 FROM invoice_lines l JOIN agreements a ON a.id = l.agreement_id "
+        "           WHERE a.external_id = %s)",
+        (agreement.id, agreement.id),
+    )
+    (billed,) = cursor.fetchone()
+    if billed:
+        raise Refused(
+            REFUSAL_START_DAY_MOVED,
+            f"agreement {agreement.id!r} version {agreement.version} starts "
+            f"{agreement.start_day}; the versions already billed start {stored_start}.",
+        )
 
 
 def _days_not_in(pause: Pause, earlier: tuple[Pause, ...]) -> list[tuple[date, date]]:
@@ -1277,9 +1330,26 @@ class RegisteredAgreement:
       nothing is unpaid. The payment state is the store's as of NOW, as it is
       for ``covered-in-store``.
 
-    Dates and a flag: no amount, no invoice, no payer, no grace figure.
+    * ``access_hours`` -- ``agreements.access_entry_from`` and
+      ``access_exit_by``, the garage-local times a stay must enter after and
+      leave by (``OUTSIDE_ACCESS_HOURS``), or None when the agreement has none.
+    * ``lane_must_ask`` -- true whenever ``access_hours`` is set (OP-7-1). The
+      days above cannot decide an hour-limited stay: it depends on when THIS
+      stay entered and leaves, which the register cannot know. Such an
+      agreement is never covered by the register alone; the lane asks
+      ``covered-in-store`` with the stay's entry instant.
+    * ``first_charge_owed`` -- while the agreement has no STORED first charge
+      (``first_charges``, migration 0010), the half-open days
+      [start day + grace + 1, end of the second period) on which it is not
+      covered: the run never bills those two periods, so nothing else in the
+      store says they are owed (OP-7-2). None once a first charge is stored --
+      its invoice is read like any other, through ``not_covered_from`` -- or
+      when the home garage cannot be read.
+
+    Dates, times and flags: no amount, no invoice, no payer, no grace figure.
     Additive -- a reader that does not know these fields reads the first five
-    as before."""
+    as before, and a reader that does not know ``lane_must_ask`` must not be
+    used for an agreement with hours."""
 
     agreement: str
     version: int
@@ -1290,6 +1360,9 @@ class RegisteredAgreement:
     pauses: tuple[tuple[date, date], ...]
     blocked: bool
     not_covered_from: date | None
+    access_hours: tuple[time, time] | None = None
+    lane_must_ask: bool = False
+    first_charge_owed: tuple[date, date] | None = None
 
 
 @dataclass(frozen=True)
@@ -1312,7 +1385,7 @@ class GarageRegister:
     and the agreement ids the rows name that the tenant holds no version of.
     Five keys, and the field set is derived from this class, so a sixth is
     seen the day it exists. NOTHING ELSE TRAVELS -- not the price, the payer,
-    the spots, the fees, the mandate, the access hours, an invoice or an
+    the spots, the fees, the mandate, an invoice or an
     amount, the home garage, the covered set, the version's own vehicle list
     or a registration's instant. A reader at a garage needs to know which cars
     an agreement holds HERE and on which days the agreement stands, not where
@@ -1381,6 +1454,23 @@ class GarageRegister:
                         None
                         if each.not_covered_from is None
                         else each.not_covered_from.isoformat()
+                    ),
+                    "access_hours": (
+                        None
+                        if each.access_hours is None
+                        else {
+                            "entry_from": each.access_hours[0].strftime("%H:%M"),
+                            "exit_by": each.access_hours[1].strftime("%H:%M"),
+                        }
+                    ),
+                    "lane_must_ask": each.lane_must_ask,
+                    "first_charge_owed": (
+                        None
+                        if each.first_charge_owed is None
+                        else {
+                            "not_covered_from": each.first_charge_owed[0].isoformat(),
+                            "until_day": each.first_charge_owed[1].isoformat(),
+                        }
                     ),
                 }
                 for each in self.agreements
@@ -1478,9 +1568,9 @@ def _coverage_days(
     the money state at its HOME as ``entitlement_store.covered_from_store``
     reads it -- the same exceptions read, the same "earliest unpaid" rule and
     the same grace arithmetic -- turned into a day. Builds no ``Agreement`` and
-    no ``Garage``, and needs no zone: an invoice is due at the start instant of
-    its period, so the home-calendar day it falls due on IS its stored
-    ``period_start_day``.
+    no ``Garage``; the home's zone is read to turn the instant grace runs from
+    -- the later of the invoice's ``due_at`` and ``issued_at`` -- into a day of
+    the home's calendar.
 
     ``is_covered`` answers UNPAID_PAST_GRACE once more than ``grace`` home
     days have passed since that day, so the first such day is
@@ -1491,10 +1581,15 @@ def _coverage_days(
     from ..exceptions_by_owner import applied_grace_days, is_blocked
 
     cursor.execute(
-        "SELECT start_day, payer_id FROM agreements WHERE tenant_id = %s AND id = %s",
+        "SELECT start_day, payer_id, access_entry_from, access_exit_by FROM agreements "
+        "WHERE tenant_id = %s AND id = %s",
         (tenant_id, latest.uuid),
     )
-    start_day, payer_uuid = cursor.fetchone()
+    start_day, payer_uuid, entry_from, exit_by = cursor.fetchone()
+    access_hours = (
+        None if entry_from is None or exit_by is None
+        else (_as_time(entry_from), _as_time(exit_by))
+    )
     cursor.execute(
         "SELECT from_day, until_day FROM agreement_pauses "
         "WHERE tenant_id = %s AND agreement_id = %s",
@@ -1507,27 +1602,66 @@ def _coverage_days(
     exceptions = _exceptions_for(
         cursor, agreement_id, payer_uuid, latest.home_uuid, tenant_id=tenant_id
     )
+    # The later of due_at and issued_at, as covered-in-store reads it
+    # (OP-7-10): a late-issued invoice's grace runs from its issue. Turned
+    # into a day of the HOME's calendar, the clock grace is judged on.
     cursor.execute(
-        "SELECT min(period_start_day) FROM invoices "
+        "SELECT min(greatest(due_at, issued_at)) FROM invoices "
         "WHERE tenant_id = %s AND payer_id = %s AND garage_id = %s AND paid_at IS NULL",
         (tenant_id, payer_uuid, latest.home_uuid),
     )
-    (due_day,) = cursor.fetchone()
+    (owed_since,) = cursor.fetchone()
     not_covered_from = None
-    if due_day is not None:
+    if owed_since is not None:
         cursor.execute(
-            "SELECT payment_grace_days FROM garages WHERE tenant_id = %s AND id = %s",
+            "SELECT payment_grace_days, timezone FROM garages WHERE tenant_id = %s AND id = %s",
             (tenant_id, latest.home_uuid),
         )
-        (base_grace,) = cursor.fetchone()
+        base_grace, home_zone = cursor.fetchone()
         grace = applied_grace_days(base_grace, exceptions)
+        due_day = owed_since.astimezone(ZoneInfo(home_zone)).date()
         not_covered_from = due_day + timedelta(days=grace + 1)
     return {
         "start_day": start_day,
         "pauses": pauses,
         "blocked": is_blocked(exceptions),
         "not_covered_from": not_covered_from,
+        "access_hours": access_hours,
+        # An hour-limited stay is decided by its own entry and exit, never by
+        # the days: the register does not cover it, the lane asks (OP-7-1).
+        "lane_must_ask": access_hours is not None,
+        "first_charge_owed": _first_charge_owed_days(
+            cursor, latest, agreement_id, start_day, exceptions
+        ),
     }
+
+
+def _first_charge_owed_days(
+    cursor: Any, latest: _LatestVersion, agreement_id: str, start_day: date,
+    exceptions: tuple,
+) -> tuple[date, date] | None:
+    """The register's half of OP-7-2: the days an agreement with no stored
+    first charge is not covered, as ``covered-in-store`` decides them
+    (``entitlement_store.first_charge_owed_from``) -- owed from its start day,
+    grace and the owner's extensions counted, until its second period ends."""
+    from ..billing_run import stored_first_charges
+    from ..cycle import next_period_after, period_containing
+    from ..exceptions_by_owner import applied_grace_days
+
+    if agreement_id in stored_first_charges(cursor, latest.home_uuid):
+        return None
+    cursor.execute("SELECT external_id FROM garages WHERE id = %s", (latest.home_uuid,))
+    (home_id,) = cursor.fetchone()
+    try:
+        home = load_garage(cursor, home_id)
+    except Exception:  # noqa: BLE001 -- the read validates nothing it does not return
+        return None
+    if home is None:
+        return None
+    following = next_period_after(home.garage, period_containing(home.garage, start_day))
+    grace = applied_grace_days(home.garage.payment_grace_days, exceptions)
+    first = start_day + timedelta(days=grace + 1)
+    return (first, following.end_day) if first < following.end_day else None
 
 
 # ---------------------------------------------------------------------------
@@ -1570,6 +1704,22 @@ def load_garage(cursor: Any, external_id: str) -> StoredGarage | None:
             identity_rule=IdentityRule(rule),
         ),
     )
+
+
+def load_garage_by_uuid(cursor: Any, garage_uuid: Any) -> StoredGarage:
+    """A garage the store holds, by its uuid."""
+    cursor.execute("SELECT external_id FROM garages WHERE id = %s", (as_uuid(garage_uuid),))
+    row = cursor.fetchone()
+    stored = None if row is None else load_garage(cursor, row[0])
+    if stored is None:
+        raise GarageNotFound(f"no garage {garage_uuid} in the store.")
+    return stored
+
+
+def latest_version_home(cursor: Any, tenant_id: Any, agreement_id: str) -> UUID:
+    """The home garage's uuid of an agreement's latest version; NOT FOUND
+    when the tenant holds no version of it."""
+    return _latest_version_of(cursor, as_uuid(tenant_id), agreement_id).home_uuid
 
 
 def load_payers_at_garage(cursor: Any, garage_uuid: Any) -> tuple[tuple[UUID, str], ...]:

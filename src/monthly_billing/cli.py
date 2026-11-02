@@ -28,9 +28,13 @@ Against the store (the `store` extra, `MONTHLY_BILLING_DSN`, `--tenant`):
         --reversed-at 2026-05-12T10:00:00-06:00 --recorded-by operator
     monthly-billing covered-in-store --tenant T --garage G --vehicle ABC123 \\
         --at 2026-05-07T09:00:00-06:00
+    monthly-billing issue-first-charge --tenant T --agreement AG [--now ISO]
     monthly-billing pending-attempts --tenant T --invoice REF
     monthly-billing resolve-attempt --tenant T --attempt ID --outcome success \\
-        --at 2026-05-07T09:05:00-06:00 --recorded-by operator [--reference AUTH]
+        --at 2026-05-07T09:05:00-06:00 --recorded-by operator --reference AUTH
+    monthly-billing resolve-attempt --tenant T --attempt ID --outcome decline \
+        --at 2026-05-07T09:05:00-06:00 --recorded-by operator \
+        --no-charge-confirmed-by "processor dashboard, key searched"
     monthly-billing register-vehicle --tenant T --agreement AG --vehicle ABC123 \\
         [--at 2026-05-07T09:00:00-06:00]
     monthly-billing release-vehicle --tenant T --agreement AG --vehicle ABC123 [--garage G]
@@ -207,12 +211,23 @@ def _check_agreement(args: argparse.Namespace) -> int:
 
 
 def _connection(args: argparse.Namespace):
-    from .store.postgres import connect
+    from .store.postgres import assert_role_cannot_bypass_rls, connect
 
     dsn = args.dsn or os.environ.get("MONTHLY_BILLING_DSN")
     if not dsn:
         raise SystemExit("a store command needs --dsn or MONTHLY_BILLING_DSN.")
     connection = connect(dsn)
+    # Tenant isolation is the row policy, and a superuser or a BYPASSRLS role
+    # is never stopped by one: under the owner's DSN every command here reads
+    # and writes across every tenant. Refused before anything runs (OP-7-13).
+    try:
+        assert_role_cannot_bypass_rls(connection)
+    except AssertionError as refusal:
+        connection.close()
+        raise SystemExit(
+            f"REFUSED — the store commands do not run as this role: {refusal}"
+        ) from None
+    connection.rollback()  # the check's read; nothing of a command's runs in it
     connection.autocommit = False
     return connection
 
@@ -244,6 +259,22 @@ def _run(args: argparse.Namespace) -> int:
     # answer and exits zero; the operator can run it twice without a shell
     # script deciding that was an error.
     return 1 if report.refused else 0
+
+
+def _issue_first_charge(args: argparse.Namespace) -> int:
+    from .billing_run import FAILED_OUTCOMES, issue_first_charge
+
+    line = issue_first_charge(
+        _connection(args),
+        args.tenant,
+        args.agreement,
+        now=datetime.fromisoformat(args.now) if args.now else datetime.now().astimezone(),
+    )
+    print(f"First charge of agreement {args.agreement}")
+    print(f"  {line.payer_id}: {line.outcome.value.upper()} — {line.detail}")
+    if line.reference:
+        print(f"  invoice {line.reference}")
+    return 1 if line.outcome in FAILED_OUTCOMES else 0
 
 
 def _record_payment(args: argparse.Namespace) -> int:
@@ -322,17 +353,32 @@ def _resolve_attempt(args: argparse.Namespace) -> int:
     from .charging import resolve_attempt
     from .payment import ChargeResult, Outcome
 
+    detail = args.detail or f"recorded by {args.recorded_by}"
+    lookup = None
+    if args.no_charge_confirmed_by and args.no_charge_confirmed_by.strip():
+        # The command line has no processor adapter of its own: the operator
+        # looked the attempt's key up at the processor and found no charge,
+        # and says where -- that sentence is the evidence, and it is stored
+        # on the outcome row beside who recorded it (OP-7-8).
+        detail = f"{detail} (no charge under this key, per {args.no_charge_confirmed_by})"
+
+        class _OperatorLookedItUp:
+            def charged(self, idempotency_key):
+                return False
+
+        lookup = _OperatorLookedItUp()
     outcome = resolve_attempt(
         _connection(args),
         args.tenant,
         args.attempt,
         ChargeResult(
             outcome=Outcome(args.outcome),
-            detail=args.detail or f"recorded by {args.recorded_by}",
+            detail=detail,
             reference=args.reference,
         ),
         recorded_by=args.recorded_by,
         now=datetime.fromisoformat(args.at),
+        lookup=lookup,
     )
     print(f"attempt {args.attempt} resolved: {outcome.result.outcome.value}")
     if outcome.paid is not None:
@@ -354,6 +400,10 @@ def _pending_attempts(args: argparse.Namespace) -> int:
             f"  attempt {p.attempt_id}: {p.amount_minor} {p.currency} reserved, {p.state}, "
             f"asked again {p.asks} time(s)"
         )
+        if p.reserved_at is not None:
+            line += f", reserved at {p.reserved_at.isoformat()}"
+        if p.key_expired:
+            line += ", KEY EXPIRED: look it up at the processor, then resolve-attempt"
         if p.last_detail:
             line += f", last: {p.last_detail}"
         print(line)
@@ -507,6 +557,15 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--now", help="the issue instant (ISO with offset); default: now")
     run.set_defaults(run=_run)
 
+    first = sub.add_parser(
+        "issue-first-charge",
+        help="store an agreement's first charge as an invoice (its first two periods)",
+    )
+    _store_arguments(first)
+    first.add_argument("--agreement", required=True, help="the agreement id")
+    first.add_argument("--now", help="the issue instant (ISO with offset); default: now")
+    first.set_defaults(run=_issue_first_charge)
+
     taxes = sub.add_parser(
         "state-tax-sets", help="state a garage's tax sets from a document; prints the whole list"
     )
@@ -563,6 +622,13 @@ def main(argv: list[str] | None = None) -> int:
     resolve.add_argument("--recorded-by", required=True)
     resolve.add_argument("--reference", help="the processor's reference for a success")
     resolve.add_argument("--detail", help="what the processor said, for a person")
+    resolve.add_argument(
+        "--no-charge-confirmed-by",
+        help=(
+            "required for decline or error: where the processor was asked about this "
+            "attempt's key and showed no charge (e.g. the dashboard search done)"
+        ),
+    )
     resolve.set_defaults(run=_resolve_attempt)
 
     register = sub.add_parser(

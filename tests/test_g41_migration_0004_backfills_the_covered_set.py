@@ -40,6 +40,7 @@ from store_harness import (
     DSN,
     app_connection,
     apply_migration,
+    apply_migrations_after,
     migrate,
     needs_postgres,
     new_tenant,
@@ -140,7 +141,7 @@ def test_every_existing_version_gets_exactly_its_home_asserted_against_the_rows_
     # The module that reads is today's, whose loaders read the schema as it
     # ships -- 0005's registrar column included -- so the later migration is
     # applied before the read; 0004's backfill was judged above, on its own.
-    apply_migration(owner, "0005")
+    apply_migrations_after(owner, "0004")
     app = app_connection(DSN)
     try:
         answer = covered_from_store(

@@ -98,10 +98,12 @@ THE_FIVE = (
     "agreements_not_found",
 )
 #: The five columns of the latest version, then the four days the module
-#: decides coverage by (G63).
+#: decides coverage by (G63), then the access hours and the flag that sends an
+#: hour-limited agreement's stays to covered-in-store (OP-7-1).
 THE_AGREEMENT_FIELDS = (
     "agreement", "version", "registrar", "status", "cancelled_effective_day",
-    "start_day", "pauses", "blocked", "not_covered_from",
+    "start_day", "pauses", "blocked", "not_covered_from", "access_hours", "lane_must_ask",
+    "first_charge_owed",
 )
 
 #: G45's list, and what a read BY GARAGE must not echo either: the home garage
@@ -110,7 +112,10 @@ THE_AGREEMENT_FIELDS = (
 #: are the two of G45's words that DO travel here, as days (G63) -- a lane
 #: deciding by day needs them; nothing of money does.
 NEVER_TRAVELS_BY_GARAGE = (
-    *(fragment for fragment in NEVER_TRAVELS if fragment not in ("start", "pause")),
+    *(
+        fragment for fragment in NEVER_TRAVELS
+        if fragment not in ("start", "pause", "access")
+    ),
     "home", "covered_garage", "grace", "amount", "minor",
 )
 
@@ -193,11 +198,18 @@ def rows(*pairs: tuple[str, str]) -> tuple[GarageRegisterEntry, ...]:
     return tuple(GarageRegisterEntry(identity_normalised=i, agreement=a) for i, a in pairs)
 
 
+FIRST_OWED = {"not_covered_from": "2026-01-11", "until_day": "2026-02-28"}
+
+
 def agreement_entry(agreement_id: str, **overrides) -> RegisteredAgreement:
     return RegisteredAgreement(**{
         "agreement": agreement_id, "version": 1, "registrar": "outside", "status": "active",
         "cancelled_effective_day": None, "start_day": date(2026, 1, 5), "pauses": (),
-        "blocked": False, "not_covered_from": None, **overrides,
+        "blocked": False, "not_covered_from": None,
+        # No first charge is stored for these agreements: from January 5,
+        # grace 5, not covered from the 11th until the second period ends
+        # (OP-7-2).
+        "first_charge_owed": (date(2026, 1, 11), date(2026, 2, 28)), **overrides,
     })
 
 
@@ -238,10 +250,12 @@ def test_the_answer_is_five_fields_and_nothing_more_travels():
         {"agreement": "ag-a", "version": 3, "registrar": "outside", "status": "cancelled",
          "cancelled_effective_day": "2026-02-01", "start_day": "2026-01-05",
          "pauses": [{"from_day": "2026-01-10", "until_day": "2026-01-20"}], "blocked": True,
-         "not_covered_from": "2026-01-25"},
+         "not_covered_from": "2026-01-25", "access_hours": None, "lane_must_ask": False,
+         "first_charge_owed": FIRST_OWED},
         {"agreement": "ag-b", "version": 1, "registrar": "this_module", "status": "active",
          "cancelled_effective_day": None, "start_day": "2026-01-05", "pauses": [],
-         "blocked": False, "not_covered_from": None},
+         "blocked": False, "not_covered_from": None, "access_hours": None,
+         "lane_must_ask": False, "first_charge_owed": FIRST_OWED},
     ]
     assert all(tuple(entry) == THE_AGREEMENT_FIELDS for entry in document["agreements"])
     for fragment in NEVER_TRAVELS_BY_GARAGE:
@@ -346,7 +360,8 @@ def test_a_cancelled_agreement_past_its_day_is_shown_with_its_rows(app, tenant_i
     assert printed["agreements"] == [{
         "agreement": OUTSIDE_ID, "version": 2, "registrar": "outside", "status": "cancelled",
         "cancelled_effective_day": "2026-02-01", "start_day": "2026-01-05", "pauses": [],
-        "blocked": False, "not_covered_from": None}]
+        "blocked": False, "not_covered_from": None, "access_hours": None,
+        "lane_must_ask": False, "first_charge_owed": FIRST_OWED}]
 
 
 @pytest.mark.guarantee("G48")
@@ -479,15 +494,27 @@ def test_another_tenants_garage_of_the_same_id_is_not_read_with_the_policy_on_an
             ),
         )
     # And a row a system past the module could write: THIS tenant's block,
-    # hung on the OTHER tenant's agreement row (the key is the row's id
-    # alone). The policy never joins it to that agreement, so it blocks
+    # hung on the OTHER tenant's agreement row. Since 0009 the composite key
+    # refuses it to the application role (the control below), so it is
+    # written as the owner with the keys' triggers off -- a row past every
+    # lock. The policy never joins it to that agreement, so it blocks
     # nothing; with the policy off the read's join keeps it that way.
-    _raw(
-        app, tenant_id,
+    import psycopg
+
+    planted = (
         "INSERT INTO owner_exceptions (tenant_id, agreement_id, kind, recorded_by, recorded_at) "
         "VALUES (%s, %s, 'block', 'past the module', %s)",
         (tenant_id, seeded_other.agreement_uuids[OUTSIDE_ID], DAY),
     )
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        _raw(app, tenant_id, *planted)
+    app.rollback()
+    with owner.cursor() as cursor:
+        cursor.execute("SET session_replication_role = replica")
+        try:
+            cursor.execute(*planted)
+        finally:
+            cursor.execute("SET session_replication_role = origin")
     expected = GarageRegister(
         garage=HOME.id, registrations=rows(("m1ne1", OUTSIDE_ID)),
         agreements=(agreement_entry(OUTSIDE_ID, not_covered_from=date(2026, 5, 6)),),
@@ -496,6 +523,7 @@ def test_another_tenants_garage_of_the_same_id_is_not_read_with_the_policy_on_an
     their_entry = agreement_entry(
         OUTSIDE_ID, version=2, pauses=(their_pause,), blocked=True,
         not_covered_from=date(2026, 5, 16),
+        first_charge_owed=(date(2026, 1, 21), date(2026, 2, 28)),  # their ten days too
     )
 
     def app_sees():

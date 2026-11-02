@@ -122,6 +122,15 @@ def apply_migration(owner: Any, prefix: str) -> None:
         _apply(cursor, migration_path(prefix))
 
 
+def apply_migrations_after(owner: Any, prefix: str) -> None:
+    """Every migration after ``prefix``, in order: for a test that judged one
+    migration on its own and then reads with today's module, whose reads need
+    the schema as it ships."""
+    for path in sorted(MIGRATIONS.glob("*.sql")):
+        if path.name[:4] > prefix:
+            apply_migration(owner, path.name[:4])
+
+
 #: A role that owns the schema and can see NO row of a FORCE-RLS table: not a
 #: superuser, no BYPASSRLS. The shape a managed database's owner has, and the
 #: shape under which a backfill that reads the rows reads nothing.
@@ -289,3 +298,34 @@ needs_postgres = [
     pytest.mark.needs_postgres,
     pytest.mark.skipif(not DSN, reason="MONTHLY_BILLING_TEST_DSN is not set"),
 ]
+
+
+def age_attempt(attempt_id: Any, minutes: float) -> None:
+    """Move every row of one charge attempt back by ``minutes`` of the
+    database's clock, as the OWNER -- the application role cannot edit the
+    log. For the tests of the ages the module judges an attempt by (OP-7-7,
+    OP-7-8): a reservation's key lifetime, an in-flight request's minimum
+    age before an operator may resolve it."""
+    owner = connect(DSN)
+    owner.autocommit = True
+    try:
+        with owner.cursor() as cursor:
+            cursor.execute(
+                "UPDATE charge_attempts SET created_at = created_at - make_interval(secs => %s) "
+                "WHERE attempt_id = %s",
+                (minutes * 60, as_uuid(attempt_id)),
+            )
+    finally:
+        owner.close()
+
+
+class ConfirmsNoCharge:
+    """A processor lookup that found no charge under the key it was asked
+    about -- what an operator's adapter returns after looking the attempt up."""
+
+    def __init__(self) -> None:
+        self.asked: list = []
+
+    def charged(self, idempotency_key):
+        self.asked.append(idempotency_key)
+        return False

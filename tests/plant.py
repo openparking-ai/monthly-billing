@@ -51,7 +51,9 @@ SRC = ROOT / "src" / "monthly_billing"
 #: Explicit prefixes rather than "does it contain a slash": `store/writes.py`
 #: contains one and is SRC-relative, so anything cleverer than a listed prefix
 #: would silently retarget the controls that already exist.
-ROOT_RELATIVE_PREFIXES: tuple[str, ...] = ("tests/", "scripts/", "docs/", "migrations/")
+ROOT_RELATIVE_PREFIXES: tuple[str, ...] = (
+    "tests/", "scripts/", "docs/", "migrations/", "README.md",
+)
 
 
 def resolve(relative_path: str) -> Path:

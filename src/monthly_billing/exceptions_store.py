@@ -64,11 +64,25 @@ def record_agreement_exception(
     agreement_uuid: Any,
     exception: OwnerException,
 ) -> UUID:
-    """An exception against an agreement. Returns the row's id."""
+    """An exception against an agreement. Returns the row's id.
+
+    The agreement is read under the tenant's own context first, and one the
+    tenant cannot see is ``LookupError`` with nothing written: a uuid is not a
+    permission, and the insert's foreign-key check runs past the row policy,
+    so without the read tenant B's operator could block, or extend grace on,
+    tenant A's agreement by its uuid (migration 0009 is the database's own
+    lock on the same fact)."""
     if exception.agreement_id is None:
         raise ValueError("record_agreement_exception takes an exception attached to an agreement.")
     tenant_id, agreement_uuid = as_uuid(tenant_id), as_uuid(agreement_uuid)
     with tenant(connection, tenant_id) as cursor:
+        cursor.execute(
+            "SELECT 1 FROM agreements WHERE id = %s AND tenant_id = %s",
+            (agreement_uuid, tenant_id),
+        )
+        if cursor.fetchone() is None:
+            connection.rollback()
+            raise LookupError(f"no agreement {agreement_uuid} in this tenant.")
         guarded_insert(
             cursor,
             "owner_exceptions",

@@ -24,6 +24,7 @@ answer the lane from what is actually owed.
 ```
 $ monthly-billing state-tax-sets --tenant T --garage garage-downtown \
       --sets tax_sets.json --stated-by owner
+$ monthly-billing issue-first-charge --tenant T --agreement ag-fleet-0007
 $ monthly-billing run --tenant T --garage garage-downtown --period-containing 2026-05-01
 $ monthly-billing record-payment --tenant T --invoice garage-downtown/2026-04-30/payer-acme \
       --method cheque --amount-minor 15936 --received-at 2026-05-08T10:00:00-06:00 \
@@ -37,6 +38,16 @@ $ monthly-billing release-vehicle --tenant T --agreement ag-fleet-0007 --vehicle
 $ monthly-billing show-register --tenant T --agreement ag-fleet-0007
 $ monthly-billing show-garage-register --tenant T --garage garage-downtown
 ```
+
+`issue-first-charge` stores an agreement's first charge -- the period containing
+its start day and the next one -- as an invoice, paid and charged like any
+other, with the two periods it owns recorded beside it; the run never bills
+them. It is one invoice per payer and sign-up day, collecting for every spot
+the payer signed up that day; a spot stored for that payer and day after the
+invoice was issued is refused by name, and is started on a later day the
+payer has no first charge on. A first charge has its own invoice key, so it
+never collides with the payer's period invoice or another day's first charge. Until it is issued, the agreement's days in those two periods are owed
+from its start day: covered through grace, not covered after it.
 
 Nothing wakes itself up: the run is a command the operator's platform calls on
 the billing day, and the platform is an ordinary client of it. `register-vehicle`
@@ -59,7 +70,10 @@ registration row at the garage as the identity stored there and the agreement
 it names, and for every agreement those rows name its latest version's
 registrar, status and cancellation day, and the days coverage is decided by --
 its start day and pauses, the owner's block, and the first day an unpaid
-invoice is past grace (dates and a flag only: no amount, no invoice, no payer);
+invoice is past grace (dates and a flag only: no amount, no invoice, no payer), and its
+access hours with `lane_must_ask`, true for any agreement with hours: the
+register cannot decide such a stay, so the lane asks `covered-in-store` with
+the stay's `--entered-at`;
 an agreement whose latest version no longer covers the garage is named, and so
 is an id the rows name that the store holds no version of -- shown, never a refusal of the whole read. Nothing of
 where else an agreement answers travels: not its home garage, not its covered
@@ -176,6 +190,9 @@ psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0004_agreement_garages.sql
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0005_agreements_registrar.sql
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0006_tax_sets_and_invoice_subtotal.sql
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0007_identity_folds_o_and_i.sql
+psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0008_invoice_paid_at_only_and_versions_append_only.sql
+psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0009_agreement_payer_and_invoice_references_in_tenant.sql
+psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0010_first_charges.sql
 MONTHLY_BILLING_APP_PASSWORD=... python scripts/ensure-app-role.py "$DSN"
 ```
 

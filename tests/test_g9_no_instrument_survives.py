@@ -87,6 +87,24 @@ def test_separators_do_not_hide_it(separator):
 
 @pytest.mark.guarantee("G9")
 @pytest.mark.parametrize(
+    "separator",
+    ["  ", ".", " - ", "\t", "\u00a0", "_", "\u2013", " . ", "\n"],
+    ids=["two-spaces", "dot", "spaced-hyphen", "tab", "nbsp", "underscore", "en-dash",
+         "spaced-dot", "newline"],
+)
+def test_common_separator_runs_do_not_hide_it(separator):
+    """OP-7-15. The guard stripped ONE space or ONE hyphen between digits and
+    nothing else, so the same sixteen digits in groups of four behind two
+    spaces, a dot, a tab, a no-break space or a dash read as four short runs
+    and were stored. A run of common separators is normalised away first, then
+    length and Luhn decide, as they always did."""
+    card = build_card_shaped()
+    grouped = separator.join(card[i : i + 4] for i in range(0, 16, 4))
+    assert find_instrument_like(f"card {grouped} exp") == "a payment card number"
+
+
+@pytest.mark.guarantee("G9")
+@pytest.mark.parametrize(
     "innocent",
     [
         "invoice INV-2026-03-000412",
@@ -94,6 +112,11 @@ def test_separators_do_not_hide_it(separator):
         "12000 minor units, USD",
         "agreement ag-99887766554433221100",
         "garage 4111111111111112",  # 16 digits, and Luhn REJECTS it
+        # Separator runs join digits now, so dates and amounts written with
+        # them still have to stay short of a card's length.
+        "due 2026.04.30, paid 2026.05.08",
+        "15936  USD minor, ref 1043",
+        "paused 2026-04-30..2026-05-31",
     ],
 )
 def test_ordinary_identifiers_are_not_refused(innocent):

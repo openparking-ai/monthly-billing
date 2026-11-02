@@ -470,7 +470,7 @@ def test_a_row_outside_the_covered_set_is_shown_and_its_garage_named(app, tenant
 
 @pytest.mark.guarantee("G45")
 @store_backed
-def test_an_unreadable_garage_or_version_still_shows_its_register(app, tenant_id):
+def test_an_unreadable_garage_or_version_still_shows_its_register(app, owner, tenant_id):
     """T5, and a brief correction. A covered garage's timezone set raw to a
     zone that does not exist; the latest version given two overlapping pauses
     raw -- legal per row under 0001's CHECK, refused by the engine as a set.
@@ -484,10 +484,12 @@ def test_an_unreadable_garage_or_version_still_shows_its_register(app, tenant_id
     seeded = _seed(app, tenant_id, outside())
     _register(app, tenant_id, OUTSIDE_ID, "AB-123")
     home_uuid = seeded.garage_uuids[HOME.id]
-    with pytest.raises(psycopg.errors.CheckViolation):
-        _raw(
-            app, tenant_id,
-            "UPDATE agreements SET monthly_price_minor = -1 WHERE external_id = %s", (OUTSIDE_ID,),
+    # As the OWNER: the application role has no UPDATE on a stored version
+    # (0008), so the CHECK is reached only by a role that can try.
+    with owner.cursor() as cursor, pytest.raises(psycopg.errors.CheckViolation):
+        cursor.execute(
+            "UPDATE agreements SET monthly_price_minor = -1 "
+            "WHERE external_id = %s AND tenant_id = %s", (OUTSIDE_ID, tenant_id),
         )
     _raw(
         app, tenant_id,

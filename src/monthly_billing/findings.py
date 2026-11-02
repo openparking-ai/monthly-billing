@@ -81,6 +81,13 @@ REFUSAL_TAX_NEEDS_THE_ENGINE = "REFUSAL_TAX_NEEDS_THE_ENGINE"
 REFUSAL_INVOICE_ALREADY_TAXED = "REFUSAL_INVOICE_ALREADY_TAXED"
 REFUSAL_PAYER_CHANGED = "REFUSAL_PAYER_CHANGED"
 REFUSAL_VERSION_NOT_NEWER = "REFUSAL_VERSION_NOT_NEWER"
+REFUSAL_REASK_EXCEEDS_BALANCE = "REFUSAL_REASK_EXCEEDS_BALANCE"
+REFUSAL_REASK_KEY_EXPIRED = "REFUSAL_REASK_KEY_EXPIRED"
+REFUSAL_RESOLUTION_TOO_SOON = "REFUSAL_RESOLUTION_TOO_SOON"
+REFUSAL_START_DAY_MOVED = "REFUSAL_START_DAY_MOVED"
+REFUSAL_FIRST_CHARGE_DAY_ISSUED = "REFUSAL_FIRST_CHARGE_DAY_ISSUED"
+REFUSAL_FIRST_CHARGE_PAST_ITS_PERIODS = "REFUSAL_FIRST_CHARGE_PAST_ITS_PERIODS"
+REFUSAL_RESOLUTION_NEEDS_EVIDENCE = "REFUSAL_RESOLUTION_NEEDS_EVIDENCE"
 
 REFUSALS: dict[str, str] = {
     REFUSAL_NO_MANDATE: (
@@ -91,9 +98,11 @@ REFUSALS: dict[str, str] = {
         "CHARGE that is refused, not the billing."
     ),
     REFUSAL_PAUSE_OVERLAPS_A_PAID_PERIOD: (
-        "The pause covers days in a period that has already been paid. A paid "
-        "period is paid, and this module does not decide refunds or credits. The "
-        "owner records an exception with an amount, or moves the pause."
+        "The pause, or the cancellation, covers days in a period that has already "
+        "been invoiced -- paid or not, because nothing re-prices an issued invoice. "
+        "This module does not decide refunds or credits. The owner records an "
+        "exception with an amount (a credit on the invoice), or moves the pause or "
+        "the cancellation day."
     ),
     REFUSAL_NO_BILLING_DAY: (
         "The garage has not stated its billing day. It is one of the offered "
@@ -171,7 +180,69 @@ REFUSALS: dict[str, str] = {
         "flight: the refusal names the attempt id, pending-attempts lists it, and an "
         "operator records what the processor says (resolve-attempt). A pending "
         "attempt whose last word is UNKNOWN is different: the next charge asks the "
-        "processor again under the same key, and is not refused."
+        "processor again under the same key, and is not refused -- unless a payment "
+        "since has taken the balance below what it reserved "
+        "(REFUSAL_REASK_EXCEEDS_BALANCE)."
+    ),
+    REFUSAL_REASK_EXCEEDS_BALANCE: (
+        "A charge attempt on this invoice is PENDING with an UNKNOWN answer, and the "
+        "invoice's balance is now below the amount that attempt reserved -- a cheque "
+        "or another payment landed since. Asking the processor again under the same "
+        "key would request the reserved amount, and if the first request never "
+        "reached the processor it would collect money no longer owed. Nothing is "
+        "asked and nothing is written; the attempt stays pending. Look it up at the "
+        "processor by its id and record what the processor says (resolve-attempt)."
+    ),
+    REFUSAL_REASK_KEY_EXPIRED: (
+        "A charge attempt on this invoice is PENDING with an UNKNOWN answer, and its "
+        "reservation is older than a processor can be relied on to keep an "
+        "idempotency key (23 hours, by the database's clock). Past that, the same key "
+        "is a NEW charge to the processor, and asking again could collect twice. "
+        "Nothing is asked and nothing is written; the attempt stays pending. Look it "
+        "up at the processor by its id and record what the processor says "
+        "(resolve-attempt)."
+    ),
+    REFUSAL_RESOLUTION_TOO_SOON: (
+        "This attempt's request may still be IN FLIGHT: its last row -- the "
+        "reservation, or an ask -- is younger than the minimum age before an "
+        "operator may resolve it. The processor can still answer the worker, and an "
+        "outcome typed now could free a fresh key while the first request is "
+        "charging. Wait, then look it up at the processor and resolve it."
+    ),
+    REFUSAL_RESOLUTION_NEEDS_EVIDENCE: (
+        "The resolution carries no processor evidence. A SUCCESS needs the "
+        "processor's reference for the charge. A DECLINE or an ERROR ends the "
+        "attempt and lets the next charge use a FRESH key, so it needs the "
+        "processor adapter's lookup to confirm there is NO charge under this "
+        "attempt's key; no lookup, a lookup that cannot tell and one that found a "
+        "charge are each refused, and nothing is written."
+    ),
+    REFUSAL_START_DAY_MOVED: (
+        "This version moves the agreement's start day, and the agreement has "
+        "already been billed -- its first charge is stored, or an invoice line "
+        "names it. The first charge's two periods were decided by the start day it "
+        "was issued under; moving it would move the periods the run leaves to the "
+        "first charge, and a period already paid would be billed again. Keep the "
+        "start day; a different start is a different agreement, or an owner's "
+        "exception with an amount."
+    ),
+    REFUSAL_FIRST_CHARGE_DAY_ISSUED: (
+        "This payer's first-charge invoice for this agreement's start day was "
+        "already issued, for the spots stored before it, and an issued invoice is "
+        "never added to -- its lines, subtotal and tax are fixed at issue. Nothing "
+        "is written. Store the new spot with a later start day on which this payer "
+        "has no first-charge invoice yet -- each sign-up day is its own first "
+        "charge -- and issue that, or the owner records an exception with an amount "
+        "on the issued invoice."
+    ),
+    REFUSAL_FIRST_CHARGE_PAST_ITS_PERIODS: (
+        "This agreement is past its first charge: the day it was asked for is on or "
+        "after the end of its second period, or an invoice already bills it. A first "
+        "charge pays for the period containing the start day and the one after it, "
+        "in advance; issued now it would bill periods already over -- ones this "
+        "store never billed and that were settled outside it -- and leave the payer "
+        "owing them again. Nothing is written. If those periods are truly unpaid, "
+        "the owner records them as an exception with an amount."
     ),
     REFUSAL_ATTEMPT_ALREADY_RESOLVED: (
         "This attempt already has an outcome recorded. What the processor said is "

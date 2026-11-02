@@ -104,6 +104,32 @@ def test_the_owner_connection_would_have_failed_that_check(migrated):
 
 
 @pytest.mark.guarantee("G12")
+def test_the_store_command_line_refuses_a_dsn_that_bypasses_rls(migrated, capsys):
+    """OP-7-13. Every store command connects through ``cli._connection``, and
+    it never asked whether the DSN it was handed could be stopped by the row
+    policy: pointed at the owner's or a superuser's DSN, a command read and
+    wrote across every tenant and the policy on every table was inert. It now
+    refuses before running anything, naming why; the application role's DSN
+    is still accepted."""
+    from uuid import uuid4
+
+    from monthly_billing.cli import main
+
+    with pytest.raises(SystemExit) as refused:
+        main(["show-register", "--tenant", str(uuid4()), "--agreement", "ag-none",
+              "--dsn", DSN])
+    assert "inert" in str(refused.value) and "monthly_billing_app" in str(refused.value)
+
+    app_dsn = f"{DSN} user=monthly_billing_app password=test-only-password"
+    # The app role gets as far as the read: an agreement nobody stored is the
+    # store's own NOT FOUND, not a refusal of the connection.
+    code = main(["show-register", "--tenant", str(uuid4()), "--agreement", "ag-none",
+                 "--dsn", app_dsn])
+    assert code != 0
+    assert "inert" not in capsys.readouterr().err
+
+
+@pytest.mark.guarantee("G12")
 def test_no_table_ships_without_row_level_security(as_app):
     from monthly_billing.store.postgres import tables_without_rls
 
@@ -434,3 +460,15 @@ def test_the_install_step_refuses_to_run_without_a_password_and_never_prints_one
     run = _ensure_app_role(nowhere, password)
     assert run.returncode != 0
     assert password not in run.stdout and password not in run.stderr, (run.stdout, run.stderr)
+
+
+@pytest.mark.guarantee("G12")
+def test_the_readme_install_step_applies_every_migration_in_order():
+    """The review found the README's install list stopping at 0009: an install
+    that followed it had no first_charges table, and run_billing itself failed.
+    The list is read from the README and compared with migrations/, in order."""
+    import re
+
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    listed = re.findall(r'psql -v ON_ERROR_STOP=1 "\$DSN" -f migrations/(\S+\.sql)', readme)
+    assert listed == sorted(path.name for path in MIGRATIONS.glob("*.sql"))

@@ -37,7 +37,8 @@ that fires constantly is one somebody turns off. So:
   value carrying one next to a 4-to-17-digit account run.
 
 **AND SEPARATORS ARE STRIPPED BEFORE THE CHECK.** The same digits written in
-groups of four, separated by spaces or by hyphens, are the same number. A
+groups of four, separated by spaces, hyphens, dots, tabs or a run of them, are
+the same number. A
 detector that only reads unbroken runs is one space away from blind, and grouped
 is the form these values are most often pasted in.
 
@@ -86,10 +87,28 @@ class InstrumentLike(ValueError):
     """A value shaped like a payment instrument reached a field that stores it."""
 
 
-#: A run of digits, possibly broken by single spaces or hyphens. Bounded at 19
+#: What a person puts between groups of a number they paste: whitespace of any
+#: kind (a tab, a newline, a no-break space), hyphens and the dashes a word
+#: processor turns them into, dots and underscores. A RUN of them, up to three,
+#: is one separator: the guard used to strip a single space or a single hyphen
+#: and nothing else, so two spaces, a dot or a tab between the groups hid the
+#: number (OP-7-15). Commas and slashes are not separators here: they separate
+#: amounts and dates, and joining those is how a guard starts firing on
+#: everything.
+_SEPARATOR = r"[\s.\-_\u2010-\u2015\u2212]"
+
+#: A run of digits, possibly broken by separator runs. Bounded at 19
 #: significant digits by the caller rather than here, so the pattern stays one
 #: thing and the length rules live where they are explained.
-_DIGIT_RUN = re.compile(r"(?<![0-9])(?:[0-9][ -]?){12,22}[0-9](?![0-9])")
+_DIGIT_RUN = re.compile(rf"(?<![0-9])(?:[0-9]{_SEPARATOR}{{0,3}}){{12,22}}[0-9](?![0-9])")
+
+#: ISO dates, one or several, joined by separator runs: a period written
+#: "2026-04-30..2026-05-31" is sixteen digits once the separators go, and one
+#: date range in ten passes Luhn. A card is never written in 4-2-2 groups, so a
+#: run that is nothing but ISO dates is a period, not a number.
+_ISO_DATES = re.compile(
+    rf"[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}(?:{_SEPARATOR}{{1,3}}[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})*"
+)
 
 _ROUTING_THEN_ACCOUNT = re.compile(
     r"(?<![0-9])([0-9]{9})[ \-:/]{1,3}([0-9]{4,17})(?![0-9])"
@@ -152,6 +171,8 @@ def find_instrument_like(value: object) -> str | None:
             return "a bank routing number followed by an account number"
 
     for match in _DIGIT_RUN.finditer(value):
+        if _ISO_DATES.fullmatch(match.group(0)):
+            continue
         digits = _digits(match.group(0))
         if 13 <= len(digits) <= 19 and luhn_ok(digits):
             return "a payment card number"

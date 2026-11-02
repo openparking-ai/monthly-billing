@@ -59,6 +59,18 @@ TZ = ZoneInfo(GARAGE.timezone)
 NOW = datetime(2026, 4, 30, 0, 30, tzinfo=TZ)
 
 
+def _resolve(connection, tenant_id, attempt_id, result, **kwargs):
+    """resolve_attempt as an operator does it after OP-7-8: the in-flight
+    request given time to be answered, and the processor's lookup confirming
+    no charge for a decline or an error."""
+    from monthly_billing.charging import RESOLVE_IN_FLIGHT_AFTER_MINUTES
+    from store_harness import ConfirmsNoCharge, age_attempt
+
+    age_attempt(attempt_id, RESOLVE_IN_FLIGHT_AFTER_MINUTES + 1)
+    kwargs.setdefault("lookup", ConfirmsNoCharge())
+    return resolve_attempt(connection, tenant_id, attempt_id, result, **kwargs)
+
+
 def _card_shaped() -> str:
     body = "4" + "1" * 14
     for check in "0123456789":
@@ -300,7 +312,7 @@ def late_answer_race(tenant_id, reference, operator_says: Outcome, processor_say
         thread = threading.Thread(target=worker)
         thread.start()
         assert entered.wait(20), "the worker never reached the processor"
-        result["operator"] = resolve_attempt(
+        result["operator"] = _resolve(
             operator_connection, tenant_id, attempt_id,
             ChargeResult(
                 outcome=operator_says, detail=f"operator says {operator_says.value}",
@@ -359,7 +371,7 @@ def test_an_answer_that_lands_after_the_operator_resolved_is_a_late_row_never_dr
         "the late row counted toward the three, or the operator's decline did not"
     )
     with pytest.raises(Refused) as refused:
-        resolve_attempt(
+        _resolve(
             app, tenant_id, operator.attempt_id,
             ChargeResult(outcome=Outcome.SUCCESS, detail="again", reference="auth-again"),
             recorded_by="operator", now=_tick(3),

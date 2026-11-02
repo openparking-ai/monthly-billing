@@ -63,6 +63,9 @@ def _judge(entry: dict, day: date) -> bool:
     def iso(text):
         return date.fromisoformat(text) if text else None
 
+    if entry.get("lane_must_ask"):
+        return "ask"  # hour-limited: the days alone cannot say covered (OP-7-1)
+
     if entry["status"] == "cancelled" and day >= iso(entry["cancelled_effective_day"]):
         return False
     if day < iso(entry["start_day"]):
@@ -70,6 +73,9 @@ def _judge(entry: dict, day: date) -> bool:
     if any(iso(p["from_day"]) <= day < iso(p["until_day"]) for p in entry["pauses"]):
         return False
     if entry["blocked"]:
+        return False
+    owed = entry.get("first_charge_owed")
+    if owed and iso(owed["not_covered_from"]) <= day < iso(owed["until_day"]):
         return False
     stop = iso(entry["not_covered_from"])
     return stop is None or day < stop
@@ -162,3 +168,44 @@ def test_the_start_day_and_the_pauses_are_the_versions_and_agree_with_the_module
     assert entry["not_covered_from"] is None and entry["blocked"] is False
     boundaries = (date(2026, 6, 10), date(2026, 6, 20), date(2026, 7, 1))
     _agrees(app, tenant_id, *(b + timedelta(days=d) for b in boundaries for d in (-1, 0)))
+
+
+@pytest.mark.guarantee("G63")
+def test_an_hour_limited_agreement_carries_its_hours_and_is_never_covered_by_days_alone(
+    app, tenant_id
+):
+    """OP-7-1. The register left out access hours, so a lane reading it covered
+    a 07:00-19:00 parker who entered at 18:00 and left at 10:00 the next day --
+    covered-in-store says NOT COVERED for that stay, and the barrier opened for
+    free. Each agreement now carries ``access_hours`` (local times, or null)
+    and ``lane_must_ask``: true whenever there are hours, because no reading of
+    the days can decide such a stay -- the lane asks covered-in-store with the
+    stay's entry. An agreement with no hours is judged by its days as before."""
+    from datetime import time
+
+    from monthly_billing.agreement import AccessHours
+
+    seed(app, tenant_id, GARAGE, (simple_agreement(
+        start_day=date(2026, 1, 5),
+        access_hours=AccessHours(entry_from=time(7, 0), exit_by=time(19, 0)),
+    ),))
+    entry = _entry(app, tenant_id)
+    assert entry["access_hours"] == {"entry_from": "07:00", "exit_by": "19:00"}
+    assert entry["lane_must_ask"] is True
+    day = date(2026, 4, 1)
+    entered = datetime(2026, 4, 1, 18, 0, tzinfo=TZ)
+    leaves = datetime(2026, 4, 2, 10, 0, tzinfo=TZ)
+    module = covered_from_store(app, tenant_id, GARAGE.id, "CAR001", leaves,
+                                stay_entered_at=entered)
+    assert module.covered is False
+    assert _judge(entry, day) is not True, "the register's days alone covered the stay"
+
+
+@pytest.mark.guarantee("G63")
+def test_an_agreement_without_hours_is_decided_by_its_days(app, tenant_id):
+    """The control on the one above: no hours, ``access_hours`` null,
+    ``lane_must_ask`` false, and the days agree with the module."""
+    seed(app, tenant_id, GARAGE, (simple_agreement(start_day=date(2026, 1, 5)),))
+    entry = _entry(app, tenant_id)
+    assert entry["access_hours"] is None and entry["lane_must_ask"] is False
+    _agrees(app, tenant_id, date(2026, 4, 1))

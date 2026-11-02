@@ -156,9 +156,61 @@ def test_the_grants_read_from_the_catalogue_are_select_and_insert_only(app, tena
     )
     assert rows == [
         ("invoice_lines", "INSERT,SELECT"),
-        ("invoices", "INSERT,SELECT,UPDATE"),
+        ("invoices", "INSERT,SELECT"),
         ("owner_exceptions", "INSERT,SELECT"),
     ]
+
+
+#: The tables a stored agreement VERSION is: a new version is a new row, so
+#: none of them is ever edited or removed by the application (OP-7-14).
+VERSION_TABLES = (
+    "agreements", "agreement_vehicles", "agreement_pauses", "agreement_fees", "mandates",
+)
+
+
+@pytest.mark.guarantee("G20")
+def test_an_invoice_takes_an_update_of_paid_at_and_of_no_other_column(app, tenant_id):
+    """OP-7-14. 0002 kept TABLE-WIDE UPDATE on invoices for the one derived
+    column, so the application role could rewrite an issued invoice's payer,
+    period, due day or reference. 0008 keeps UPDATE on ``paid_at`` alone --
+    which is still enough for the invoice lock, ``FOR UPDATE`` needing UPDATE
+    on one column -- and the catalogue says so column by column."""
+    _one_of_each(app, tenant_id)
+    for column in ("due_at", "period_start_day", "reference", "payer_id", "issued_at"):
+        assert _refused(app, tenant_id, f"UPDATE invoices SET {column} = {column}"), (
+            f"UPDATE of invoices.{column} was allowed"
+        )
+    assert not _refused(app, tenant_id, "UPDATE invoices SET paid_at = paid_at")
+    assert not _refused(app, tenant_id, "SELECT id FROM invoices FOR UPDATE")
+    rows = query(
+        app, tenant_id,
+        "SELECT column_name FROM information_schema.column_privileges "
+        "WHERE grantee = 'monthly_billing_app' AND table_name = 'invoices' "
+        "AND privilege_type = 'UPDATE' ORDER BY column_name",
+    )
+    assert rows == [("paid_at",)]
+
+
+@pytest.mark.guarantee("G20")
+@pytest.mark.parametrize("table", VERSION_TABLES)
+def test_a_stored_agreement_version_cannot_be_edited_or_removed(app, tenant_id, table):
+    """OP-7-14. 0001 granted the application UPDATE and DELETE on every table
+    of an agreement version and its mandate, so a stored version -- the one an
+    invoice line names as the price it was billed at, the terms a mandate was
+    agreed in -- could be rewritten in place. 0008 revokes both."""
+    _one_of_each(app, tenant_id)
+    assert _refused(app, tenant_id, f"UPDATE {table} SET tenant_id = tenant_id"), (
+        f"UPDATE on {table} was allowed"
+    )
+    assert _refused(app, tenant_id, f"DELETE FROM {table}"), f"DELETE on {table} was allowed"
+    rows = query(
+        app, tenant_id,
+        "SELECT string_agg(privilege_type, ',' ORDER BY privilege_type) "
+        "FROM information_schema.role_table_grants "
+        "WHERE grantee = 'monthly_billing_app' AND table_name = %s",
+        (table,),
+    )
+    assert rows == [("INSERT,SELECT",)]
 
 
 # ---------------------------------------------------------------------------

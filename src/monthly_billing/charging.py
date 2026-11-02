@@ -49,14 +49,21 @@ row with no ``outcome`` row. In T1, under the lock:
   flight, or a worker died with it: refuse by name, ``REFUSAL_ATTEMPT_UNRESOLVED``,
   naming the attempt id. The operator's ``resolve_attempt`` is the way out.
 * pending and its last row is ``unknown`` -- the module already said it does
-  not know: write an ``ask`` row, commit, and ask the processor again with the
-  SAME attempt id as the idempotency key and the RESERVED amount and currency.
-  No new reservation, no fresh key, the three refusals not re-run -- this is
-  not a new charge; the request already left once, and a method change since
-  the reservation does not alter what is outstanding under that key. A real
-  processor honours the key, so a repeated request charges once. There is no
-  cap on re-asks: a processor that never answers grows the ``unknown`` log for
-  as long as the scheduler calls, and one key is one charge at most.
+  not know: re-read the balance, and refuse by name
+  (``REFUSAL_REASK_EXCEEDS_BALANCE``) when it is zero or below the amount
+  reserved -- a payment since means the reserved amount is no longer owed, and
+  a request that never reached the processor would collect it. Otherwise write
+  an ``ask`` row, commit, and ask the processor again with the SAME attempt id
+  as the idempotency key and the RESERVED amount and currency. No new
+  reservation, no fresh key, the retry count and the mandate not re-run --
+  this is not a new charge; the request already left once, and a method change
+  since the reservation does not alter what is outstanding under that key.
+  And a key is relied on for ``REASK_KEY_LIFETIME_HOURS`` of the database's
+  clock from the reservation row's own instant: past it the re-ask is refused
+  by name (``REFUSAL_REASK_KEY_EXPIRED``), because a processor that has
+  forgotten the key treats the same key as a new charge. A real
+  processor honours the key, so a repeated request charges once inside the
+  key's lifetime; there is no cap on the number of re-asks inside it.
 * no pending attempt -- reserve as above.
 
 A worker resuming and an operator resolving at once: the first to write the
@@ -126,13 +133,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from .findings import (
     REFUSAL_ATTEMPT_ALREADY_RESOLVED,
     REFUSAL_ATTEMPT_UNRESOLVED,
     REFUSAL_INVOICE_NAMES_NO_AGREEMENT,
+    REFUSAL_REASK_EXCEEDS_BALANCE,
+    REFUSAL_REASK_KEY_EXPIRED,
+    REFUSAL_RESOLUTION_NEEDS_EVIDENCE,
+    REFUSAL_RESOLUTION_TOO_SOON,
     Refused,
 )
 from .invoice import Invoice, InvoiceLine, LineKind
@@ -215,6 +226,15 @@ class PendingAttempt:
     last_detail: str
     #: How many times the processor has been asked again under this key.
     asks: int
+    #: The reservation's instant, as the database assigned it.
+    reserved_at: datetime | None = None
+    #: True when the reservation is older than ``REASK_KEY_LIFETIME_HOURS`` on
+    #: the database's clock: the key is no longer relied on, and the attempt is
+    #: not asked again (OP-7-7).
+    key_expired: bool = False
+    #: The instant of the attempt's last row (the reservation, an ask or an
+    #: unknown), as the database assigned it.
+    last_row_at: datetime | None = None
 
 
 class AttemptNotFound(LookupError):
@@ -276,13 +296,41 @@ def _load_attempt_rows(cursor: Any, invoice_uuid: Any) -> list[tuple[str, str | 
     ]
 
 
+#: How long a reservation's idempotency key is relied on: a processor keeps a
+#: key for a bounded time (24 hours is common), and past it the same key is a
+#: NEW charge to the processor. Judged on the database's clock against the
+#: reservation row's own ``created_at`` -- never the caller's ``now``, which is
+#: whatever was typed -- with an hour's margin (OP-7-7).
+REASK_KEY_LIFETIME_HOURS = 23
+
+#: How long an IN_FLIGHT attempt's last row -- the reservation, or an ask --
+#: must have stood, on the database's clock, before an operator may resolve
+#: it: until then the worker's request can still be at the processor and be
+#: answered, and an outcome typed now could free a fresh key while the first
+#: request charges (OP-7-8).
+RESOLVE_IN_FLIGHT_AFTER_MINUTES = 15
+
+
+class ProcessorLookup(Protocol):
+    """What the processor ADAPTER answers when asked about one idempotency
+    key: ``True`` -- the processor holds a charge under it; ``False`` -- it
+    confirms there is none; ``None`` -- it cannot tell. Only ``False`` lets an
+    operator close an attempt as a decline or an error, because that is what
+    lets the next charge use a fresh key."""
+
+    def charged(self, idempotency_key: UUID) -> bool | None: ...
+
+
 _PENDING_SQL = """
     SELECT a.attempt_id, a.amount_minor, a.currency,
            last.kind, last.detail,
            (SELECT count(*) FROM charge_attempts k
-             WHERE k.attempt_id = a.attempt_id AND k.kind = 'ask')
+             WHERE k.attempt_id = a.attempt_id AND k.kind = 'ask'),
+           a.created_at,
+           now() - a.created_at > make_interval(hours => %s),
+           last.created_at
     FROM charge_attempts a
-    JOIN LATERAL (SELECT r.kind, r.detail FROM charge_attempts r
+    JOIN LATERAL (SELECT r.kind, r.detail, r.created_at FROM charge_attempts r
                    WHERE r.attempt_id = a.attempt_id
                    ORDER BY r.sequence DESC LIMIT 1) AS last ON true
     WHERE a.invoice_id = %s AND a.kind = 'attempt'
@@ -293,7 +341,7 @@ _PENDING_SQL = """
 
 
 def _pending_rows(cursor: Any, invoice_uuid: Any) -> list[PendingAttempt]:
-    cursor.execute(_PENDING_SQL, (invoice_uuid,))
+    cursor.execute(_PENDING_SQL, (REASK_KEY_LIFETIME_HOURS, invoice_uuid))
     return [
         PendingAttempt(
             attempt_id=as_uuid(attempt_id),
@@ -302,8 +350,14 @@ def _pending_rows(cursor: Any, invoice_uuid: Any) -> list[PendingAttempt]:
             state=UNKNOWN if last_kind == "unknown" else IN_FLIGHT,
             last_detail=last_detail if last_kind == "unknown" else "",
             asks=int(asks),
+            reserved_at=reserved_at,
+            key_expired=bool(expired),
+            last_row_at=last_at,
         )
-        for attempt_id, amount, currency, last_kind, last_detail, asks in cursor.fetchall()
+        for (
+            attempt_id, amount, currency, last_kind, last_detail, asks, reserved_at, expired,
+            last_at,
+        ) in cursor.fetchall()
     ]
 
 
@@ -418,8 +472,30 @@ def _reserve(
                 )
             if pending is not None:
                 # The module already said it does not know: ask again under the
-                # SAME key for what was RESERVED. Not a new charge, so the three
-                # refusals are not re-run and nothing new is reserved.
+                # SAME key for what was RESERVED. Not a new charge, so the retry
+                # count and the mandate are not re-run and nothing new is
+                # reserved -- but what is OWED is re-read, under this lock: a
+                # payment since the reservation means the reserved amount is no
+                # longer owed, and if the first request never reached the
+                # processor, asking again would collect it (OP-7-5).
+                if pending.key_expired:
+                    raise Refused(
+                        REFUSAL_REASK_KEY_EXPIRED,
+                        f"invoice {invoice_reference!r}: attempt {pending.attempt_id} was "
+                        f"reserved at {pending.reserved_at.isoformat()}, more than "
+                        f"{REASK_KEY_LIFETIME_HOURS} hours ago; look it up at the processor "
+                        "and record what it says (resolve-attempt).",
+                    )
+                now_owed = paid_state(cursor, invoice_uuid)
+                outstanding = now_owed.total_minor - now_owed.paid_minor
+                if outstanding <= 0 or outstanding < pending.amount_minor:
+                    raise Refused(
+                        REFUSAL_REASK_EXCEEDS_BALANCE,
+                        f"invoice {invoice_reference!r}: attempt {pending.attempt_id} "
+                        f"reserved {pending.amount_minor} and the balance is now "
+                        f"{outstanding}; look the attempt up at the processor and record "
+                        "what it says (resolve-attempt).",
+                    )
                 _log_row(
                     cursor, tenant_id, invoice_uuid, "ask", pending.attempt_id,
                     f"re-ask {pending.asks + 1} under the same key",
@@ -558,6 +634,10 @@ def _settle(
                     REFUSAL_ATTEMPT_ALREADY_RESOLVED,
                     f"attempt {attempt_id!r} already has an outcome recorded.",
                 )
+            if not from_the_processor:
+                # Under the lock, so a worker's re-ask that began after the
+                # operator's read is seen here.
+                _refuse_while_in_flight(cursor, invoice_uuid, attempt_id)
             try:
                 guarded_insert(
                     cursor,
@@ -597,6 +677,28 @@ def _settle(
             )
     connection.commit()
     return retry, payment_id, paid, False
+
+
+def _refuse_while_in_flight(cursor: Any, invoice_uuid: UUID, attempt_id: UUID) -> None:
+    """An IN_FLIGHT attempt whose last row is younger than
+    ``RESOLVE_IN_FLIGHT_AFTER_MINUTES`` on the database's clock is refused."""
+    pending = next(
+        (p for p in _pending_rows(cursor, invoice_uuid) if p.attempt_id == attempt_id), None
+    )
+    if pending is None or pending.state != IN_FLIGHT:
+        return
+    cursor.execute(
+        "SELECT now() - %s < make_interval(mins => %s)",
+        (pending.last_row_at, RESOLVE_IN_FLIGHT_AFTER_MINUTES),
+    )
+    (too_soon,) = cursor.fetchone()
+    if too_soon:
+        raise Refused(
+            REFUSAL_RESOLUTION_TOO_SOON,
+            f"attempt {attempt_id} was last asked at {pending.last_row_at.isoformat()}; "
+            f"an in-flight attempt is resolved no sooner than "
+            f"{RESOLVE_IN_FLIGHT_AFTER_MINUTES} minutes after that.",
+        )
 
 
 def _record_late(
@@ -709,6 +811,7 @@ def resolve_attempt(
     *,
     recorded_by: str,
     now: datetime,
+    lookup: ProcessorLookup | None = None,
 ) -> ChargeOutcome:
     """The operator records what the processor said about a PENDING attempt.
 
@@ -716,6 +819,15 @@ def resolve_attempt(
     payment for the amount reserved, under the lock. An attempt that already
     has an outcome is refused by name; an id that names no reservation is not
     found.
+
+    **ONLY ON THE PROCESSOR'S EVIDENCE (OP-7-8).** An IN_FLIGHT attempt is not
+    resolved until its last row is ``RESOLVE_IN_FLIGHT_AFTER_MINUTES`` old (the
+    worker's request may still be answered); a SUCCESS needs the processor's
+    reference; a DECLINE or an ERROR -- after which the next charge mints a
+    fresh key -- needs ``lookup``, the processor adapter, to confirm there is
+    NO charge under this attempt's key. Each is refused by name, writing
+    nothing. The lookup is asked outside any lock: it is a call to the
+    processor.
     """
     tenant_id, attempt_id = as_uuid(tenant_id), as_uuid(attempt_id)
     with tenant(connection, tenant_id) as cursor:
@@ -724,10 +836,18 @@ def resolve_attempt(
             (attempt_id,),
         )
         row = cursor.fetchone()
+        if row is not None:
+            still_pending = any(
+                p.attempt_id == attempt_id for p in _pending_rows(cursor, as_uuid(row[0]))
+            )
+            if still_pending:
+                _refuse_while_in_flight(cursor, as_uuid(row[0]), attempt_id)
     connection.rollback()
     if row is None:
         raise AttemptNotFound(f"no attempt with id {attempt_id!r}.")
     invoice_uuid = as_uuid(row[0])
+    if still_pending:
+        _refuse_without_evidence(attempt_id, result, lookup)
     retry, payment_id, paid, _ = _settle(
         connection, tenant_id, invoice_uuid, attempt_id, result,
         recorded_by=recorded_by, now=now,
@@ -735,6 +855,27 @@ def resolve_attempt(
     return ChargeOutcome(
         result=result, retry=retry, attempt_id=attempt_id, payment_id=payment_id, paid=paid
     )
+
+
+def _refuse_without_evidence(
+    attempt_id: UUID, result: ChargeResult, lookup: ProcessorLookup | None
+) -> None:
+    if result.outcome is Outcome.SUCCESS:
+        if result.reference is None or not result.reference.strip():
+            raise Refused(
+                REFUSAL_RESOLUTION_NEEDS_EVIDENCE,
+                f"a SUCCESS for attempt {attempt_id} names no processor reference.",
+            )
+        return
+    found = None if lookup is None else lookup.charged(attempt_id)
+    if found is not False:
+        said = {None: "could not tell", True: "found a charge"}[found]
+        raise Refused(
+            REFUSAL_RESOLUTION_NEEDS_EVIDENCE,
+            f"a {result.outcome.value.upper()} for attempt {attempt_id} needs the "
+            "processor to confirm no charge under its key; "
+            + ("no lookup was given." if lookup is None else f"the lookup {said}."),
+        )
 
 
 def pending_attempts(connection: Any, tenant_id: Any, invoice_reference: str) -> tuple[UUID, ...]:
@@ -805,10 +946,13 @@ __all__ = [
     "IN_FLIGHT",
     "LATE",
     "ONE_OUTCOME_PER_ATTEMPT",
+    "REASK_KEY_LIFETIME_HOURS",
+    "RESOLVE_IN_FLIGHT_AFTER_MINUTES",
     "UNKNOWN",
     "AttemptNotFound",
     "ChargeOutcome",
     "PendingAttempt",
+    "ProcessorLookup",
     "attempt_charge",
     "list_pending_attempts",
     "pending_attempts",

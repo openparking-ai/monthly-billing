@@ -223,7 +223,7 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
             "                period_end_day=period.end_day,",
             "            )",
             "        )",
-            "        lines.extend(_fee_lines(agreement, period, prorated=days != period.days))",
+            "        lines.extend(_fee_lines(",
         ),
         source(
             "                agreement_version=1,  # PLANTED: every line claims v1",
@@ -231,7 +231,7 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
             "                period_end_day=period.end_day,",
             "            )",
             "        )",
-            "        lines.extend(_fee_lines(agreement, period, prorated=days != period.days))",
+            "        lines.extend(_fee_lines(",
         ),
         "an invoice line records version 1 whatever priced it, so a paid period "
         "can no longer be checked against the document that priced it",
@@ -319,6 +319,14 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "four sails through -- one space away from blind, in the form these values "
         "are most often pasted",
     ),
+    "G9/separator-runs": (
+        "tests/test_g9_no_instrument_survives.py",
+        "sensitive.py",
+        'rf"(?<![0-9])(?:[0-9]{_SEPARATOR}{{0,3}}){{12,22}}[0-9](?![0-9])"',
+        'r"(?<![0-9])(?:[0-9][ -]?){12,22}[0-9](?![0-9])"  # PLANTED: one space or hyphen',
+        "OP-7-15 undone: only a single space or hyphen joins digit groups again, so the "
+        "same number behind two spaces, a dot or a tab is stored",
+    ),
     "G9/repository": (
         "tests/test_g9_no_instrument_survives.py",
         "money.py",
@@ -375,6 +383,29 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "reads the catalogue rather than a list of table names, so it finds this "
         "without anybody adding the table to anything",
     ),
+    "G12/cli-refuses-a-bypassing-dsn": (
+        "tests/test_g12_rls_from_migration_0001.py",
+        "cli.py",
+        source(
+            "        assert_role_cannot_bypass_rls(connection)",
+            "    except AssertionError as refusal:",
+        ),
+        source(
+            "        pass  # PLANTED: the DSN's role is never checked",
+            "    except AssertionError as refusal:",
+        ),
+        "OP-7-13 undone: a store command run with the owner's or a superuser's DSN "
+        "reads and writes across every tenant, the row policy inert for it",
+    ),
+    "G12/readme-installs-every-migration": (
+        "tests/test_g12_rls_from_migration_0001.py",
+        "README.md",
+        'psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0010_first_charges.sql\n',
+        "",
+        "the review's required change undone: the README's install step stops at 0009, "
+        "and an install that follows it has no first_charges table, so the billing run "
+        "fails",
+    ),
     "G13": (
         "tests/test_g13_a_pause_over_a_paid_period_refuses.py",
         "cycle.py",
@@ -384,15 +415,31 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "period whole, so an owner pauses an account mid-period and the module "
         "silently decides a refund nobody authorised",
     ),
+    "G13/issued-not-only-paid": (
+        "tests/test_g13_a_pause_over_a_paid_period_refuses.py",
+        "store/records.py",
+        """        "WHERE a.external_id = %s AND l.kind <> 'tax'",""",
+        """        "WHERE a.external_id = %s AND i.paid_at IS NOT NULL",  # PLANTED: paid only""",
+        "OP-7-6 undone: a pause over an issued, unpaid month stores, and the payer "
+        "still owes the full month for days the owner paused",
+    ),
+    "G13/cancellation-judged": (
+        "tests/test_g13_a_pause_over_a_paid_period_refuses.py",
+        "store/records.py",
+        "    if cancelled is not None:\n        for period in paid:",
+        "    if False:  # PLANTED: a cancellation is never judged\n        for period in paid:",
+        "OP-7-6 undone: a cancellation from a day inside an issued month stores, and the "
+        "month is still owed in full",
+    ),
     "G17": (
         "tests/test_g17_the_run_issues_once.py",
-        "migrations/0002_billing_run_payments_and_reversals.sql",
+        "migrations/0010_first_charges.sql",
         source(
             "ALTER TABLE invoices",
             "  ADD CONSTRAINT invoices_one_per_payer_per_period",
-            "  UNIQUE (tenant_id, garage_id, payer_id, period_start_day);",
+            "  UNIQUE (tenant_id, garage_id, payer_id, period_start_day, first_charge);",
         ),
-        "-- PLANTED: the one-invoice-per-period constraint is gone",
+        "-- PLANTED: the one-invoice-per-period constraint is gone (0010 dropped 0002's)",
         "the period lock from 0002 is missing from the catalogue. The behavioural "
         "tests stay green -- the reference lock from 0001 still stops the duplicate, "
         "which is what having two independent locks means -- so this is caught by "
@@ -400,11 +447,11 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
     ),
     "G17/both-locks": (
         "tests/test_g17_the_run_issues_once.py",
-        "migrations/0002_billing_run_payments_and_reversals.sql",
+        "migrations/0010_first_charges.sql",
         source(
             "ALTER TABLE invoices",
             "  ADD CONSTRAINT invoices_one_per_payer_per_period",
-            "  UNIQUE (tenant_id, garage_id, payer_id, period_start_day);",
+            "  UNIQUE (tenant_id, garage_id, payer_id, period_start_day, first_charge);",
         ),
         source(
             "-- PLANTED: BOTH locks gone -- the period lock is never added and the",
@@ -425,6 +472,103 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "the ownership rule says the run owns every period, so the two periods the "
         "first charge already billed are billed again by the next run -- a new "
         "parker charged twice for the same month",
+    ),
+    "G18/first-charge-owed-until-stored": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "entitlement_store.py",
+        "    if agreement.start_day <= day_of(at, tz) < following.end_day:",
+        "    if False:  # PLANTED: the first two periods are owed by nothing",
+        "OP-7-2 undone: an agreement whose first charge was never issued is COVERED "
+        "for both first periods without paying anything",
+    ),
+    "G18/start-day-stays": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "store/records.py",
+        "    if billed:\n        raise Refused(\n            REFUSAL_START_DAY_MOVED,",
+        "    if False:\n        raise Refused(\n            REFUSAL_START_DAY_MOVED,  # PLANTED",
+        "OP-7-3 undone: a version moves the start day after the first charge, the owned "
+        "periods move with it, and a period already paid is billed again",
+    ),
+    "G18/stored-periods-decide": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        "    if stored is not None:\n        return period.start_day in stored",
+        "    if False:  # PLANTED: start day decides\n        return period.start_day in stored",
+        "OP-7-3 undone: the run re-derives the first charge's periods from the latest "
+        "version's start day instead of the ones it was issued for",
+    ),
+    "G18/one-time-fee-carried": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "invoice.py",
+        "    if one_time_due is not None:",
+        "    if False:  # PLANTED: a one-time fee lands only on the period holding its day",
+        "OP-7-11 undone: a one-time fee added after its period was invoiced, or in a "
+        "period with no billable day, is billed nowhere",
+    ),
+    "G18/one-time-fee-once": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        "    return tuple(fee for fee in candidates if not already(fee))",
+        "    return tuple(candidates)  # PLANTED: a billed fee is billed again",
+        "OP-7-11's other half: a carried one-time fee lands on every invoice after its day",
+    ),
+    "G18/every-spot-of-the-day": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        "            and other.agreement.start_day == start_day\n",
+        "            and other.agreement.id == agreement_id  # PLANTED: one spot only\n",
+        "the owner's rule undone: a payer's second spot signed up the same day is "
+        "dropped from the first charge and never charged",
+    ),
+    "G18/late-spot-refused-by-name": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        "        if day_taken_by_a_first_charge:",
+        "        if False:  # PLANTED: a late spot is a bare constraint error",
+        "a spot added to the same payer and day after the first charge was issued "
+        "fails as a constraint error with no sentence for the owner",
+    ),
+    "G18/first-charge-own-key": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        '            "first_charge": first_charge,\n',
+        '            "first_charge": False,  # PLANTED: a first charge takes a period key\n',
+        "a first charge signed up on a billing day takes the key of the payer's period "
+        "invoice for that period, and one of the two is never issued",
+    ),
+    "G18/no-day-before-collision": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        "    day = start_day  # the first charge's own key: (payer, sign-up day, first_charge)",
+        "    day = date.fromordinal(start_day.toordinal() - (start_day == partial.start_day))"
+        "  # PLANTED",
+        "the day-before key returns: spots signed up on consecutive days, the second on a "
+        "billing day, collide and the second paying customer is refused",
+    ),
+    "G18/no-first-charge-for-past-periods": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        "    if day_of(now, zone(garage.timezone)) >= following.end_day or agreement_id in billed:",
+        "    if False:  # PLANTED: a first charge for periods long over is issued",
+        "the review's required change undone: issue-first-charge bills an old "
+        "agreement's first two periods, long settled outside the store, and the payer "
+        "owes them again",
+    ),
+    "G18/period-read-back-ignores-first-charges": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        '        "AND NOT first_charge",\n        (garage_uuid, payer_uuid, start_day),',
+        '        "",  # PLANTED\n        (garage_uuid, payer_uuid, start_day),',
+        "the run's read-back counts a first charge on a billing day as that period's "
+        "invoice, and a period invoice stopped by another constraint reads ALREADY_ISSUED",
+    ),
+    "G18/racing-spot-is-already-issued": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        '        if name == "first_charges_one_per_agreement" or mine_now:',
+        '        if name == "first_charges_one_per_agreement":  # PLANTED',
+        "two same-day spots issued at once: the slower is told to move its start day "
+        "though its spot is already on the issued invoice",
     ),
     "G19/reopen": (
         "tests/test_g19_paid_is_derived.py",
@@ -504,6 +648,30 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "the store-backed call never reads a block, so the owner's decision to "
         "block an agreement reaches no barrier",
     ),
+    "G21/agreement-grace-bound": (
+        "tests/test_g21_covered_from_the_store.py",
+        "entitlement_store.py",
+        "               AND (e.kind <> 'extend_grace'",
+        "               AND (true  -- PLANTED: an agreement's extension never lapses",
+        "OP-7-9 undone: a grace extension given on the agreement for one invoice "
+        "extends every invoice after it, and several add up for ever",
+    ),
+    "G18/grace-counts-while-first-charge-owed": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "entitlement_store.py",
+        "                        (SELECT min(s.start_day)::timestamptz FROM agreements s",
+        "                        (SELECT NULL::timestamptz FROM agreements s  -- PLANTED",
+        "an owner's grace extension for a new parker counts for nothing until the first "
+        "charge is issued, and the parker reads NOT COVERED inside the days given",
+    ),
+    "G21/grace-from-the-issue": (
+        "tests/test_g21_covered_from_the_store.py",
+        "entitlement_store.py",
+        '        "SELECT min(greatest(due_at, issued_at)) FROM invoices "',
+        '        "SELECT min(due_at) FROM invoices "  # PLANTED: grace from the period start',
+        "OP-7-10 undone: an invoice issued after its period began is past grace the "
+        "moment it is written, and the car reads NOT COVERED before anyone was billed",
+    ),
     "G22": (
         "tests/test_g22_charge_attempts_are_the_truth.py",
         "charging.py",
@@ -551,10 +719,10 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
     "G25": (
         "tests/test_g25_exceptions_follow_the_agreement_identity.py",
         "entitlement_store.py",
-        "        WHERE a.external_id = %s",
+        "        WHERE (a.external_id = %s",
         source(
-            "        WHERE e.agreement_id = (SELECT id FROM agreements WHERE external_id = %s",
-            "                                ORDER BY version DESC LIMIT 1)  -- PLANTED",
+            "        WHERE (e.agreement_id = (SELECT id FROM agreements WHERE external_id = %s",
+            "                                 ORDER BY version DESC LIMIT 1)  -- PLANTED",
         ),
         "the owner's exceptions are read from ONE version's row again, so a block "
         "lifts and a grace extension vanishes on the day a price change stores the "
@@ -598,6 +766,34 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "tenant A's invoice: the policy checks payments.tenant_id and the "
         "foreign-key check runs past row-level security",
     ),
+    "G28/agreement-keys": (
+        "tests/test_g28_money_history_points_into_its_own_tenant.py",
+        "migrations/0009_agreement_payer_and_invoice_references_in_tenant.sql",
+        source(
+            "ALTER TABLE owner_exceptions",
+            "  ADD CONSTRAINT owner_exceptions_agreement_in_tenant",
+            "    FOREIGN KEY (tenant_id, agreement_id) REFERENCES agreements (tenant_id, id) "
+            "ON DELETE CASCADE,",
+            "  ADD CONSTRAINT owner_exceptions_invoice_in_tenant",
+            "    FOREIGN KEY (tenant_id, invoice_id) REFERENCES invoices (tenant_id, id) "
+            "ON DELETE CASCADE;",
+        ),
+        "-- PLANTED: the owner's exceptions keep only 0001's single-column keys",
+        "OP-7-12 undone: a raw INSERT in tenant B hangs an owner's block or grace "
+        "extension on tenant A's agreement or invoice, the key checked past the policy",
+    ),
+    "G28/exception-reads-the-agreement": (
+        "tests/test_g28_money_history_points_into_its_own_tenant.py",
+        "exceptions_store.py",
+        source(
+            "        if cursor.fetchone() is None:",
+            "            connection.rollback()",
+            '            raise LookupError(f"no agreement {agreement_uuid} in this tenant.")',
+        ),
+        "        cursor.fetchone()  # PLANTED: the agreement's visibility is not checked",
+        "OP-7-12 undone: record_agreement_exception writes against an agreement uuid "
+        "the tenant cannot see; only the database key stands in the way",
+    ),
     "G29/reason": (
         "tests/test_g29_reversals_and_card_fields_are_refused_by_name.py",
         "payments.py",
@@ -621,6 +817,26 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "-- PLANTED: the revoke is gone; 0001's grant of everything stands",
         "the invoice's lines and the owner's decisions can be edited and deleted by "
         "the application role again, so 'a paid period is paid' rests on code alone",
+    ),
+    "G20/invoice-column-grant": (
+        "tests/test_g20_money_history_is_append_only.py",
+        "migrations/0008_invoice_paid_at_only_and_versions_append_only.sql",
+        "REVOKE UPDATE ON invoices FROM monthly_billing_app;",
+        "-- PLANTED: 0002's table-wide UPDATE on invoices stands",
+        "OP-7-14 undone: the application role can rewrite an issued invoice's payer, "
+        "period, due instant or reference, not only its derived paid_at",
+    ),
+    "G20/versions": (
+        "tests/test_g20_money_history_is_append_only.py",
+        "migrations/0008_invoice_paid_at_only_and_versions_append_only.sql",
+        source(
+            "REVOKE UPDATE, DELETE ON",
+            "  agreements, agreement_vehicles, agreement_pauses, agreement_fees, mandates",
+            "FROM monthly_billing_app;",
+        ),
+        "-- PLANTED: a stored version stays editable",
+        "OP-7-14 undone: a stored agreement version -- the price an invoice line names, "
+        "the terms a mandate was agreed in -- can be edited or deleted in place",
     ),
     "G21/prose": (
         "tests/test_g21_covered_from_the_store.py",
@@ -944,6 +1160,46 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "of the order it was recorded, so a worker whose clock is behind the "
         "operator's has its decline reset by a method change recorded BEFORE it "
         "asked -- the count depends on a --at somebody typed",
+    ),
+    "G31/reask-rereads-the-balance": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        "                if outstanding <= 0 or outstanding < pending.amount_minor:",
+        "                if False:  # PLANTED: the re-ask never re-reads what is owed",
+        "OP-7-5 undone: a cheque pays the invoice between an unknown answer and the "
+        "re-ask, and the re-ask still requests the full reserved amount",
+    ),
+    "G31/reask-key-lifetime": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        "                if pending.key_expired:",
+        "                if False:  # PLANTED: a key is re-asked however old it is",
+        "OP-7-7 undone: an unknown attempt is re-asked under a key the processor may "
+        "have forgotten, which the processor treats as a new charge",
+    ),
+    "G31/resolve-waits-for-in-flight": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        "    if too_soon:",
+        "    if False:  # PLANTED: an in-flight attempt is resolved the moment it is asked",
+        "OP-7-8 undone: the operator closes an attempt whose request may still be at "
+        "the processor, and a typed decline frees a fresh key while it charges",
+    ),
+    "G31/resolve-needs-a-confirmed-no-charge": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "charging.py",
+        "    if found is not False:",
+        "    if False:  # PLANTED: a decline or an error needs no processor lookup",
+        "OP-7-8 undone: a decline or an error is recorded with no processor evidence, "
+        "and the next charge's fresh key charges a payer the processor already charged",
+    ),
+    "G31/blank-evidence-refused": (
+        "tests/test_g31_a_charge_is_a_reservation_first.py",
+        "cli.py",
+        "    if args.no_charge_confirmed_by and args.no_charge_confirmed_by.strip():",
+        "    if args.no_charge_confirmed_by:  # PLANTED: a blank answer is evidence",
+        "a decline recorded with --no-charge-confirmed-by of a single space: no "
+        "evidence at all, and the next charge mints a fresh key",
     ),
     "G31/index-by-name": (
         "tests/test_g31_a_charge_is_a_reservation_first.py",
@@ -2809,6 +3065,14 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "    pauses = tuple(sorted(cursor.fetchall()))",
         "    pauses = ()  # PLANTED: the version's pauses are not read",
         "the register carries no pause, so a lane covers a paused holder",
+    ),
+    "G63/hours-make-the-lane-ask": (
+        "tests/test_g63_the_register_carries_the_coverage_days.py",
+        "store/records.py",
+        '        "lane_must_ask": access_hours is not None,',
+        '        "lane_must_ask": False,  # PLANTED: the days alone decide an hour-limited stay',
+        "OP-7-1 undone: a register reader covers a 07:00-19:00 parker's overnight stay "
+        "that covered-in-store refuses, and the barrier opens free",
     ),
     "G64": (
         "tests/test_g64_a_zero_invoice_is_paid_at_issue.py",

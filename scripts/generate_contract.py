@@ -477,25 +477,42 @@ def block_grants() -> str:
             """
         )
         rows = cursor.fetchall()
+        # COLUMN grants too: 0008 left `invoices` an UPDATE of `paid_at` alone,
+        # which the table-level read cannot see -- and without it the sentence
+        # below named nobody and read as a garble.
+        cursor.execute(
+            """
+            SELECT table_name, string_agg(column_name, ', ' ORDER BY column_name)
+            FROM information_schema.column_privileges
+            WHERE grantee = 'monthly_billing_app' AND table_schema = 'public'
+              AND privilege_type = 'UPDATE'
+            GROUP BY table_name
+            """
+        )
+        column_updates = dict(cursor.fetchall())
     owner.close()
     lines = ["| table | the application role may |", "|---|---|"]
+    shown = []
     for name, privileges in rows:
+        columns = column_updates.get(name)
+        if columns and "UPDATE" not in privileges.split(", "):
+            privileges = f"{privileges}, UPDATE ({columns})"
+        shown.append((name, privileges))
         lines.append(f"| `{name}` | {privileges} |")
-    append_only = [name for name, p in rows if p == "INSERT, SELECT"]
-    no_delete = [name for name, p in rows if p == "INSERT, SELECT, UPDATE"]
+    append_only = [name for name, p in shown if p == "INSERT, SELECT"]
+    one_column = [(name, p) for name, p in shown if "UPDATE (" in p and "DELETE" not in p]
     lines += [
         "",
         f"{len(rows)} tables. {len(append_only)} are append-only -- "
         + ", ".join(f"`{n}`" for n in append_only)
-        + " -- and "
-        + ", ".join(f"`{n}`" for n in no_delete)
-        + (" keeps" if len(no_delete) == 1 else " keep")
-        + " UPDATE and "
-        + ("loses" if len(no_delete) == 1 else "lose")
-        + " DELETE"
-        + ": `paid_at` is derived by the application after every payment, reversal and "
-        "adjustment, and that is the one column it writes. The rest carry the DML the "
-        "application needs to store documents.",
+        + "."
+        + "".join(
+            f" `{name}` takes an UPDATE of `{p.split('UPDATE (')[1].rstrip(')')}` alone and "
+            "no DELETE: it is derived by the application after every payment, reversal and "
+            "adjustment, and it is the one column the application writes there."
+            for name, p in one_column
+        )
+        + " The rest carry the DML the application needs to store documents.",
     ]
     return "\n".join(lines)
 
