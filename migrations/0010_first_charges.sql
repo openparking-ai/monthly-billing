@@ -1,5 +1,6 @@
 -- 0010 — the first charge is a stored invoice, and the periods it owns are
--- stored with it, per agreement.
+-- stored with it, per agreement: one invoice per payer and sign-up day,
+-- collecting for every spot that payer signed up that day.
 --
 -- Run as the database OWNER, after 0009. The application never connects as
 -- this role. 0001–0009 are not edited. A new table only: no existing row is
@@ -18,9 +19,10 @@
 -- Now `issue-first-charge` writes the first charge as an ordinary invoice --
 -- through the run's own path: priced, taxed once at its due instant, the
 -- invoice's one-per-payer-per-day lock, paid derived -- and, in the same
--- transaction, one row here naming the agreement, the invoice and the two
--- periods it owns. The run reads the owned periods from this row. One first
--- charge per agreement, by constraint.
+-- transaction, one row here per agreement on it, naming the agreement, the
+-- invoice and the two periods it owns. The run reads the owned periods from
+-- this row. One first charge per agreement, by constraint; several agreements
+-- -- several spots one payer signed up on one day -- may share one invoice.
 --
 -- THE INVOICE'S DAY. `invoices.period_start_day` is half of the one-invoice-
 -- per-payer-per-period lock (0002), and the run keys its invoices on period
@@ -47,7 +49,7 @@ CREATE TABLE first_charges (
 
   CONSTRAINT first_charges_one_per_agreement
     UNIQUE (tenant_id, garage_id, agreement_external_id),
-  CONSTRAINT first_charges_one_per_invoice UNIQUE (tenant_id, invoice_id),
+  CONSTRAINT first_charges_one_per_version UNIQUE (tenant_id, agreement_id),
   CONSTRAINT first_charges_periods_in_order CHECK (
     first_period_start_day < second_period_start_day
     AND second_period_start_day < second_period_end_day
@@ -61,6 +63,7 @@ CREATE TABLE first_charges (
 );
 
 CREATE INDEX first_charges_tenant_id_idx ON first_charges (tenant_id);
+CREATE INDEX first_charges_invoice_idx   ON first_charges (tenant_id, invoice_id);
 ALTER TABLE first_charges ENABLE ROW LEVEL SECURITY;
 ALTER TABLE first_charges FORCE  ROW LEVEL SECURITY;
 CREATE POLICY first_charges_tenant_isolation ON first_charges

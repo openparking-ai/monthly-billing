@@ -503,6 +503,22 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "    return tuple(candidates)  # PLANTED: a billed fee is billed again",
         "OP-7-11's other half: a carried one-time fee lands on every invoice after its day",
     ),
+    "G18/every-spot-of-the-day": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        "            and other.agreement.start_day == start_day\n",
+        "            and other.agreement.id == agreement_id  # PLANTED: one spot only\n",
+        "the owner's rule undone: a payer's second spot signed up the same day is "
+        "dropped from the first charge and never charged",
+    ),
+    "G18/late-spot-refused-by-name": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        "        if day_taken_by_a_first_charge:",
+        "        if False:  # PLANTED: a late spot is a bare constraint error",
+        "a spot added to the same payer and day after the first charge was issued "
+        "fails as a constraint error with no sentence for the owner",
+    ),
     "G19/reopen": (
         "tests/test_g19_paid_is_derived.py",
         "payments.py",

@@ -273,3 +273,88 @@ def test_a_one_time_fee_inside_the_first_charge_is_the_first_charges_alone(app, 
         run_billing(app, tenant_id, GARAGE.id, day, now=_at(day.replace(day=1)))
     labels = [label for _, label, _ in _fee_lines(app, tenant_id)]
     assert labels == ["Signup (one-time)"], labels
+
+
+def _second_spot(**overrides):
+    return simple_agreement(id="ag-0002", start_day=START, vehicles=("CAR777",), **overrides)
+
+
+@pytest.mark.guarantee("G18")
+def test_two_spots_one_payer_one_day_are_one_first_charge_invoice(app, tenant_id):
+    """The owner's rule for a payer signing up several spots on one day: the
+    first charge is paid on the sign-up day and collects for every spot. One
+    invoice for the payer and the day, each agreement's two lines on it, each
+    agreement its own first_charges row naming that invoice; paid once, both
+    covered. Before, the second spot's first charge collided with the first
+    on the invoice lock and was never issued."""
+    seed(app, tenant_id, GARAGE, (simple_agreement(start_day=START), _second_spot()))
+    line = issue_first_charge(app, tenant_id, "ag-0001", now=_at(START, 8))
+    assert line.outcome is RunOutcome.ISSUED, line
+    assert query(app, tenant_id, "SELECT count(*) FROM invoices") == [(1,)]
+    rows = query(app, tenant_id,
+                 "SELECT f.agreement_external_id, i.reference FROM first_charges f "
+                 "JOIN invoices i ON i.id = f.invoice_id ORDER BY 1")
+    assert [a for a, _ in rows] == ["ag-0001", "ag-0002"]
+    assert len({r for _, r in rows}) == 1
+    per_agreement = query(
+        app, tenant_id,
+        "SELECT a.external_id, count(*) FROM invoice_lines l "
+        "JOIN agreements a ON a.id = l.agreement_id WHERE l.kind <> 'tax' "
+        "GROUP BY 1 ORDER BY 1")
+    assert per_agreement == [("ag-0001", 2), ("ag-0002", 2)]
+    assert line.total_minor == 2 * issue_total_for_one(app)
+    assert issue_first_charge(app, tenant_id, "ag-0002", now=_at(START, 9)).outcome is (
+        RunOutcome.ALREADY_ISSUED)
+    assert not covered_from_store(app, tenant_id, GARAGE.id, "CAR777",
+                                  _at(date(2026, 6, 16))).covered
+    record_payment(app, tenant_id, line.reference, PaymentMethod.CHEQUE, line.total_minor,
+                   _at(date(2026, 6, 17)), recorded_by="operator")
+    for car in ("CAR001", "CAR777"):
+        assert covered_from_store(app, tenant_id, GARAGE.id, car, _at(date(2026, 6, 18))).covered
+
+
+def issue_total_for_one(app) -> int:
+    """One spot's first charge, priced from the documents, untaxed (NO_TAX)."""
+    from monthly_billing.invoice import first_charge
+
+    return first_charge(GARAGE, simple_agreement(start_day=START)).total_minor
+
+
+@pytest.mark.guarantee("G18")
+def test_a_spot_added_on_the_same_day_after_the_first_charge_is_refused_by_name(
+    app, tenant_id
+):
+    """An issued invoice is never added to (its subtotal and tax are fixed at
+    issue), so a third spot stored for the same payer and day after the first
+    charge was issued is refused by name, writing nothing -- never silently
+    left uncharged -- and the sentence says what the owner does: start it the
+    next day, which is its own first charge."""
+    from monthly_billing.findings import REFUSAL_FIRST_CHARGE_DAY_ISSUED
+
+    seeded = seed(app, tenant_id, GARAGE, (simple_agreement(start_day=START), _second_spot()))
+    issue_first_charge(app, tenant_id, "ag-0001", now=_at(START, 8))
+    _store_version(app, tenant_id, seeded, simple_agreement(
+        id="ag-0003", start_day=START, vehicles=("CAR888",)))
+    late = issue_first_charge(app, tenant_id, "ag-0003", now=_at(START, 15))
+    assert late.outcome is RunOutcome.REFUSED
+    assert REFUSAL_FIRST_CHARGE_DAY_ISSUED in late.detail
+    assert query(app, tenant_id, "SELECT count(*) FROM invoices") == [(1,)]
+    assert query(app, tenant_id, "SELECT count(*) FROM first_charges") == [(2,)]
+    _store_version(app, tenant_id, seeded, simple_agreement(
+        id="ag-0003", version=2, start_day=date(2026, 6, 11), vehicles=("CAR888",)))
+    nextday = issue_first_charge(app, tenant_id, "ag-0003", now=_at(date(2026, 6, 11), 8))
+    assert nextday.outcome is RunOutcome.ISSUED, nextday
+
+
+@pytest.mark.guarantee("G18")
+def test_another_payer_on_the_same_day_has_its_own_first_charge(app, tenant_id):
+    seed(app, tenant_id, GARAGE, (
+        simple_agreement(start_day=START),
+        _second_spot(payer_id="payer-other"),
+    ))
+    first = issue_first_charge(app, tenant_id, "ag-0001", now=_at(START, 8))
+    other = issue_first_charge(app, tenant_id, "ag-0002", now=_at(START, 8))
+    assert first.outcome is other.outcome is RunOutcome.ISSUED
+    assert first.reference != other.reference
+    assert query(app, tenant_id,
+                 "SELECT count(DISTINCT invoice_id) FROM first_charges") == [(2,)]

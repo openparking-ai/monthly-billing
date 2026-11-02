@@ -85,6 +85,7 @@ REFUSAL_REASK_EXCEEDS_BALANCE = "REFUSAL_REASK_EXCEEDS_BALANCE"
 REFUSAL_REASK_KEY_EXPIRED = "REFUSAL_REASK_KEY_EXPIRED"
 REFUSAL_RESOLUTION_TOO_SOON = "REFUSAL_RESOLUTION_TOO_SOON"
 REFUSAL_START_DAY_MOVED = "REFUSAL_START_DAY_MOVED"
+REFUSAL_FIRST_CHARGE_DAY_ISSUED = "REFUSAL_FIRST_CHARGE_DAY_ISSUED"
 REFUSAL_RESOLUTION_NEEDS_EVIDENCE = "REFUSAL_RESOLUTION_NEEDS_EVIDENCE"
 
 REFUSALS: dict[str, str] = {
@@ -223,6 +224,14 @@ REFUSALS: dict[str, str] = {
         "first charge, and a period already paid would be billed again. Keep the "
         "start day; a different start is a different agreement, or an owner's "
         "exception with an amount."
+    ),
+    REFUSAL_FIRST_CHARGE_DAY_ISSUED: (
+        "This payer's first-charge invoice for this agreement's start day was "
+        "already issued, for the spots stored before it, and an issued invoice is "
+        "never added to -- its lines, subtotal and tax are fixed at issue. Nothing "
+        "is written. Store the new spot with the next day as its start day and "
+        "issue its own first charge, or the owner records an exception with an "
+        "amount on the issued invoice."
     ),
     REFUSAL_ATTEMPT_ALREADY_RESOLVED: (
         "This attempt already has an outcome recorded. What the processor said is "

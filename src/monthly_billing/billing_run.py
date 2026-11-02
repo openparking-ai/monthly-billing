@@ -77,7 +77,7 @@ from typing import Any
 from .agreement import Agreement, InvalidAgreement
 from .currency import UnpriceableCurrency
 from .cycle import BillingPeriod, next_period_after, period_containing
-from .findings import Refused
+from .findings import REFUSAL_FIRST_CHARGE_DAY_ISSUED, Refused
 from .garage import Garage
 from .invoice import Invoice, invoice_for_period
 from .money import NotMinorUnits
@@ -287,13 +287,21 @@ def issue_first_charge(
     *,
     now: datetime,
 ) -> RunLine:
-    """THE FIRST CHARGE, STORED (OP-7-2): the two lines ``first_charge``
-    prices, written as an invoice through the run's own path -- taxed once at
-    ``first_charge_due_at`` by the engine, under the invoice's one-per-payer-
-    per-day lock, ``paid_at`` derived -- and, in the same transaction, the
-    ``first_charges`` row naming the agreement, the invoice and the two periods
-    it owns. One per agreement, by constraint: a second issue is
-    ALREADY_ISSUED. The invoice is then paid, charged and judged like any other.
+    """THE FIRST CHARGE, STORED (OP-7-2): written as an invoice through the
+    run's own path -- taxed once at ``first_charge_due_at`` by the engine,
+    under the invoice's one-per-payer-per-day lock, ``paid_at`` derived -- and,
+    in the same transaction, one ``first_charges`` row per agreement on it,
+    naming the invoice and the two periods that agreement owns.
+
+    **ONE INVOICE PER PAYER AND SIGN-UP DAY, FOR EVERY SPOT.** The owner's
+    rule: the first charge is paid on the sign-up day and collects for every
+    spot signed up. So the invoice carries every agreement of this payer at
+    this home that starts on the same day and has no first charge yet --
+    ``first_charge``'s two lines for each, kept separate -- and one
+    ``first_charges`` row for each. Asked again for any of them it is
+    ALREADY_ISSUED. A spot stored for the same payer and day AFTER that
+    invoice was issued is refused by name (``REFUSAL_FIRST_CHARGE_DAY_ISSUED``),
+    writing nothing: an issued invoice is never added to.
     """
     import psycopg  # the store extra; the engine never imports this module
 
@@ -305,28 +313,40 @@ def issue_first_charge(
         home_uuid = latest_version_home(cursor, tenant_id, agreement_id)
         stored = load_garage_by_uuid(cursor, home_uuid)
         garage = stored.garage
-        items = [
-            item for item in load_agreements_at_garage(cursor, home_uuid)
-            if item.agreement.id == agreement_id
-        ]
-        already = stored_first_charges(cursor, home_uuid).get(agreement_id)
+        at_home = load_agreements_at_garage(cursor, home_uuid)
+        already = stored_first_charges(cursor, home_uuid)
     connection.rollback()
-    if not items:
+    asked = [item for item in at_home if item.agreement.id == agreement_id]
+    if not asked:
         raise GarageNotFound(f"agreement {agreement_id!r} is not billed at its home garage.")
-    (item,) = items
-    agreement = item.agreement
-    payer_id = agreement.payer_id
-    if already is not None:
+    (item,) = asked
+    payer_id = item.agreement.payer_id
+    if agreement_id in already:
         return RunLine(payer_id, RunOutcome.ALREADY_ISSUED,
                        "the first charge of this agreement was already issued")
-    partial = period_containing(garage, agreement.start_day)
-    following = next_period_after(garage, partial)
-    invoice = replace(
-        first_charge(garage, agreement),
-        issued_for_period_start=first_charge_day(garage, agreement),
+    start_day = item.agreement.start_day
+    # Every spot of this payer signed up on this day, not yet first-charged.
+    batch = sorted(
+        (
+            other for other in at_home
+            if other.payer_uuid == item.payer_uuid
+            and other.agreement.start_day == start_day
+            and other.agreement.id not in already
+        ),
+        key=lambda other: other.agreement.id,
     )
-    reference = f"{garage.id}/first-charge/{agreement.id}"
-    due_at = first_charge_due_at(garage, agreement)
+    partial = period_containing(garage, start_day)
+    following = next_period_after(garage, partial)
+    day = first_charge_day(garage, item.agreement)
+    invoice = replace(
+        first_charge(garage, item.agreement),
+        issued_for_period_start=day,
+        lines=tuple(
+            line for other in batch for line in first_charge(garage, other.agreement).lines
+        ),
+    )
+    reference = f"{garage.id}/first-charge/{payer_id}/{start_day.isoformat()}"
+    due_at = first_charge_due_at(garage, item.agreement)
     try:
         with tenant(connection, tenant_id) as cursor:
             taxed = tax_an_invoice(
@@ -335,23 +355,25 @@ def issue_first_charge(
             invoice_uuid = _persist(
                 cursor, tenant_id, taxed.invoice, position=taxed.position,
                 reference=reference, garage_uuid=home_uuid, payer_uuid=item.payer_uuid,
-                agreement_uuids={agreement.id: item.uuid}, due_at=due_at, now=now,
+                agreement_uuids={other.agreement.id: other.uuid for other in batch},
+                due_at=due_at, now=now,
             )
-            guarded_insert(
-                cursor,
-                "first_charges",
-                {
-                    "tenant_id": tenant_id,
-                    "garage_id": home_uuid,
-                    "agreement_external_id": agreement.id,
-                    "agreement_id": item.uuid,
-                    "invoice_id": invoice_uuid,
-                    "first_period_start_day": partial.start_day,
-                    "second_period_start_day": following.start_day,
-                    "second_period_end_day": following.end_day,
-                },
-            )
-            cursor.fetchone()
+            for other in batch:
+                guarded_insert(
+                    cursor,
+                    "first_charges",
+                    {
+                        "tenant_id": tenant_id,
+                        "garage_id": home_uuid,
+                        "agreement_external_id": other.agreement.id,
+                        "agreement_id": other.uuid,
+                        "invoice_id": invoice_uuid,
+                        "first_period_start_day": partial.start_day,
+                        "second_period_start_day": following.start_day,
+                        "second_period_end_day": following.end_day,
+                    },
+                )
+                cursor.fetchone()
         connection.commit()
     except (Refused, UnpriceableCurrency, InstrumentLike) as refusal:
         connection.rollback()
@@ -363,18 +385,34 @@ def issue_first_charge(
             return RunLine(payer_id, RunOutcome.ALREADY_ISSUED,
                            "the first charge of this agreement was already issued",
                            reference=reference)
+        with tenant(connection, tenant_id) as cursor:
+            cursor.execute(
+                "SELECT 1 FROM invoices i JOIN first_charges f ON f.invoice_id = i.id "
+                "WHERE i.garage_id = %s AND i.payer_id = %s AND i.period_start_day = %s",
+                (home_uuid, item.payer_uuid, day),
+            )
+            day_taken_by_a_first_charge = cursor.fetchone() is not None
+        connection.rollback()
+        if day_taken_by_a_first_charge:
+            refusal = Refused(
+                REFUSAL_FIRST_CHARGE_DAY_ISSUED,
+                f"agreement {agreement_id!r} starts {start_day}; payer {payer_id!r} already "
+                f"has its first-charge invoice keyed on {day}.",
+            )
+            return RunLine(payer_id, RunOutcome.REFUSED, str(refusal), reference=reference)
         return RunLine(
             payer_id, RunOutcome.CONSTRAINT_VIOLATED,
             f"the database refused the first charge on {name!r}: the payer already has "
-            f"an invoice keyed on {invoice.issued_for_period_start}; nothing issued",
+            f"an invoice keyed on {day}; nothing issued",
             reference=reference,
         )
     issued = taxed.invoice
     return RunLine(
         payer_id, RunOutcome.ISSUED,
-        f"first charge: {len(issued.lines)} line(s), subtotal {issued.subtotal_minor}, tax "
-        f"{issued.total_minor - issued.subtotal_minor}, total {issued.total_minor} "
-        f"{issued.currency} minor",
+        f"first charge for {len(batch)} agreement(s) "
+        f"({', '.join(other.agreement.id for other in batch)}): {len(issued.lines)} line(s), "
+        f"subtotal {issued.subtotal_minor}, tax {issued.total_minor - issued.subtotal_minor}, "
+        f"total {issued.total_minor} {issued.currency} minor",
         reference=reference, total_minor=issued.total_minor,
     )
 
