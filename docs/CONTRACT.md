@@ -540,7 +540,7 @@ may do to each table, read from the catalogue of a database migrated from
 | `garage_tax_sets` | INSERT, SELECT |
 | `garages` | DELETE, INSERT, SELECT, UPDATE |
 | `invoice_lines` | INSERT, SELECT |
-| `invoices` | INSERT, SELECT |
+| `invoices` | INSERT, SELECT, UPDATE (paid_at) |
 | `mandates` | INSERT, SELECT |
 | `owner_exceptions` | INSERT, SELECT |
 | `payers` | DELETE, INSERT, SELECT, UPDATE |
@@ -549,7 +549,7 @@ may do to each table, read from the catalogue of a database migrated from
 | `tenants` | DELETE, INSERT, SELECT, UPDATE |
 | `vehicle_registrations` | DELETE, INSERT, SELECT, UPDATE |
 
-18 tables. 14 are append-only -- `agreement_fees`, `agreement_garages`, `agreement_pauses`, `agreement_vehicles`, `agreements`, `charge_attempts`, `first_charges`, `garage_tax_sets`, `invoice_lines`, `invoices`, `mandates`, `owner_exceptions`, `payment_reversals`, `payments` -- and  keep UPDATE and lose DELETE: `paid_at` is derived by the application after every payment, reversal and adjustment, and that is the one column it writes. The rest carry the DML the application needs to store documents.
+18 tables. 13 are append-only -- `agreement_fees`, `agreement_garages`, `agreement_pauses`, `agreement_vehicles`, `agreements`, `charge_attempts`, `first_charges`, `garage_tax_sets`, `invoice_lines`, `mandates`, `owner_exceptions`, `payment_reversals`, `payments`. `invoices` takes an UPDATE of `paid_at` alone and no DELETE: it is derived by the application after every payment, reversal and adjustment, and it is the one column the application writes there. The rest carry the DML the application needs to store documents.
 <!-- END:grants -->
 
 The charge log is the truth for retries, in the order it was recorded -- the
