@@ -192,6 +192,7 @@ psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0006_tax_sets_and_invoice_subtotal.
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0007_identity_folds_o_and_i.sql
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0008_invoice_paid_at_only_and_versions_append_only.sql
 psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0009_agreement_payer_and_invoice_references_in_tenant.sql
+psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0010_first_charges.sql
 MONTHLY_BILLING_APP_PASSWORD=... python scripts/ensure-app-role.py "$DSN"
 ```
 

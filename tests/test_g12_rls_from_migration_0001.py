@@ -460,3 +460,15 @@ def test_the_install_step_refuses_to_run_without_a_password_and_never_prints_one
     run = _ensure_app_role(nowhere, password)
     assert run.returncode != 0
     assert password not in run.stdout and password not in run.stderr, (run.stdout, run.stderr)
+
+
+@pytest.mark.guarantee("G12")
+def test_the_readme_install_step_applies_every_migration_in_order():
+    """The review found the README's install list stopping at 0009: an install
+    that followed it had no first_charges table, and run_billing itself failed.
+    The list is read from the README and compared with migrations/, in order."""
+    import re
+
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    listed = re.findall(r'psql -v ON_ERROR_STOP=1 "\$DSN" -f migrations/(\S+\.sql)', readme)
+    assert listed == sorted(path.name for path in MIGRATIONS.glob("*.sql"))

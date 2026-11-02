@@ -397,6 +397,15 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "OP-7-13 undone: a store command run with the owner's or a superuser's DSN "
         "reads and writes across every tenant, the row policy inert for it",
     ),
+    "G12/readme-installs-every-migration": (
+        "tests/test_g12_rls_from_migration_0001.py",
+        "README.md",
+        'psql -v ON_ERROR_STOP=1 "$DSN" -f migrations/0010_first_charges.sql\n',
+        "",
+        "the review's required change undone: the README's install step stops at 0009, "
+        "and an install that follows it has no first_charges table, so the billing run "
+        "fails",
+    ),
     "G13": (
         "tests/test_g13_a_pause_over_a_paid_period_refuses.py",
         "cycle.py",
