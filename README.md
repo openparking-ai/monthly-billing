@@ -44,7 +44,9 @@ its start day and the next one -- as an invoice, paid and charged like any
 other, with the two periods it owns recorded beside it; the run never bills
 them. It is one invoice per payer and sign-up day, collecting for every spot
 the payer signed up that day; a spot stored for that payer and day after the
-invoice was issued is refused by name, and starts the next day instead. Until it is issued, the agreement's days in those two periods are owed
+invoice was issued is refused by name, and is started on a later day the
+payer has no first charge on. A first charge has its own invoice key, so it
+never collides with the payer's period invoice or another day's first charge. Until it is issued, the agreement's days in those two periods are owed
 from its start day: covered through grace, not covered after it.
 
 Nothing wakes itself up: the run is a command the operator's platform calls on

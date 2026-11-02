@@ -229,9 +229,10 @@ REFUSALS: dict[str, str] = {
         "This payer's first-charge invoice for this agreement's start day was "
         "already issued, for the spots stored before it, and an issued invoice is "
         "never added to -- its lines, subtotal and tax are fixed at issue. Nothing "
-        "is written. Store the new spot with the next day as its start day and "
-        "issue its own first charge, or the owner records an exception with an "
-        "amount on the issued invoice."
+        "is written. Store the new spot with a later start day on which this payer "
+        "has no first-charge invoice yet -- each sign-up day is its own first "
+        "charge -- and issue that, or the owner records an exception with an amount "
+        "on the issued invoice."
     ),
     REFUSAL_ATTEMPT_ALREADY_RESOLVED: (
         "This attempt already has an outcome recorded. What the processor said is "

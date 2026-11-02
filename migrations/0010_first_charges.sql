@@ -3,8 +3,11 @@
 -- collecting for every spot that payer signed up that day.
 --
 -- Run as the database OWNER, after 0009. The application never connects as
--- this role. 0001–0009 are not edited. A new table only: no existing row is
--- read or changed, so this is safe on a populated store.
+-- this role. 0001–0009 are not edited. A new table, a new column with a
+-- constant default (no rewrite), and the period lock widened by that column:
+-- no existing row is changed, and the widened lock admits every row the old
+-- one did, so this is safe on a populated store. Rebuilding the lock's index
+-- holds a lock on `invoices` for the length of the build.
 --
 -- WHY. The first charge -- the period containing the agreement's start day
 -- and the one after it -- was computed from documents and stored nowhere, and
@@ -24,16 +27,30 @@
 -- this row. One first charge per agreement, by constraint; several agreements
 -- -- several spots one payer signed up on one day -- may share one invoice.
 --
--- THE INVOICE'S DAY. `invoices.period_start_day` is half of the one-invoice-
--- per-payer-per-period lock (0002), and the run keys its invoices on period
--- start days. A first charge is keyed on the agreement's start day, or on the
--- day before it when the agreement starts ON a period's first day -- a day
--- that is never a period's first day, so a first charge never takes the key
--- of the payer's own period invoice.
+-- THE FIRST CHARGE HAS ITS OWN KEY. `invoices.period_start_day` is half of
+-- the one-invoice-per-payer-per-period lock (0002), and the run keys its
+-- period invoices on period start days. A first charge is keyed on its
+-- sign-up day, so it would share a key with the payer's period invoice when
+-- the sign-up day is a billing day, and the day-before workaround made two
+-- first charges of one payer on consecutive days (the second on a billing
+-- day) share one. So invoices gain `first_charge` (false on every existing
+-- row) and the lock becomes one invoice per payer, per period, PER KIND:
+-- period invoices are still one per payer per period, first charges are one
+-- per payer per sign-up day, and the two never collide. The lock keeps its
+-- name, so the run's ALREADY_ISSUED reading of it is unchanged. Widening a
+-- UNIQUE cannot fail on rows the narrower one already admitted. The column is
+-- set at issue and never changes: 0008 grants UPDATE on `paid_at` alone.
 --
 -- APPEND-ONLY BY GRANT: SELECT and INSERT.
 
 BEGIN;
+
+ALTER TABLE invoices ADD COLUMN first_charge boolean NOT NULL DEFAULT false;
+
+ALTER TABLE invoices DROP CONSTRAINT invoices_one_per_payer_per_period;
+ALTER TABLE invoices
+  ADD CONSTRAINT invoices_one_per_payer_per_period
+  UNIQUE (tenant_id, garage_id, payer_id, period_start_day, first_charge);
 
 CREATE TABLE first_charges (
   id                       uuid        PRIMARY KEY DEFAULT gen_random_uuid(),

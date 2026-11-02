@@ -70,7 +70,7 @@ it. Any other total is unpaid at issue and the derivation writes nothing.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from enum import Enum
 from typing import Any
 
@@ -270,16 +270,6 @@ def _one_time_fees_due(
     return tuple(fee for fee in candidates if not already(fee))
 
 
-def first_charge_day(garage: Garage, agreement: Agreement) -> date:
-    """The day a first charge's invoice is keyed on (migration 0010): the start
-    day, or the day before it when the agreement starts on a period's first
-    day -- never a period's first day, so never the key of a period invoice."""
-    partial = period_containing(garage, agreement.start_day)
-    if agreement.start_day == partial.start_day:
-        return agreement.start_day - timedelta(days=1)
-    return agreement.start_day
-
-
 def issue_first_charge(
     connection: Any,
     tenant_id: Any,
@@ -298,8 +288,10 @@ def issue_first_charge(
     spot signed up. So the invoice carries every agreement of this payer at
     this home that starts on the same day and has no first charge yet --
     ``first_charge``'s two lines for each, kept separate -- and one
-    ``first_charges`` row for each. Asked again for any of them it is
-    ALREADY_ISSUED. A spot stored for the same payer and day AFTER that
+    ``first_charges`` row for each. The invoice is keyed on (payer, sign-up
+    day, first charge) -- its own key, so it never meets the payer's period
+    invoice or a first charge of another day (migration 0010). Asked again for
+    any of them it is ALREADY_ISSUED. A spot stored for the same payer and day AFTER that
     invoice was issued is refused by name (``REFUSAL_FIRST_CHARGE_DAY_ISSUED``),
     writing nothing: an issued invoice is never added to.
     """
@@ -337,7 +329,7 @@ def issue_first_charge(
     )
     partial = period_containing(garage, start_day)
     following = next_period_after(garage, partial)
-    day = first_charge_day(garage, item.agreement)
+    day = start_day  # the first charge's own key: (payer, sign-up day, first_charge)
     invoice = replace(
         first_charge(garage, item.agreement),
         issued_for_period_start=day,
@@ -356,7 +348,7 @@ def issue_first_charge(
                 cursor, tenant_id, taxed.invoice, position=taxed.position,
                 reference=reference, garage_uuid=home_uuid, payer_uuid=item.payer_uuid,
                 agreement_uuids={other.agreement.id: other.uuid for other in batch},
-                due_at=due_at, now=now,
+                due_at=due_at, now=now, first_charge=True,
             )
             for other in batch:
                 guarded_insert(
@@ -387,8 +379,9 @@ def issue_first_charge(
                            reference=reference)
         with tenant(connection, tenant_id) as cursor:
             cursor.execute(
-                "SELECT 1 FROM invoices i JOIN first_charges f ON f.invoice_id = i.id "
-                "WHERE i.garage_id = %s AND i.payer_id = %s AND i.period_start_day = %s",
+                "SELECT 1 FROM invoices i "
+                "WHERE i.garage_id = %s AND i.payer_id = %s AND i.period_start_day = %s "
+                "AND i.first_charge",
                 (home_uuid, item.payer_uuid, day),
             )
             day_taken_by_a_first_charge = cursor.fetchone() is not None
@@ -593,9 +586,11 @@ def run_billing(
 
 
 def _period_is_issued(cursor: Any, garage_uuid: Any, payer_uuid: Any, start_day: date) -> bool:
-    """The fact the period lock guards, read directly."""
+    """The fact the period lock guards, read directly: a PERIOD invoice, never a
+    first charge, which has its own key (migration 0010)."""
     cursor.execute(
-        "SELECT 1 FROM invoices WHERE garage_id = %s AND payer_id = %s AND period_start_day = %s",
+        "SELECT 1 FROM invoices WHERE garage_id = %s AND payer_id = %s AND period_start_day = %s "
+        "AND NOT first_charge",
         (garage_uuid, payer_uuid, start_day),
     )
     return cursor.fetchone() is not None
@@ -613,6 +608,7 @@ def _persist(
     agreement_uuids: dict[str, Any],
     due_at: datetime,
     now: datetime,
+    first_charge: bool = False,
 ) -> Any:
     """The invoice row -- with the tax position that priced it -- and its lines,
     through the chokepoint, in the caller's transaction. A tax line names no
@@ -633,6 +629,7 @@ def _persist(
             "subtotal_minor": position.subtotal_minor,
             "tax_set_effective_from": position.tax_set_effective_from,
             "tax_sets_seen": position.tax_sets_seen,
+            "first_charge": first_charge,
         },
     )
     (invoice_uuid,) = cursor.fetchone()

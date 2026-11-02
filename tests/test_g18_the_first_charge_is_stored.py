@@ -109,9 +109,10 @@ def test_the_run_bills_neither_stored_period_and_every_one_after(app, tenant_id)
 
 @pytest.mark.guarantee("G18")
 def test_a_start_on_the_billing_day_never_takes_the_payers_period_invoice_key(app, tenant_id):
-    """The invoice lock is one per payer per day. A first charge is keyed on
-    its start day, or the day before when it starts on a period's first day,
-    so the payer's other agreement is still invoiced for that period."""
+    """The invoice lock is one per payer, per day, per kind (migration 0010).
+    A first charge signed up on a billing day is keyed on that day as a first
+    charge, so the payer's other agreement is still invoiced for the period
+    that starts on it."""
     seed(app, tenant_id, GARAGE, (
         simple_agreement(start_day=date(2026, 1, 5)),
         simple_agreement(id="ag-0002", start_day=date(2026, 6, 30),
@@ -123,8 +124,9 @@ def test_a_start_on_the_billing_day_never_takes_the_payers_period_invoice_key(ap
                           now=_at(date(2026, 6, 30), 2)).lines
     assert line.outcome is RunOutcome.ISSUED, line
     assert query(app, tenant_id,
-                 "SELECT period_start_day FROM invoices ORDER BY period_start_day") == [
-        (date(2026, 6, 29),), (date(2026, 6, 30),)]
+                 "SELECT period_start_day, first_charge FROM invoices "
+                 "ORDER BY first_charge") == [
+        (date(2026, 6, 30), False), (date(2026, 6, 30), True)]
 
 
 def _store_version(app, tenant_id, seeded, agreement):
@@ -327,8 +329,8 @@ def test_a_spot_added_on_the_same_day_after_the_first_charge_is_refused_by_name(
     """An issued invoice is never added to (its subtotal and tax are fixed at
     issue), so a third spot stored for the same payer and day after the first
     charge was issued is refused by name, writing nothing -- never silently
-    left uncharged -- and the sentence says what the owner does: start it the
-    next day, which is its own first charge."""
+    left uncharged -- and the sentence says what the owner does: start it on a
+    day this payer has no first charge yet, which is its own first charge."""
     from monthly_billing.findings import REFUSAL_FIRST_CHARGE_DAY_ISSUED
 
     seeded = seed(app, tenant_id, GARAGE, (simple_agreement(start_day=START), _second_spot()))
@@ -358,3 +360,28 @@ def test_another_payer_on_the_same_day_has_its_own_first_charge(app, tenant_id):
     assert first.reference != other.reference
     assert query(app, tenant_id,
                  "SELECT count(DISTINCT invoice_id) FROM first_charges") == [(2,)]
+
+
+@pytest.mark.guarantee("G18")
+def test_spots_signed_up_on_consecutive_days_the_second_a_billing_day_are_both_charged(
+    app, tenant_id
+):
+    """One payer signs up a spot on June 29 and another on June 30, a billing
+    day. Under the day-before key both first charges were keyed June 29, so
+    the second was refused and a paying customer was left not covered past
+    grace. Each sign-up day is its own first-charge key now: both issue, both
+    are paid, both are covered."""
+    seed(app, tenant_id, GARAGE, (
+        simple_agreement(start_day=date(2026, 6, 29)),
+        simple_agreement(id="ag-0002", start_day=date(2026, 6, 30), vehicles=("CAR777",)),
+    ))
+    lines = [
+        issue_first_charge(app, tenant_id, "ag-0001", now=_at(date(2026, 6, 29), 8)),
+        issue_first_charge(app, tenant_id, "ag-0002", now=_at(date(2026, 6, 30), 8)),
+    ]
+    assert [line.outcome for line in lines] == [RunOutcome.ISSUED, RunOutcome.ISSUED], lines
+    for line in lines:
+        record_payment(app, tenant_id, line.reference, PaymentMethod.CHEQUE, line.total_minor,
+                       _at(date(2026, 7, 1)), recorded_by="operator")
+    for car in ("CAR001", "CAR777"):
+        assert covered_from_store(app, tenant_id, GARAGE.id, car, _at(date(2026, 7, 10))).covered

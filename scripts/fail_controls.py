@@ -424,13 +424,13 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
     ),
     "G17": (
         "tests/test_g17_the_run_issues_once.py",
-        "migrations/0002_billing_run_payments_and_reversals.sql",
+        "migrations/0010_first_charges.sql",
         source(
             "ALTER TABLE invoices",
             "  ADD CONSTRAINT invoices_one_per_payer_per_period",
-            "  UNIQUE (tenant_id, garage_id, payer_id, period_start_day);",
+            "  UNIQUE (tenant_id, garage_id, payer_id, period_start_day, first_charge);",
         ),
-        "-- PLANTED: the one-invoice-per-period constraint is gone",
+        "-- PLANTED: the one-invoice-per-period constraint is gone (0010 dropped 0002's)",
         "the period lock from 0002 is missing from the catalogue. The behavioural "
         "tests stay green -- the reference lock from 0001 still stops the duplicate, "
         "which is what having two independent locks means -- so this is caught by "
@@ -438,11 +438,11 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
     ),
     "G17/both-locks": (
         "tests/test_g17_the_run_issues_once.py",
-        "migrations/0002_billing_run_payments_and_reversals.sql",
+        "migrations/0010_first_charges.sql",
         source(
             "ALTER TABLE invoices",
             "  ADD CONSTRAINT invoices_one_per_payer_per_period",
-            "  UNIQUE (tenant_id, garage_id, payer_id, period_start_day);",
+            "  UNIQUE (tenant_id, garage_id, payer_id, period_start_day, first_charge);",
         ),
         source(
             "-- PLANTED: BOTH locks gone -- the period lock is never added and the",
@@ -518,6 +518,23 @@ CONTROLS: dict[str, tuple[str, str, str, str, str]] = {
         "        if False:  # PLANTED: a late spot is a bare constraint error",
         "a spot added to the same payer and day after the first charge was issued "
         "fails as a constraint error with no sentence for the owner",
+    ),
+    "G18/first-charge-own-key": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        '            "first_charge": first_charge,\n',
+        '            "first_charge": False,  # PLANTED: a first charge takes a period key\n',
+        "a first charge signed up on a billing day takes the key of the payer's period "
+        "invoice for that period, and one of the two is never issued",
+    ),
+    "G18/no-day-before-collision": (
+        "tests/test_g18_the_first_charge_is_stored.py",
+        "billing_run.py",
+        "    day = start_day  # the first charge's own key: (payer, sign-up day, first_charge)",
+        "    day = date.fromordinal(start_day.toordinal() - (start_day == partial.start_day))"
+        "  # PLANTED",
+        "the day-before key returns: spots signed up on consecutive days, the second on a "
+        "billing day, collide and the second paying customer is refused",
     ),
     "G19/reopen": (
         "tests/test_g19_paid_is_derived.py",
